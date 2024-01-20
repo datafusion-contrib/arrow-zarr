@@ -1,0 +1,35 @@
+[package]
+name = "arrow-zarr"
+version = "0.0.1"
+homepage = "https://github.com/datafusion-contrib/arrow-zarr"
+repository = "https://github.com/datafusion-contrib/arrow-zarr"
+authors = ["Maxime Dion <maxdion@gmail.com>"]
+license = "Apache-2.0"
+keywords = ["arrow"]
+edition = "2021"
+rust-version = "1.62"
+
+[dependencies]
+async-trait = { version = "0.1.53" }
+itertools = { version = "0.12.0"}
+regex = { version = "1.9.5" }
+serde_json = { version = "1.0.107" }
+serde = {version = "1.0.188", features = ["derive"]}
+flate2 = { version = "1.0.27"}
+bzip2 = { version = "0.4.4" }
+rust-lzma = { version = "0.6.0" }
+blosc = { version = "0.2.0" }
+object_store = { version = "0.9" }
+futures = { version = "0.3"}
+futures-util = { version = "0.3.30" }
+tokio = { version = "1.0" }
+dyn-clone = { version = "1.0.16" }
+arrow = { version = "50.0.0" }
+arrow-array = { version = "50.0.0" }
+arrow-buffer = { version = "50.0.0" }
+arrow-cast = { version = "50.0.0" }
+arrow-schema = { version = "50.0.0" }
+arrow-data = { version = "50.0.0" }
+
+[dev-dependencies]
+arrow-cast = { version = "50.0.0", features = ["prettyprint"] }
