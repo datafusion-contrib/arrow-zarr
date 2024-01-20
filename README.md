@@ -1,2 +1,2 @@
 # arrow-zarr
-Implementation of Zarr file format in Rust
+Implementation of sync and async Arrow readers for the Zarr data format.
