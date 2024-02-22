@@ -565,7 +565,5 @@ mod zarr_metadata_tests {
             "compressor": {"id": "blosc"}
         }"#;
         assert!(meta.add_column("var2".to_string(), &metadata_str).is_err());
-
-
     }
 }

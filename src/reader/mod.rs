@@ -79,6 +79,9 @@ mod zarr_read;
 mod errors;
 mod filters;
 
+// new metadata implementation
+mod metadata_v3;
+
 /// A zarr store that holds a reader for all the zarr data.
 pub struct ZarrStore<T: ZarrRead> {
     meta: ZarrStoreMetadata,
