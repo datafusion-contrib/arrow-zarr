@@ -65,3 +65,8 @@ impl From<Utf8Error> for ZarrError {
 
 /// A specialized [`Result`] for [`ZarrError`]s.
 pub type ZarrResult<T, E = ZarrError> = Result<T, E>;
+
+// a helper to raise invalid metadata errors
+pub(crate) fn throw_invalid_meta(err_str: &str) -> ZarrError {
+    ZarrError::InvalidMetadata(err_str.to_string())
+}

@@ -81,6 +81,7 @@ mod filters;
 
 // new metadata implementation
 mod metadata_v3;
+mod codecs;
 
 /// A zarr store that holds a reader for all the zarr data.
 pub struct ZarrStore<T: ZarrRead> {
@@ -283,7 +284,6 @@ fn build_array(buf: Vec<u8>, t: &DataType, s: usize) -> ZarrResult<ArrayRef> {
     };
 
     match t {
-        //DataType::Boolean => {return Ok(Arc::new(BooleanArray::from(data)))},
         DataType::UInt8 => return Ok(Arc::new(UInt8Array::from(data))),
         DataType::UInt16 => return Ok(Arc::new(UInt16Array::from(data))),
         DataType::UInt32 => return Ok(Arc::new(UInt32Array::from(data))),
