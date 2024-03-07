@@ -7,7 +7,7 @@
 //! # use std::path::PathBuf;
 //! #
 //! # fn get_test_data_path(zarr_store: String) -> PathBuf {
-//! #    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testing/data/zarr").join(zarr_store)
+//! #    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testing/data/zarr/v2_data").join(zarr_store)
 //! # }
 //! #
 //! # fn assert_batches_eq(batches: &[RecordBatch], expected_lines: &[&str]) {
@@ -57,31 +57,26 @@
 //! );
 //! ```
 
-use arrow_schema::{Field, FieldRef, Schema, DataType, TimeUnit};
+use arrow_schema::{Field, FieldRef, Schema, DataType};
 use arrow_array::*;
 use std::sync::Arc;
-use arrow_data::ArrayData;
-use arrow_buffer::Buffer;
-use arrow_buffer::ToByteSlice;
-use std::io::Read;
 use itertools::Itertools;
 
 use zarr_read::{ZarrRead, ZarrInMemoryArray};
-use metadata::{ZarrDataType,  CompressorType, Endianness, MatrixOrder, PY_UNICODE_SIZE};
+use codecs::apply_codecs;
 pub use zarr_read::{ZarrInMemoryChunk, ZarrProjection};
 pub use filters::{ZarrChunkFilter, ZarrArrowPredicate, ZarrArrowPredicateFn};
 pub use errors::{ZarrResult, ZarrError};
 pub use metadata::ZarrStoreMetadata;
 
-
-pub(crate) mod metadata;
+//pub(crate) mod metadata;
 mod zarr_read;
 mod errors;
 mod filters;
 
 // new metadata implementation
-mod metadata_v3;
-mod codecs;
+pub mod metadata;
+pub mod codecs;
 
 /// A zarr store that holds a reader for all the zarr data.
 pub struct ZarrStore<T: ZarrRead> {
@@ -153,275 +148,6 @@ impl<T: ZarrRead> ZarrIterator for ZarrStore<T> {
     }
 }
 
-fn build_field(t: &ZarrDataType, col_name: String) -> ZarrResult<(usize, FieldRef)> {
-    match t {
-        ZarrDataType::Bool => {
-            return Ok((1, Arc::new(Field::new(col_name, DataType::Boolean, false))))
-        },
-        ZarrDataType::UInt(s) => {
-            match s {
-                1 => {
-                    return Ok((1, Arc::new(Field::new(col_name, DataType::UInt8, false))))
-                },
-                2 => {
-                    return Ok((2, Arc::new(Field::new(col_name, DataType::UInt16, false))))
-                },
-                4 => {
-                    return Ok((4, Arc::new(Field::new(col_name, DataType::UInt32, false))))
-                },
-                8 => {
-                    return Ok((8, Arc::new(Field::new(col_name, DataType::UInt64, false))))
-                },
-                _ => {return Err(ZarrError::InvalidMetadata("Invalid data type".to_string()))}
-            }
-        },
-        ZarrDataType::Int(s) => {
-            match s {
-                1 => {
-                    return Ok((1, Arc::new(Field::new(col_name, DataType::Int8, false))))
-                },
-                2 => {
-                    return Ok((2, Arc::new(Field::new(col_name, DataType::Int16, false))))
-                },
-                4 => {
-                    return Ok((4, Arc::new(Field::new(col_name, DataType::Int32, false))))
-                },
-                8 => {
-                    return Ok((8, Arc::new(Field::new(col_name, DataType::Int64, false))))
-                },
-                _ => {return Err(ZarrError::InvalidMetadata("Invalid data type".to_string()))}
-            }
-        },
-        ZarrDataType::Float(s) => {
-            match s {
-                4 => {
-                    return Ok((4, Arc::new(Field::new(col_name, DataType::Float32, false))))
-                },
-                8 => {
-                    return Ok((8, Arc::new(Field::new(col_name, DataType::Float64, false))))
-                },
-                _ => {return Err(ZarrError::InvalidMetadata("Invalid data type".to_string()))}
-            }
-        },
-        ZarrDataType::FixedLengthString(s) => {
-            return Ok((*s, Arc::new(Field::new(col_name, DataType::Utf8, false))))
-        },
-        ZarrDataType::FixedLengthPyUnicode(s) => {
-            return Ok((*s, Arc::new(Field::new(col_name, DataType::Utf8, false))))
-        }
-        ZarrDataType::TimeStamp(8, u) => {
-            match u.as_str() {
-                "s" => {
-                    return Ok((
-                        8, 
-                        Arc::new(Field::new(
-                            col_name,
-                            DataType::Timestamp(TimeUnit::Second, None),
-                            false,
-                        )
-                    )))
-                },
-                "ms" => {
-                    return Ok((
-                        8, 
-                        Arc::new(Field::new(
-                            col_name,
-                            DataType::Timestamp(TimeUnit::Millisecond, None),
-                            false,
-                        )
-                    )))
-                },
-                "us" => {
-                    return Ok((
-                        8, 
-                        Arc::new(Field::new(
-                            col_name,
-                            DataType::Timestamp(TimeUnit::Microsecond, None),
-                            false,
-                        )
-                    )))
-                },
-                "ns" => {
-                    return Ok((
-                        8, 
-                        Arc::new(Field::new(
-                            col_name,
-                            DataType::Timestamp(TimeUnit::Nanosecond, None),
-                            false,
-                        )
-                    )))
-                }
-                _ => {return Err(ZarrError::InvalidMetadata("Invalid data type".to_string()))}
-            }
-        },
-        _ =>  {return Err(ZarrError::InvalidMetadata("Invalid data type".to_string()))}
-    }
-}
-
-fn build_array(buf: Vec<u8>, t: &DataType, s: usize) -> ZarrResult<ArrayRef> {
-    let data = match t {
-        DataType::Utf8 => {
-            ArrayData::builder(t.clone())
-            .len(buf.len() / s)
-            .add_buffer(
-                Buffer::from(
-                    (0..=buf.len()).step_by(s).map(|x| x as i32).collect::<Vec<i32>>().to_byte_slice()
-                )
-            )
-            .add_buffer(Buffer::from(buf))
-            .build()?
-        },
-        DataType::Boolean => {
-            let bool_buf: Vec<bool> = buf.iter().map(|x| *x != 0).collect();
-            return Ok(Arc::new(BooleanArray::from(bool_buf)))
-        }
-        _ => {
-            ArrayData::builder(t.clone())
-            .len(buf.len() / s)
-            .add_buffer(Buffer::from(buf))
-            .build()?
-        }
-    };
-
-    match t {
-        DataType::UInt8 => return Ok(Arc::new(UInt8Array::from(data))),
-        DataType::UInt16 => return Ok(Arc::new(UInt16Array::from(data))),
-        DataType::UInt32 => return Ok(Arc::new(UInt32Array::from(data))),
-        DataType::UInt64 => return Ok(Arc::new(UInt64Array::from(data))),
-        DataType::Int8 => return Ok(Arc::new(Int8Array::from(data))),
-        DataType::Int16 => return Ok(Arc::new(Int16Array::from(data))),
-        DataType::Int32 => return Ok(Arc::new(Int32Array::from(data))),
-        DataType::Int64 => return Ok(Arc::new(Int64Array::from(data))),
-        DataType::Float32 => return Ok(Arc::new(Float32Array::from(data))),
-        DataType::Float64 => return Ok(Arc::new(Float64Array::from(data))),
-        DataType::Utf8 => return Ok(Arc::new(StringArray::from(data))),
-        DataType::Timestamp(TimeUnit::Second, None) => {
-            return Ok(Arc::new(TimestampSecondArray::from(data)))
-        },
-        DataType::Timestamp(TimeUnit::Millisecond, None) => {
-            return Ok(Arc::new(TimestampMillisecondArray::from(data)))
-        },
-        DataType::Timestamp(TimeUnit::Microsecond, None) => {
-            return Ok(Arc::new(TimestampMicrosecondArray::from(data)))
-        },
-        DataType::Timestamp(TimeUnit::Nanosecond, None) => {
-            return Ok(Arc::new(TimestampNanosecondArray::from(data)))
-        },
-        _ => Err(ZarrError::InvalidMetadata("Invalid zarr datatype".to_string()))
-    }
-}
-
-fn decompress_blosc(chunk_data: &[u8], output: &mut [u8]) -> Result<(), ZarrError> {
-    output.copy_from_slice(unsafe { &blosc::decompress_bytes(chunk_data).unwrap() });
-    Ok(())
-}
-
-fn decompress_zlib(chunk_data: &[u8], output: &mut [u8]) -> Result<(), ZarrError> {
-    let mut z = flate2::read::ZlibDecoder::new(chunk_data);
-    z.read(output).unwrap();
-    Ok(())
-}
-
-fn decompress_bz2(chunk_data: &[u8], output: &mut [u8]) -> Result<(), ZarrError> {
-    bzip2::Decompress::new(false)
-        .decompress(chunk_data, output)
-        .unwrap();
-    Ok(())
-}
-
-fn decompress_lzma(chunk_data: &[u8], output: &mut [u8]) -> Result<(), ZarrError> {
-    let decomp_data = lzma::decompress(chunk_data).unwrap();
-    output.copy_from_slice(&decomp_data[..]);
-    Ok(())
-}
-fn decompress_array(
-    raw_data: Vec<u8>, uncompressed_size: usize, compressor_params: Option<&CompressorType>,
-) -> Vec<u8> {
-    if let Some(comp) = compressor_params {
-        let mut output: Vec<u8> = vec![0; uncompressed_size];
-        match comp {
-            CompressorType::Zlib => {
-                decompress_zlib(&raw_data, &mut output).unwrap();
-            }
-            CompressorType::Bz2 => {
-                decompress_bz2(&raw_data, &mut output).unwrap();
-            }
-            CompressorType::Lzma => {
-                decompress_lzma(&raw_data, &mut output).unwrap();
-            }
-            CompressorType::Blosc => {
-                decompress_blosc(&raw_data, &mut output).unwrap();
-            }
-        }
-        return output;
-    }
-    else {
-        return raw_data;
-    }
-}
-
-fn get_2d_dim_order(order: &MatrixOrder) -> [usize; 2] {
-    match order {
-        MatrixOrder::RowMajor => [0, 1],
-        MatrixOrder::ColumnMajor => [1, 0],
-    }
-}
-
-fn get_3d_dim_order(order: &MatrixOrder) -> [usize; 3] {
-    match order {
-        MatrixOrder::RowMajor => [0, 1, 2],
-        MatrixOrder::ColumnMajor => [2, 1, 0],
-    }
-}
-
-fn move_indices_to_front(buf: &mut [u8], indices: &Vec<usize>, data_size: usize) {
-    let mut output_idx = 0;
-    for data_idx in indices {
-        buf.copy_within(
-            data_idx * data_size..(data_idx + 1) * data_size,
-            output_idx * data_size
-        );
-        output_idx += 1;
-    }
-}
-
-fn process_edge_chunk(
-    buf: &mut [u8],
-    chunk_dims: &Vec<usize>,
-    real_dims: &Vec<usize>,
-    data_size: usize,
-    order: &MatrixOrder,
-) {
-    let indices_to_keep: Vec<usize>;
-
-    let n_dims = chunk_dims.len();
-    indices_to_keep = match n_dims {
-        1 => {(0..real_dims[0]).collect()},
-        2 => {
-            let [first_dim, second_dim] = get_2d_dim_order(order);
-            (0..real_dims[first_dim])
-                .cartesian_product(0..real_dims[second_dim])
-                .map(|t| t.0 * chunk_dims[1] + t.1)
-                .collect()
-        },
-        3 => {
-            let [first_dim, second_dim, third_dim] = get_3d_dim_order(order);
-            (0..real_dims[first_dim])
-            .cartesian_product(0..real_dims[second_dim])
-            .cartesian_product(0..real_dims[third_dim])
-            .map(|t| {
-                t.0 .0 * chunk_dims[1] * chunk_dims[2]
-                + t.0 .1 * chunk_dims[2]
-                + t.1
-            })
-            .collect()
-        },
-        _ => {panic!("Edge chunk with more than 3 domensions, 3 is the limit")}
-    };
-
-   move_indices_to_front(buf, &indices_to_keep, data_size);
-}
-
 /// A struct to read all the requested content from a zarr store, through the implementation
 /// of the [`Iterator`] trait, with [`Item = ZarrResult<RecordBatch>`]. Can only be created
 /// through a [`ZarrRecordBatchReaderBuilder`]. The data is read synchronously.
@@ -485,46 +211,21 @@ impl<T: ZarrIterator> ZarrRecordBatchReader<T>
     ) -> ZarrResult<(ArrayRef, FieldRef)> {
             // get the metadata for the array
             let meta = self.meta.get_array_meta(&col_name)?;
+            
+            // take the raw data from the chunk
+            let data = arr_chnk.take_data();
 
-            // get the field, data size and the data raw data from the array
-            let (mut data_size, field) = build_field(meta.get_type(), col_name)?;
-            let mut data = arr_chnk.take_data();
-
-            // uncompress the data
-            let chunk_size = chunk_dims.iter().fold(1, |mult, x| mult * x);
-            data = decompress_array(data, chunk_size * data_size, meta.get_compressor().as_ref());
-
-            // handle big endianness by converting to little endianness
-            if meta.get_endianness() == &Endianness::Big {
-                for idx in 0..chunk_size {
-                    data[idx*data_size..(idx+1)*data_size].reverse();
-                }
-            }
-
-            // handle edge chunks
-            if chunk_dims != real_dims {
-                process_edge_chunk(&mut data, chunk_dims, real_dims, data_size, meta.get_order());
-            }
-
-            // special case of Py Unicode, with 4 byte characters. Here we simply
-            // keep one byte, might need to be more robust, perhaps throw an error
-            // if the other 3 bytes are not 0s.
-            if let ZarrDataType::FixedLengthPyUnicode(_) = meta.get_type() {
-                data = data.iter().step_by(PY_UNICODE_SIZE).copied().collect();
-                data_size = data_size / PY_UNICODE_SIZE;
-            }
-
-            // create the array
-            let real_size = real_dims.iter().fold(1, |mult, x| mult * x) * data_size;
-            data.resize(real_size, 0);
-
-            // select the final indices in the data
-            if let Some(final_indices) = final_indices {
-                move_indices_to_front(&mut data, final_indices, data_size);
-                data.resize(final_indices.len() * data_size, 0);
-            }
-
-            let arr = build_array(data, field.data_type(), data_size)?;
+            // apply codecs and decode the raw data
+            let(arr, field) = apply_codecs(
+                col_name,
+                data,
+                &chunk_dims,
+                &real_dims,
+                meta.get_type(),
+                meta.get_codecs(),
+                meta.get_sharding_params(),
+                final_indices,
+            )?;
 
             Ok((arr, field))
     }
@@ -697,7 +398,7 @@ mod zarr_reader_tests {
     use crate::reader::filters::{ZarrArrowPredicateFn, ZarrArrowPredicate};
 
     fn get_test_data_path(zarr_store: String) -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testing/data/zarr").join(zarr_store)
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testing/data/zarr/v2_data").join(zarr_store)
     }
 
     fn validate_names_and_types(targets: &HashMap<String, DataType>, rec: &RecordBatch) {

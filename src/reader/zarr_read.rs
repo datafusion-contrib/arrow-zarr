@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::{read_to_string, read};
 use std::path::PathBuf;
 
+//use crate::reader::ZarrStoreMetadata;
 use crate::reader::ZarrStoreMetadata;
 use crate::reader::{ZarrError, ZarrResult};
 
@@ -210,10 +211,11 @@ mod zarr_read_tests {
     use std::collections::HashSet;
 
     use super::*;
-    use crate::reader::metadata::{ZarrDataType, MatrixOrder, Endianness, ZarrArrayMetadata};
+    use crate::reader::metadata::{ZarrArrayMetadata, ChunkSeparator};
+    use crate::reader::codecs::{ZarrCodec, ZarrDataType, Endianness};
 
     fn get_test_data_path(zarr_store: String) -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testing/data/zarr").join(zarr_store)
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testing/data/zarr/v2_data").join(zarr_store)
     }
 
     // read the store metadata, given a path to a zarr store.
@@ -225,22 +227,22 @@ mod zarr_read_tests {
         assert_eq!(meta.get_columns(), &vec!["byte_data", "float_data"]);
         assert_eq!(
             meta.get_array_meta("byte_data").unwrap(),
-            &ZarrArrayMetadata::new (
+            &ZarrArrayMetadata::new(
                 2,
                 ZarrDataType::UInt(1),
+                ChunkSeparator::Period,
                 None,
-                MatrixOrder::RowMajor,
-                Endianness::Little,
+                vec![ZarrCodec::Bytes(Endianness::Little)],
             )
         );
         assert_eq!(
             meta.get_array_meta("float_data").unwrap(),
-            &ZarrArrayMetadata::new (
+            &ZarrArrayMetadata::new(
                 2,
                 ZarrDataType::Float(8),
+                ChunkSeparator::Period,
                 None,
-                MatrixOrder::RowMajor,
-                Endianness::Little,
+                vec![ZarrCodec::Bytes(Endianness::Little)],
             )
         );
     }

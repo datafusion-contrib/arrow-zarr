@@ -16,7 +16,7 @@
 //! #
 //! # fn get_test_data_path(zarr_store: String) -> ZarrPath {
 //! #   let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-//! #                   .join("testing/data/zarr")
+//! #                   .join("testing/data/zarr/v2_data")
 //! #                   .join(zarr_store);
 //! #   ZarrPath::new(
 //! #       Arc::new(LocalFileSystem::new()),
@@ -78,9 +78,9 @@ use async_trait::async_trait;
 use futures_util::future::BoxFuture;
 use arrow_array::{RecordBatch, BooleanArray};
 
-use crate::reader::{ZarrProjection, ZarrInMemoryChunk};
+use crate::reader::{ZarrProjection, ZarrInMemoryChunk, ZarrStoreMetadata};
 use crate::reader::{ZarrResult, ZarrError};
-use crate::reader::{ZarrStoreMetadata, ZarrChunkFilter};
+use crate::reader::ZarrChunkFilter;
 use crate::reader::{unwrap_or_return, ZarrRecordBatchReader, ZarrIterator};
 
 pub use crate::async_reader::zarr_read_async::{ZarrPath, ZarrReadAsync};
@@ -468,7 +468,7 @@ mod zarr_async_reader_tests {
 
     fn get_test_data_path(zarr_store: String) -> ZarrPath {
         let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                        .join("testing/data/zarr")
+                        .join("testing/data/zarr/v2_data")
                         .join(zarr_store);
         ZarrPath::new(
             Arc::new(LocalFileSystem::new()),
@@ -621,7 +621,6 @@ mod zarr_async_reader_tests {
         validate_primitive_column::<Float64Type, f64>(
             &"float_data_no_comp", rec, &[227., 228., 229., 235., 236., 237., 243., 244., 245.]
         );
- 
 
         // bottom edge chunk
         let rec = &records2[2];

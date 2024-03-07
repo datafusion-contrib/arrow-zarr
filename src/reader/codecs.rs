@@ -2,11 +2,11 @@ use std::io::Read;
 use std::sync::Arc;
 use std::str::FromStr;
 use std::vec;
-use crate::reader::{decompress_array, ZarrError, ZarrResult};
+use crate::reader::{ZarrError, ZarrResult};
 use crate::reader::errors::throw_invalid_meta;
 use itertools::Itertools;
 use arrow_array::*;
-use arrow_schema::{Field, FieldRef, Schema, DataType, TimeUnit};
+use arrow_schema::{Field, FieldRef, DataType, TimeUnit};
 use flate2::read::GzDecoder;
 use crc32c::crc32c;
 
@@ -216,7 +216,7 @@ fn decode_transpose<T: Clone>(input: Vec<T>, chunk_dims: &Vec<usize>, order: &Ve
    Ok(new_indices.into_iter().map(move |idx| input[idx].clone()).collect::<Vec<T>>())
 }
 
-// this function only works of the indices to keep are ordered.
+// this function only works if the indices to keep are ordered.
 fn keep_indices<T: Clone + Default>(v: &mut Vec<T>, indices: &Vec<usize>) {
     let mut move_to: usize = 0;
     for i in indices.iter() {
@@ -464,8 +464,8 @@ macro_rules! create_decode_function {
             codecs: &Vec<ZarrCodec>,
             sharding_params: Option<ShardingOptions>,
         ) -> ZarrResult<Vec<$type>> {
-            let mut array_to_bytes_codec: Option<ZarrCodec> = None;
-            let mut array_to_array_codec: Option<ZarrCodec> = None;
+            let array_to_bytes_codec: Option<ZarrCodec>;
+            let array_to_array_codec: Option<ZarrCodec>;
             (bytes, array_to_bytes_codec, array_to_array_codec) = decode_bytes_to_bytes(&codecs, &bytes[..], &sharding_params)?;
 
             let mut data = Vec::new();
@@ -529,10 +529,18 @@ fn decode_string_chunk(
     real_dims: &Vec<usize>,
     codecs: &Vec<ZarrCodec>,
     sharding_params: Option<ShardingOptions>,
+    pyunicode: bool,
 ) -> ZarrResult<Vec<String>> {
-    let mut array_to_bytes_codec: Option<ZarrCodec> = None;
-        let mut array_to_array_codec: Option<ZarrCodec> = None;
+        let array_to_bytes_codec: Option<ZarrCodec>;
+        let array_to_array_codec: Option<ZarrCodec>;
         (bytes, array_to_bytes_codec, array_to_array_codec) = decode_bytes_to_bytes(&codecs, &bytes[..], &sharding_params)?;
+
+        // special case of Py Unicode, with 4 byte characters. Here we simply
+        // keep one byte, might need to be more robust, perhaps throw an error
+        // if the other 3 bytes are not 0s. Might also not work with big endian?
+        if pyunicode {
+            bytes = bytes.iter().step_by(PY_UNICODE_SIZE).copied().collect();
+        }
 
         let mut data = Vec::new();
         if let Some(sharding_params) = sharding_params.as_ref() {
@@ -552,11 +560,12 @@ fn decode_string_chunk(
                     &get_inner_chunk_real_dims(&sharding_params, &real_dims, pos), // TODO: fix this to real dims
                     &sharding_params.codecs,
                     None,
+                    pyunicode,
                 )?;
                 data.extend(inner_data);
             }
         } else {
-            if let Some(ZarrCodec::Bytes(e)) = array_to_bytes_codec {
+            if let Some(ZarrCodec::Bytes(_)) = array_to_bytes_codec {
                 data = bytes.chunks(str_len)
                             .into_iter()
                             .map(|arr| std::str::from_utf8(arr).unwrap().to_string())
@@ -582,33 +591,33 @@ fn decode_string_chunk(
 
 pub(crate) fn apply_codecs(
     col_name: String,
-    mut raw_data: Vec<u8>,
+    raw_data: Vec<u8>,
     chunk_dims: &Vec<usize>,
     real_dims: &Vec<usize>,
     data_type: &ZarrDataType,
     codecs: &Vec<ZarrCodec>,
-    sharding_params: Option<ShardingOptions>
+    sharding_params: Option<ShardingOptions>,
+    final_indices: Option<&Vec<usize>>,
 ) ->  ZarrResult<(ArrayRef, FieldRef)> {
     macro_rules! return_array {
         ($func_name: tt, $data_t: expr, $array_t: ty) => {
-            let data = $func_name(raw_data, &chunk_dims, &real_dims, &codecs, sharding_params)?;
+            let mut data = $func_name(raw_data, &chunk_dims, &real_dims, &codecs, sharding_params)?;
+            if let Some(indices) = final_indices {
+                keep_indices(&mut data, &indices);
+            };
             let field = Field::new(col_name, $data_t, false);
             let arr: $array_t = data.into();
             return Ok((Arc::new(arr), Arc::new(field)))
         }
     }
 
-    // special case of Py Unicode, with 4 byte characters. Here we simply
-    // keep one byte, might need to be more robust, perhaps throw an error
-    // if the other 3 bytes are not 0s. Might also not work with big endian?
-    if let ZarrDataType::FixedLengthPyUnicode(_) = data_type {
-        raw_data = raw_data.iter().step_by(PY_UNICODE_SIZE).copied().collect();
-    }
-
     match data_type {
         ZarrDataType::Bool => {
             let data = decode_u8_chunk(raw_data, &chunk_dims, &real_dims, &codecs, sharding_params)?;
-            let data: Vec<bool> = data.iter().map(|x| *x != 0).collect();
+            let mut data: Vec<bool> = data.iter().map(|x| *x != 0).collect();
+            if let Some(indices) = final_indices {
+                keep_indices(&mut data, &indices);
+            };
             let field = Field::new(col_name, DataType::Boolean, false);
             let arr: BooleanArray = data.into();
             return Ok((Arc::new(arr), Arc::new(field)));
@@ -648,11 +657,28 @@ pub(crate) fn apply_codecs(
             }
         },
         ZarrDataType::FixedLengthString(s) | ZarrDataType::FixedLengthPyUnicode(s) => {
-            let data = decode_string_chunk(raw_data, *s, &chunk_dims, &real_dims, &codecs, sharding_params)?;
+            let mut pyunicode = false;
+            let mut str_len_adjustment = 1;
+            if let ZarrDataType::FixedLengthPyUnicode(_) = data_type {
+                pyunicode = true;
+                str_len_adjustment = PY_UNICODE_SIZE;
+            }
+            let mut data = decode_string_chunk(
+                raw_data,
+                *s / str_len_adjustment,
+                &chunk_dims,
+                &real_dims,
+                &codecs,
+                sharding_params,
+                pyunicode,
+            )?;
+            if let Some(indices) = final_indices {
+                keep_indices(&mut data, &indices);
+            };
             let field = Field::new(col_name, DataType::Utf8, false);
             let arr: StringArray = data.into();
             return Ok((Arc::new(arr), Arc::new(field)));
-        }
+        },
         _ => {return Err(throw_invalid_meta("Invalid zarr data type"))}
     }
 }
@@ -697,7 +723,8 @@ mod zarr_codecs_tests {
             &real_dims,
             &data_type,
             &codecs,
-            sharding_params
+            sharding_params,
+            None,
         ).unwrap();
 
         assert_eq!(
@@ -750,7 +777,8 @@ mod zarr_codecs_tests {
             &real_dims,
             &data_type,
             &codecs,
-            sharding_params
+            sharding_params,
+            None,
         ).unwrap();
 
         assert_eq!(
@@ -803,7 +831,8 @@ mod zarr_codecs_tests {
             &real_dims,
             &data_type,
             &codecs,
-            sharding_params
+            sharding_params,
+            None,
         ).unwrap();
 
         assert_eq!(
