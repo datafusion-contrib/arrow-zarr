@@ -87,11 +87,11 @@ fn extract_type_v3(dtype: &str) -> ZarrResult<ZarrDataType> {
     }
     else if dtype.starts_with("int") {
         let size = dtype[3..dtype.len()].parse::<usize>().unwrap() / bits_per_byte;
-        return Ok(ZarrDataType::Float(size))
+        return Ok(ZarrDataType::Int(size))
     }
     else if dtype.starts_with("uint") {
         let size = dtype[4..dtype.len()].parse::<usize>().unwrap() / bits_per_byte;
-        return Ok(ZarrDataType::Float(size))
+        return Ok(ZarrDataType::UInt(size))
     }
 
     Err(ZarrError::InvalidMetadata("could not match type in zarr metadata".to_string()))
@@ -99,7 +99,7 @@ fn extract_type_v3(dtype: &str) -> ZarrResult<ZarrDataType> {
 
 // Enum for the chunk separator
 #[derive(Debug, PartialEq, Clone)]
-pub(crate) enum ChunkSeparator {
+pub enum ChunkSeparator {
     Slash,
     Period
 }
@@ -132,9 +132,6 @@ impl ZarrArrayMetadata {
         &self.data_type
     }
 
-    // allowing "unused" code here because this is useful to have for a
-    // couple unit tests defined outside of this module.
-    #[allow(dead_code)]
     pub(crate) fn new(
         zarr_format: u8,
         data_type: ZarrDataType,
@@ -157,6 +154,10 @@ impl ZarrArrayMetadata {
 
     pub(crate) fn get_sharding_params(&self) -> Option<ShardingOptions> {
         self.sharding_options.clone()
+    }
+
+    pub(crate) fn get_separator(&self) -> ChunkSeparator {
+        self.chunk_separator.clone()
     }
 }
 
@@ -394,9 +395,9 @@ fn extract_codec(config: &Value, last_type: &CodecType) -> ZarrResult<ZarrCodec>
             Ok((CodecType::BytesToBytes, ZarrCodec::Crc32c))
         },
         "gzip" => {
-            let l = extract_u64_from_json(config, "clevel", error_string)? as u8;
+            let l = extract_u64_from_json(config, "level", error_string)? as u8;
             Ok((CodecType::BytesToBytes, ZarrCodec::Gzip(l)))
-        }
+        },
         "transpose" => {
             let o = extract_usize_array_from_json(config, "order", error_string)?;
             Ok((CodecType::ArrayToArray, ZarrCodec::Transpose(o)))
@@ -568,13 +569,13 @@ impl ZarrStoreMetadata {
         }
 
         // finally create the zarr array metadata and insert it in params
-        let array_meta = ZarrArrayMetadata{
-            zarr_format: 3,
-            data_type: data_type,
-            chunk_separator: chunk_key_encoding,
-            sharding_options: sharding_options,
-            codecs: codecs,
-        };
+        let array_meta = ZarrArrayMetadata::new(
+            3,
+            data_type,
+            chunk_key_encoding,
+            sharding_options,
+            codecs,
+        );
 
         self.columns.push(col_name.to_string());
         self.array_params.insert(col_name, array_meta);
@@ -670,6 +671,15 @@ impl ZarrStoreMetadata {
 
     pub(crate) fn get_chunk_dims(&self) -> &Vec<usize> {
         self.chunks.as_ref().unwrap()
+    }
+
+    pub(crate) fn get_separators(&self) -> HashMap<String, ChunkSeparator> {
+        let mut m = HashMap::new();
+        for col in &self.columns {
+            m.insert(col.to_string(), self.get_array_meta(&col).unwrap().get_separator());
+        }
+
+        return m;
     }
 }
 

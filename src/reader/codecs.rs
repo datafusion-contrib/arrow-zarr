@@ -266,7 +266,7 @@ fn apply_bytes_to_bytes_codec(codec: &ZarrCodec, bytes: &[u8]) -> ZarrResult<Vec
     match codec {
         ZarrCodec::Gzip(_) => {
             let mut decoder = GzDecoder::new(bytes);
-            decoder.read(&mut decompressed_bytes)?;
+            decoder.read_to_end(&mut decompressed_bytes)?;
         },
         ZarrCodec::BloscCompressor(_) => {
             decompressed_bytes = unsafe { blosc::decompress_bytes(bytes).unwrap() };
@@ -696,7 +696,7 @@ mod zarr_codecs_tests {
     // reading a chunk and decoding it using hard coded, known options. this test
     // doesn't included any sharding.
     #[test]
-    fn unpack_no_sharding() {
+    fn no_sharding_tests() {
         let path = get_test_data_path("no_sharding.zarr/int_data/c/1/1".to_string());
         let raw_data = read(path).unwrap();
 
@@ -739,8 +739,8 @@ mod zarr_codecs_tests {
     // reading a chunk and decoding it using hard coded, known options. this test
     // includes sharding.
     #[test]
-    fn unpack_with_sharding() {
-        let path = get_test_data_path("with_sharding.zarr/sharded_float_data/1.1".to_string());
+    fn with_sharding_tests() {
+        let path = get_test_data_path("with_sharding.zarr/float_data/1.1".to_string());
         let raw_data = read(path).unwrap();
 
         let chunk_shape = vec![4, 4];
@@ -771,7 +771,7 @@ mod zarr_codecs_tests {
         );
 
         let (arr, field) = apply_codecs(
-            "sharded_float_data".to_string(),
+            "float_data".to_string(),
             raw_data,
             &chunk_shape,
             &real_dims,
@@ -783,7 +783,7 @@ mod zarr_codecs_tests {
 
         assert_eq!(
             field,
-            Arc::new(Field::new("sharded_float_data", DataType::Float64, false))
+            Arc::new(Field::new("float_data", DataType::Float64, false))
         );
         let target_arr: Float64Array = vec![36.0, 37.0, 44.0, 45.0, 38.0, 39.0, 46.0, 47.0,
                                             52.0, 53.0, 60.0, 61.0, 54.0, 55.0, 62.0, 63.0,].into();
@@ -793,8 +793,8 @@ mod zarr_codecs_tests {
     // reading a chunk and decoding it using hard coded, known options. this test
     // includes sharding, and the shape doesn't exactly line up with the chunks.
     #[test]
-    fn unpack_with_sharding_with_edge() {
-        let path = get_test_data_path("with_sharding.zarr/sharded_uint_edge_data/1.1".to_string());
+    fn with_sharding_with_edge_tests() {
+        let path = get_test_data_path("with_sharding_with_edge.zarr/uint_data/1.1".to_string());
         let raw_data = read(path).unwrap();
 
         let chunk_shape = vec![4, 4];
@@ -825,7 +825,7 @@ mod zarr_codecs_tests {
         );
 
         let (arr, field) = apply_codecs(
-            "sharded_uint_edge_data".to_string(),
+            "uint_data".to_string(),
             raw_data,
             &chunk_shape,
             &real_dims,
@@ -837,7 +837,7 @@ mod zarr_codecs_tests {
 
         assert_eq!(
             field,
-            Arc::new(Field::new("sharded_uint_edge_data", DataType::UInt16, false))
+            Arc::new(Field::new("uint_data", DataType::UInt16, false))
         );
         let target_arr: UInt16Array = vec![32, 33, 39, 40, 34, 41, 46, 47, 48,].into();
         assert_eq!(*arr, target_arr);

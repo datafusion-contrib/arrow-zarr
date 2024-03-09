@@ -48,7 +48,7 @@ impl ZarrReadAsync for ZarrPath {
         while let Some(p) = stream.next().await {
             let p = p?.location;
             if let Some(s) = p.filename() {
-                if s == ".zarray"{
+                if s == ".zarray" || s == "zarr.json" {
                     if let Some(mut dir_name) = p.prefix_match(&self.location) {
                         let array_name = dir_name.next().unwrap().as_ref().to_string();
                         let meta_bytes = self.store.get(&p).await?.bytes().await?;

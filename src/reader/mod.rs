@@ -132,7 +132,7 @@ impl<T: ZarrRead> ZarrIterator for ZarrStore<T> {
         let cols = unwrap_or_return!(cols);
 
         let chnk = self.zarr_reader.get_zarr_chunk(
-            pos, &cols, self.meta.get_real_dims(pos),
+            pos, &cols, self.meta.get_real_dims(pos), self.meta.get_separators()
         )
         ;
         self.curr_chunk += 1;
@@ -397,10 +397,6 @@ mod zarr_reader_tests {
     use super::*;
     use crate::reader::filters::{ZarrArrowPredicateFn, ZarrArrowPredicate};
 
-    fn get_test_data_path(zarr_store: String) -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testing/data/zarr/v2_data").join(zarr_store)
-    }
-
     fn validate_names_and_types(targets: &HashMap<String, DataType>, rec: &RecordBatch) {
         let mut target_cols: Vec<&String> = targets.keys().collect();
         let schema = rec.schema();
@@ -465,9 +461,16 @@ mod zarr_reader_tests {
         assert!(matched);
     }
 
+    //**************************
+    // zarr format v2 tests
+    //**************************
+    fn get_v2_test_data_path(zarr_store: String) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testing/data/zarr/v2_data").join(zarr_store)
+    }
+
     #[test]
     fn compression_tests() {
-        let p = get_test_data_path("compression_example.zarr".to_string());
+        let p = get_v2_test_data_path("compression_example.zarr".to_string());
         let reader = ZarrRecordBatchReaderBuilder::new(p).build().unwrap();
         let records: Vec<RecordBatch> = reader.map(|x| x.unwrap()).collect();
 
@@ -518,7 +521,7 @@ mod zarr_reader_tests {
 
     #[test]
     fn projection_tests() {
-        let p = get_test_data_path("compression_example.zarr".to_string());
+        let p = get_v2_test_data_path("compression_example.zarr".to_string());
         let proj = ZarrProjection::keep(vec!["bool_data".to_string(), "int_data".to_string()]);
         let builder = ZarrRecordBatchReaderBuilder::new(p).with_projection(proj);
         let reader = builder.build().unwrap();
@@ -538,7 +541,7 @@ mod zarr_reader_tests {
 
     #[test]
     fn multiple_readers_tests() {
-        let p = get_test_data_path("compression_example.zarr".to_string());
+        let p = get_v2_test_data_path("compression_example.zarr".to_string());
         let reader1 = ZarrRecordBatchReaderBuilder::new(p.clone()).build_partial_reader(Some((0, 5))).unwrap();
         let reader2 = ZarrRecordBatchReaderBuilder::new(p).build_partial_reader(Some((5, 9))).unwrap();
 
@@ -585,7 +588,7 @@ mod zarr_reader_tests {
 
     #[test]
     fn endianness_and_order_tests() {
-        let p = get_test_data_path("endianness_and_order_example.zarr".to_string());
+        let p = get_v2_test_data_path("endianness_and_order_example.zarr".to_string());
         let reader = ZarrRecordBatchReaderBuilder::new(p).build().unwrap();
         let records: Vec<RecordBatch> = reader.map(|x| x.unwrap()).collect();
 
@@ -603,7 +606,7 @@ mod zarr_reader_tests {
 
     #[test]
     fn string_data_tests() {
-        let p = get_test_data_path("string_example.zarr".to_string());
+        let p = get_v2_test_data_path("string_example.zarr".to_string());
         let reader = ZarrRecordBatchReaderBuilder::new(p).build().unwrap();
         let records: Vec<RecordBatch> = reader.map(|x| x.unwrap()).collect();
 
@@ -623,7 +626,7 @@ mod zarr_reader_tests {
 
     #[test]
     fn ts_data_tests() {
-        let p = get_test_data_path("ts_example.zarr".to_string());
+        let p = get_v2_test_data_path("ts_example.zarr".to_string());
         let reader = ZarrRecordBatchReaderBuilder::new(p).build().unwrap();
         let records: Vec<RecordBatch> = reader.map(|x| x.unwrap()).collect();
 
@@ -669,7 +672,7 @@ mod zarr_reader_tests {
 
     #[test]
     fn one_dim_tests() {
-        let p = get_test_data_path("one_dim_example.zarr".to_string());
+        let p = get_v2_test_data_path("one_dim_example.zarr".to_string());
         let reader = ZarrRecordBatchReaderBuilder::new(p).build().unwrap();
         let records: Vec<RecordBatch> = reader.map(|x| x.unwrap()).collect();
 
@@ -693,7 +696,7 @@ mod zarr_reader_tests {
 
     #[test]
     fn three_dim_tests() {
-        let p = get_test_data_path("three_dim_example.zarr".to_string());
+        let p = get_v2_test_data_path("three_dim_example.zarr".to_string());
         let reader = ZarrRecordBatchReaderBuilder::new(p).build().unwrap();
         let records: Vec<RecordBatch> = reader.map(|x| x.unwrap()).collect();
 
@@ -738,7 +741,7 @@ mod zarr_reader_tests {
 
     #[test]
     fn filters_tests() {
-        let p = get_test_data_path("lat_lon_example.zarr".to_string());
+        let p = get_v2_test_data_path("lat_lon_example.zarr".to_string());
         let mut builder = ZarrRecordBatchReaderBuilder::new(p);
 
         // set the filters to select part of the raster, based on lat and
@@ -817,7 +820,7 @@ mod zarr_reader_tests {
 
     #[test]
     fn empty_query_tests() {
-        let p = get_test_data_path("lat_lon_example.zarr".to_string());
+        let p = get_v2_test_data_path("lat_lon_example.zarr".to_string());
         let mut builder = ZarrRecordBatchReaderBuilder::new(p);
 
         // set a filter that will filter out all the data, there should be nothing left after
@@ -837,5 +840,131 @@ mod zarr_reader_tests {
 
         // there should be no records, because of the filter.
         assert_eq!(records.len(), 0);
+    }
+
+    //**************************
+    // zarr format v3 tests
+    //**************************
+    fn get_v3_test_data_path(zarr_store: String) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testing/data/zarr/v3_data").join(zarr_store)
+    }
+
+    #[test]
+    fn no_sharding_tests() {
+        let p = get_v3_test_data_path("no_sharding.zarr".to_string());
+        let builder = ZarrRecordBatchReaderBuilder::new(p);
+
+        let reader = builder.build().unwrap();
+        let records: Vec<RecordBatch> = reader.map(|x| x.unwrap()).collect();
+
+        let target_types = HashMap::from([("int_data".to_string(), DataType::Int32)]);
+
+        let rec = &records[1];
+        validate_names_and_types(&target_types, rec);
+        validate_primitive_column::<Int32Type, i32>(
+            &"int_data", rec, &[4, 5, 6, 7, 20, 21, 22, 23, 36, 37, 38, 39, 52, 53, 54, 55]
+        );
+    }
+
+    #[test]
+    fn no_sharding_with_edge_tests() {
+        let p = get_v3_test_data_path("no_sharding_with_edge.zarr".to_string());
+        let builder = ZarrRecordBatchReaderBuilder::new(p);
+
+        let reader = builder.build().unwrap();
+        let records: Vec<RecordBatch> = reader.map(|x| x.unwrap()).collect();
+
+        let target_types = HashMap::from([
+            ("float_data".to_string(), DataType::Float32),
+            ("uint_data".to_string(), DataType::UInt64),
+        ]);
+
+        let rec = &records[3];
+        validate_names_and_types(&target_types, rec);
+        validate_primitive_column::<Float32Type, f32>(
+            &"float_data", rec, &[12.0, 13.0, 14.0, 27.0, 28.0, 29.0, 42.0, 43.0, 44.0, 57.0, 58.0, 59.0]
+        );
+        validate_primitive_column::<UInt64Type, u64>(
+            &"uint_data", rec, &[12, 13, 14, 27, 28, 29, 42, 43, 44, 57, 58, 59]
+        );
+    }
+
+    #[test]
+    fn with_sharding_tests() {
+        let p = get_v3_test_data_path("with_sharding.zarr".to_string());
+        let builder = ZarrRecordBatchReaderBuilder::new(p);
+
+        let reader = builder.build().unwrap();
+        let records: Vec<RecordBatch> = reader.map(|x| x.unwrap()).collect();
+
+        let target_types = HashMap::from([
+            ("float_data".to_string(), DataType::Float64),
+            ("int_data".to_string(), DataType::Int64),
+        ]);
+
+        let rec = &records[2];
+        validate_names_and_types(&target_types, rec);
+        validate_primitive_column::<Float64Type, f64>(
+            &"float_data", rec, &[32.0, 33.0, 40.0, 41.0, 34.0, 35.0, 42.0, 43.0, 48.0, 49.0, 56.0, 57.0, 50.0, 51.0, 58.0, 59.0]
+        );
+        validate_primitive_column::<Int64Type, i64>(
+            &"int_data", rec, &[32, 33, 40, 41, 34, 35, 42, 43, 48, 49, 56, 57, 50, 51, 58, 59]
+        );
+    }
+
+    #[test]
+    fn with_sharding_with_edge_tests() {
+        let p = get_v3_test_data_path("with_sharding_with_edge.zarr".to_string());
+        let builder = ZarrRecordBatchReaderBuilder::new(p);
+
+        let reader = builder.build().unwrap();
+        let records: Vec<RecordBatch> = reader.map(|x| x.unwrap()).collect();
+
+        let target_types = HashMap::from([("uint_data".to_string(), DataType::UInt16)]);
+
+        let rec = &records[1];
+        validate_names_and_types(&target_types, rec);
+        validate_primitive_column::<UInt16Type, u16>(
+            &"uint_data", rec, &[4, 5, 11, 12, 6, 13, 18, 19, 25, 26, 20, 27]
+        );
+    }
+
+    #[test]
+    fn three_dims_no_sharding_with_edge_tests() {
+        let p = get_v3_test_data_path("no_sharding_with_edge_3d.zarr".to_string());
+        let builder = ZarrRecordBatchReaderBuilder::new(p);
+
+        let reader = builder.build().unwrap();
+        let records: Vec<RecordBatch> = reader.map(|x| x.unwrap()).collect();
+
+        let target_types = HashMap::from([("uint_data".to_string(), DataType::UInt64)]);
+
+        let rec = &records[5];
+        validate_names_and_types(&target_types, rec);
+        validate_primitive_column::<UInt64Type, u64>(
+            &"uint_data", rec, &[14, 19, 39, 44]
+        );
+    }
+
+    #[test]
+    fn three_dims_with_sharding_with_edge_tests() {
+        let p = get_v3_test_data_path("with_sharding_with_edge_3d.zarr".to_string());
+        let builder = ZarrRecordBatchReaderBuilder::new(p);
+
+        let reader = builder.build().unwrap();
+        let records: Vec<RecordBatch> = reader.map(|x| x.unwrap()).collect();
+
+        let target_types = HashMap::from([("float_data".to_string(), DataType::Float64)]);
+
+        let rec = &records[23];
+        validate_names_and_types(&target_types, rec);
+        validate_primitive_column::<Float64Type, f64>(
+            &"float_data", rec, &[1020.0, 1021.0, 1031.0, 1032.0, 1141.0, 1142.0,
+                                  1152.0, 1153.0, 1022.0, 1033.0, 1143.0, 1154.0,
+                                  1042.0, 1043.0, 1053.0, 1054.0, 1163.0, 1164.0,
+                                  1174.0, 1175.0, 1044.0, 1055.0, 1165.0, 1176.0,
+                                  1262.0, 1263.0, 1273.0, 1274.0, 1264.0, 1275.0,
+                                  1284.0, 1285.0, 1295.0, 1296.0, 1286.0, 1297.0]
+        );
     }
 }
