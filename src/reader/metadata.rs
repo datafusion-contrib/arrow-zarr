@@ -981,7 +981,7 @@ mod zarr_metadata_v3_tests {
             meta.array_params["var1"],
             ZarrArrayMetadata {
                 zarr_format: 3,
-                data_type: ZarrDataType::Float(4),
+                data_type: ZarrDataType::Int(4),
                 chunk_separator: ChunkSeparator::Slash,
                 sharding_options: None,
                 codecs: vec![
@@ -1044,7 +1044,7 @@ mod zarr_metadata_v3_tests {
             meta.array_params["var2"],
             ZarrArrayMetadata {
                 zarr_format: 3,
-                data_type: ZarrDataType::Float(4),
+                data_type: ZarrDataType::Int(4),
                 chunk_separator: ChunkSeparator::Period,
                 sharding_options: Some(
                     ShardingOptions::new(
