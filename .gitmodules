@@ -1,0 +1,3 @@
+[submodule "test-data"]
+	path = test-data
+	url = https://github.com/datafusion-contrib/test-data.git
