@@ -16,7 +16,7 @@
 //! #
 //! # fn get_test_data_path(zarr_store: String) -> ZarrPath {
 //! #   let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-//! #                   .join("testing/data/zarr")
+//! #                   .join("testing/data/zarr/v2_data")
 //! #                   .join(zarr_store);
 //! #   ZarrPath::new(
 //! #       Arc::new(LocalFileSystem::new()),
@@ -78,9 +78,9 @@ use async_trait::async_trait;
 use futures_util::future::BoxFuture;
 use arrow_array::{RecordBatch, BooleanArray};
 
-use crate::reader::{ZarrProjection, ZarrInMemoryChunk};
+use crate::reader::{ZarrProjection, ZarrInMemoryChunk, ZarrStoreMetadata};
 use crate::reader::{ZarrResult, ZarrError};
-use crate::reader::{ZarrStoreMetadata, ZarrChunkFilter};
+use crate::reader::ZarrChunkFilter;
 use crate::reader::{unwrap_or_return, ZarrRecordBatchReader, ZarrIterator};
 
 pub use crate::async_reader::zarr_read_async::{ZarrPath, ZarrReadAsync};
@@ -466,9 +466,9 @@ mod zarr_async_reader_tests {
     use crate::async_reader::zarr_read_async::ZarrPath;
     use crate::reader::{ZarrArrowPredicateFn, ZarrArrowPredicate};
 
-    fn get_test_data_path(zarr_store: String) -> ZarrPath {
+    fn get_v2_test_data_path(zarr_store: String) -> ZarrPath {
         let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                        .join("testing/data/zarr")
+                        .join("testing/data/zarr/v2_data")
                         .join(zarr_store);
         ZarrPath::new(
             Arc::new(LocalFileSystem::new()),
@@ -528,7 +528,7 @@ mod zarr_async_reader_tests {
 
     #[tokio::test]
     async fn projection_tests() {
-        let zp = get_test_data_path("compression_example.zarr".to_string());
+        let zp = get_v2_test_data_path("compression_example.zarr".to_string());
         let proj = ZarrProjection::keep(vec!["bool_data".to_string(), "int_data".to_string()]);
         let stream_builder = ZarrRecordBatchStreamBuilder::new(zp).with_projection(proj);
 
@@ -574,7 +574,7 @@ mod zarr_async_reader_tests {
         );
         filters.push(Box::new(f));
 
-        let zp = get_test_data_path("lat_lon_example.zarr".to_string());
+        let zp = get_v2_test_data_path("lat_lon_example.zarr".to_string());
         let stream_builder = ZarrRecordBatchStreamBuilder::new(zp).with_filter(ZarrChunkFilter::new(filters));
         let stream = stream_builder.build().await.unwrap();
         let records: Vec<_> = stream.try_collect().await.unwrap();
@@ -594,7 +594,7 @@ mod zarr_async_reader_tests {
 
     #[tokio::test]
     async fn multiple_readers_tests() {
-        let zp = get_test_data_path("compression_example.zarr".to_string());
+        let zp = get_v2_test_data_path("compression_example.zarr".to_string());
         let stream1 = ZarrRecordBatchStreamBuilder::new(zp.clone()).build_partial_reader(Some((0, 5))).await.unwrap();
         let stream2 = ZarrRecordBatchStreamBuilder::new(zp).build_partial_reader(Some((5, 9))).await.unwrap();
 
@@ -621,7 +621,6 @@ mod zarr_async_reader_tests {
         validate_primitive_column::<Float64Type, f64>(
             &"float_data_no_comp", rec, &[227., 228., 229., 235., 236., 237., 243., 244., 245.]
         );
- 
 
         // bottom edge chunk
         let rec = &records2[2];
@@ -639,7 +638,7 @@ mod zarr_async_reader_tests {
 
     #[tokio::test]
     async fn empty_query_tests() {
-        let zp = get_test_data_path("lat_lon_example.zarr".to_string());
+        let zp = get_v2_test_data_path("lat_lon_example.zarr".to_string());
         let mut builder = ZarrRecordBatchStreamBuilder::new(zp);
 
         // set a filter that will filter out all the data, there should be nothing left after
@@ -659,5 +658,60 @@ mod zarr_async_reader_tests {
 
         // there should be no records, because of the filter.
         assert_eq!(records.len(), 0);
+    }
+
+    fn get_v3_test_data_path(zarr_store: String) -> ZarrPath {
+        let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                        .join("testing/data/zarr/v3_data")
+                        .join(zarr_store);
+        ZarrPath::new(
+            Arc::new(LocalFileSystem::new()),
+            Path::from_absolute_path(p).unwrap()
+        )
+    }
+
+    #[tokio::test]
+    async fn with_sharding_tests() {
+        let zp = get_v3_test_data_path("with_sharding.zarr".to_string());
+        let stream_builder = ZarrRecordBatchStreamBuilder::new(zp);
+
+        let stream = stream_builder.build().await.unwrap();
+        let records: Vec<_> = stream.try_collect().await.unwrap();
+
+        let target_types = HashMap::from([
+            ("float_data".to_string(), DataType::Float64),
+            ("int_data".to_string(), DataType::Int64),
+        ]);
+
+        let rec = &records[2];
+        validate_names_and_types(&target_types, rec);
+        validate_primitive_column::<Float64Type, f64>(
+            &"float_data", rec, &[32.0, 33.0, 40.0, 41.0, 34.0, 35.0, 42.0, 43.0, 48.0, 49.0, 56.0, 57.0, 50.0, 51.0, 58.0, 59.0]
+        );
+        validate_primitive_column::<Int64Type, i64>(
+            &"int_data", rec, &[32, 33, 40, 41, 34, 35, 42, 43, 48, 49, 56, 57, 50, 51, 58, 59]
+        );
+    }
+
+    #[tokio::test]
+    async fn three_dims_with_sharding_with_edge_tests() {
+        let zp = get_v3_test_data_path("with_sharding_with_edge_3d.zarr".to_string());
+        let stream_builder = ZarrRecordBatchStreamBuilder::new(zp);
+
+        let stream = stream_builder.build().await.unwrap();
+        let records: Vec<_> = stream.try_collect().await.unwrap();
+
+        let target_types = HashMap::from([("float_data".to_string(), DataType::Float64)]);
+
+        let rec = &records[23];
+        validate_names_and_types(&target_types, rec);
+        validate_primitive_column::<Float64Type, f64>(
+            &"float_data", rec, &[1020.0, 1021.0, 1031.0, 1032.0, 1141.0, 1142.0,
+                                  1152.0, 1153.0, 1022.0, 1033.0, 1143.0, 1154.0,
+                                  1042.0, 1043.0, 1053.0, 1054.0, 1163.0, 1164.0,
+                                  1174.0, 1175.0, 1044.0, 1055.0, 1165.0, 1176.0,
+                                  1262.0, 1263.0, 1273.0, 1274.0, 1264.0, 1275.0,
+                                  1284.0, 1285.0, 1295.0, 1296.0, 1286.0, 1297.0]
+        );
     }
 }

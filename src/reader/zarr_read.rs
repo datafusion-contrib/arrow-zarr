@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::{read_to_string, read};
 use std::path::PathBuf;
 
+use crate::reader::metadata::ChunkSeparator;
 use crate::reader::ZarrStoreMetadata;
 use crate::reader::{ZarrError, ZarrResult};
 
@@ -153,6 +154,7 @@ pub trait ZarrRead {
         position: &Vec<usize>,
         cols: &Vec<String>,
         real_dims: Vec<usize>,
+        separators: HashMap<String, ChunkSeparator>,
     ) -> ZarrResult<ZarrInMemoryChunk>;
 }
 
@@ -165,7 +167,13 @@ impl ZarrRead for PathBuf {
 
         for dir_entry in dir {
             let dir_entry = dir_entry?;
-            let p = dir_entry.path().join(".zarray");
+
+            // try both v2 (.zarray) and v3 (zarr.json)
+            let mut p = dir_entry.path().join(".zarray");
+            if !p.exists() {
+                p = dir_entry.path().join("zarr.json");
+            }
+
             if p.exists() {
                 let meta_str = read_to_string(p)?;
                 meta.add_column(
@@ -186,12 +194,24 @@ impl ZarrRead for PathBuf {
         position: &Vec<usize>,
         cols: &Vec<String>,
         real_dims: Vec<usize>,
+        separators: HashMap<String, ChunkSeparator>,
     ) -> ZarrResult<ZarrInMemoryChunk> {
         let mut chunk = ZarrInMemoryChunk::new(real_dims);
         for var in cols {
             let s: Vec<String> = position.into_iter().map(|i| i.to_string()).collect();
-            let s = s.join(".");
-            let path = self.join(var).join(s);
+            let chunk_file: String;
+            let separator = separators.get(var.as_str()).ok_or(
+                ZarrError::InvalidMetadata("Could not find separator for column".to_string())
+            )?;
+            match separator {
+                ChunkSeparator::Period => {
+                    chunk_file = s.join(".");
+                },
+                ChunkSeparator::Slash => {
+                    chunk_file = "c/".to_string() + &s.join("/");
+                }
+            }
+            let path = self.join(var).join(chunk_file);
 
             if !path.exists() {
                 return Err(ZarrError::MissingChunk(position.clone()))
@@ -210,10 +230,11 @@ mod zarr_read_tests {
     use std::collections::HashSet;
 
     use super::*;
-    use crate::reader::metadata::{ZarrDataType, MatrixOrder, Endianness, ZarrArrayMetadata};
+    use crate::reader::metadata::{ZarrArrayMetadata, ChunkSeparator};
+    use crate::reader::codecs::{ZarrCodec, ZarrDataType, Endianness};
 
     fn get_test_data_path(zarr_store: String) -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testing/data/zarr").join(zarr_store)
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testing/data/zarr/v2_data").join(zarr_store)
     }
 
     // read the store metadata, given a path to a zarr store.
@@ -225,22 +246,22 @@ mod zarr_read_tests {
         assert_eq!(meta.get_columns(), &vec!["byte_data", "float_data"]);
         assert_eq!(
             meta.get_array_meta("byte_data").unwrap(),
-            &ZarrArrayMetadata::new (
+            &ZarrArrayMetadata::new(
                 2,
                 ZarrDataType::UInt(1),
+                ChunkSeparator::Period,
                 None,
-                MatrixOrder::RowMajor,
-                Endianness::Little,
+                vec![ZarrCodec::Bytes(Endianness::Little)],
             )
         );
         assert_eq!(
             meta.get_array_meta("float_data").unwrap(),
-            &ZarrArrayMetadata::new (
+            &ZarrArrayMetadata::new(
                 2,
                 ZarrDataType::Float(8),
+                ChunkSeparator::Period,
                 None,
-                MatrixOrder::RowMajor,
-                Endianness::Little,
+                vec![ZarrCodec::Bytes(Endianness::Little)],
             )
         );
     }
@@ -255,7 +276,10 @@ mod zarr_read_tests {
         // test read from an array where the data is just raw bytes
         let pos = vec![1, 2];
         let chunk = p.get_zarr_chunk(
-            &pos, meta.get_columns(), meta.get_real_dims(&pos)
+            &pos,
+            meta.get_columns(),
+            meta.get_real_dims(&pos),
+            meta.get_separators(),
         ).unwrap();
         assert_eq!(
             chunk.data.keys().collect::<HashSet<&String>>(),
@@ -269,14 +293,15 @@ mod zarr_read_tests {
         // test selecting only one of the 2 columns
         let col_proj = ZarrProjection::skip(vec!["float_data".to_string()]);
         let cols = col_proj.apply_selection(meta.get_columns()).unwrap();
-        let chunk = p.get_zarr_chunk(&pos, &cols, meta.get_real_dims(&pos)).unwrap();
+        let chunk = p.get_zarr_chunk(&pos, &cols, meta.get_real_dims(&pos), meta.get_separators()).unwrap();
         assert_eq!(chunk.data.keys().collect::<Vec<&String>>(), vec!["byte_data"]);
 
         // same as above, but specify columsn to keep instead of to skip
         let col_proj = ZarrProjection::keep(vec!["float_data".to_string()]);
         let cols = col_proj.apply_selection(meta.get_columns()).unwrap();
         let chunk = p.get_zarr_chunk(
-            &pos, &cols, meta.get_real_dims(&pos)).unwrap();
+            &pos, &cols, meta.get_real_dims(&pos), meta.get_separators()
+        ).unwrap();
         assert_eq!(chunk.data.keys().collect::<Vec<&String>>(), vec!["float_data"]);
     }
 }

@@ -3,7 +3,7 @@ use object_store::{ObjectStore, path::Path};
 use std::sync::Arc;
 use futures_util::{pin_mut, StreamExt};
 
-use crate::reader::{ZarrStoreMetadata, ZarrInMemoryChunk};
+use crate::reader::{ZarrInMemoryChunk, ZarrStoreMetadata};
 use crate::reader::{ZarrResult, ZarrError};
 
 /// A trait that exposes methods to get data from a zarr store asynchronously.
@@ -38,6 +38,8 @@ impl ZarrPath{
     }
 }
 
+/// Implementation of the [`ZarrReadAsync`] trait for a [`ZarrPath`] which contains the
+/// object store that the data will be read from.
 #[async_trait]
 impl ZarrReadAsync for ZarrPath {
     async fn get_zarr_metadata(&self) -> ZarrResult<ZarrStoreMetadata> {
@@ -48,7 +50,7 @@ impl ZarrReadAsync for ZarrPath {
         while let Some(p) = stream.next().await {
             let p = p?.location;
             if let Some(s) = p.filename() {
-                if s == ".zarray"{
+                if s == ".zarray" || s == "zarr.json" {
                     if let Some(mut dir_name) = p.prefix_match(&self.location) {
                         let array_name = dir_name.next().unwrap().as_ref().to_string();
                         let meta_bytes = self.store.get(&p).await?.bytes().await?;
@@ -85,8 +87,6 @@ impl ZarrReadAsync for ZarrPath {
     }
 }
 
-
-
 #[cfg(test)]
 mod zarr_read_async_tests {
     use object_store::{path::Path, local::LocalFileSystem};
@@ -95,12 +95,13 @@ mod zarr_read_async_tests {
     use std::collections::HashSet;
 
     use super::*;
-    use crate::reader::metadata::{ZarrDataType, MatrixOrder, Endianness, ZarrArrayMetadata};
+    use crate::reader::metadata::{ZarrArrayMetadata, ChunkSeparator};
+    use crate::reader::codecs::{ZarrCodec, ZarrDataType, Endianness};
     use crate::reader::ZarrProjection;
 
     fn get_test_data_file_system() -> LocalFileSystem {
         LocalFileSystem::new_with_prefix(
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testing/data/zarr")
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testing/data/zarr/v2_data")
         ).unwrap()
     }
 
@@ -115,22 +116,22 @@ mod zarr_read_async_tests {
         assert_eq!(meta.get_columns(), &vec!["byte_data", "float_data"]);
         assert_eq!(
             meta.get_array_meta("byte_data").unwrap(),
-            &ZarrArrayMetadata::new (
+            &ZarrArrayMetadata::new(
                 2,
                 ZarrDataType::UInt(1),
+                ChunkSeparator::Period,
                 None,
-                MatrixOrder::RowMajor,
-                Endianness::Little,
+                vec![ZarrCodec::Bytes(Endianness::Little)],
             )
         );
         assert_eq!(
             meta.get_array_meta("float_data").unwrap(),
-            &ZarrArrayMetadata::new (
+            &ZarrArrayMetadata::new(
                 2,
                 ZarrDataType::Float(8),
+                ChunkSeparator::Period,
                 None,
-                MatrixOrder::RowMajor,
-                Endianness::Little,
+                vec![ZarrCodec::Bytes(Endianness::Little)],
             )
         );
     }
