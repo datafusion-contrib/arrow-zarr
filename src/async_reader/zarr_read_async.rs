@@ -38,6 +38,8 @@ impl ZarrPath{
     }
 }
 
+/// Implementation of the [`ZarrReadAsync`] trait for a [`ZarrPath`] which contains the
+/// object store that the data will be read from.
 #[async_trait]
 impl ZarrReadAsync for ZarrPath {
     async fn get_zarr_metadata(&self) -> ZarrResult<ZarrStoreMetadata> {
@@ -84,8 +86,6 @@ impl ZarrReadAsync for ZarrPath {
         Ok(chunk)
     }
 }
-
-
 
 #[cfg(test)]
 mod zarr_read_async_tests {

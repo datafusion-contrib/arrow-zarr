@@ -165,7 +165,9 @@ impl ZarrArrayMetadata {
 /// holding the metadata for all of the arrays and the parameters
 /// that have to be consistent across all the arrays. Notably, all the
 /// arrays must have the same number of chunks and the chunks must all
-/// be of the same size.
+/// be of the same size. For zarr v3, either all or none of the arrays can
+/// be sharded (with the same sharding params), can't mix some shareded arrays
+/// with arrays that are not sharded.
 #[derive(Debug, PartialEq, Clone)]
 pub struct ZarrStoreMetadata {
     columns: Vec<String>,
@@ -189,6 +191,7 @@ impl ZarrStoreMetadata {
     }
 }
 
+// several helper functions to extract data from the matadata json object.
 fn extract_string_from_json(map: &Value, key: &str, err_str: &str) -> ZarrResult<String> {
     let res = map.get(key)
                  .ok_or(ZarrError::InvalidMetadata(err_str.to_string()))?
@@ -358,6 +361,7 @@ impl ZarrStoreMetadata {
     }
 }
 
+// some more helpers for zarr format v3
 fn extract_config (map: &Value) -> ZarrResult<(String, &Value)> {
     let name = extract_string_from_json(&map, "name", "can't retrieve name of configuration")?;
     let config = map.get("configuration");
@@ -584,8 +588,8 @@ impl ZarrStoreMetadata {
     }
 }
 
-/// Method to populate zarr metadata from zarr arrays metadata, works with either
-/// zarr_format version 2 or 3.
+// Method to populate zarr metadata from zarr arrays metadata, works with either
+// zarr_format version 2 or 3.
 impl ZarrStoreMetadata {
     pub(crate) fn add_column(&mut self, col_name: String, metadata_str: &str) -> ZarrResult<()> {
         let meta_map: Value = serde_json::from_str(metadata_str).or(

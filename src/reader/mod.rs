@@ -69,14 +69,12 @@ pub use filters::{ZarrChunkFilter, ZarrArrowPredicate, ZarrArrowPredicateFn};
 pub use errors::{ZarrResult, ZarrError};
 pub use metadata::ZarrStoreMetadata;
 
-//pub(crate) mod metadata;
 mod zarr_read;
 mod errors;
 mod filters;
 
-// new metadata implementation
-pub mod metadata;
-pub mod codecs;
+pub(crate) mod metadata;
+pub(crate) mod codecs;
 
 /// A zarr store that holds a reader for all the zarr data.
 pub struct ZarrStore<T: ZarrRead> {

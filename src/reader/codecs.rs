@@ -10,7 +10,7 @@ use arrow_schema::{Field, FieldRef, DataType, TimeUnit};
 use flate2::read::GzDecoder;
 use crc32c::crc32c;
 
-// Type enum and a few traits for the metadata of a zarr array
+// Type enum and for the various support zarr types
 #[derive(Debug, PartialEq, Clone)]
 pub(crate) enum ZarrDataType {
     Bool,
@@ -163,6 +163,7 @@ impl ShardingOptions {
     }
 }
 
+// enum for all the supported codecs
 #[derive(Debug, PartialEq, Clone)]
 pub(crate) enum ZarrCodec {
     Transpose(Vec<usize>),
@@ -191,6 +192,7 @@ impl ZarrCodec {
     }
 }
 
+// function to decode data that was encoded using a transpose codec
 fn decode_transpose<T: Clone>(input: Vec<T>, chunk_dims: &Vec<usize>, order: &Vec<usize>) -> ZarrResult<Vec<T>> {
     let new_indices: Vec<_> = match order.len() {
         2 => {
@@ -216,7 +218,8 @@ fn decode_transpose<T: Clone>(input: Vec<T>, chunk_dims: &Vec<usize>, order: &Ve
    Ok(new_indices.into_iter().map(move |idx| input[idx].clone()).collect::<Vec<T>>())
 }
 
-// this function only works if the indices to keep are ordered.
+// function to only keep the data at the specified indices from a vector.
+// it function only works if the indices to keep are ordered.
 fn keep_indices<T: Clone + Default>(v: &mut Vec<T>, indices: &Vec<usize>) {
     let mut move_to: usize = 0;
     for i in indices.iter() {
@@ -228,6 +231,9 @@ fn keep_indices<T: Clone + Default>(v: &mut Vec<T>, indices: &Vec<usize>) {
     v.resize(indices.len(), T::default());
 }
 
+// if a chunk doesn't exactly line up with the edge of an array, drop any
+// "phantom" data that is just there for the chunk to be complete but is not
+// actually part of the data stored in the array.
 fn process_edge_chunk<T: Clone + Default>(
     buf: &mut Vec<T>,
     chunk_dims: &Vec<usize>,
@@ -261,6 +267,7 @@ fn process_edge_chunk<T: Clone + Default>(
     keep_indices(buf, &indices_to_keep);
 }
 
+// decode data that was encoded with a bytes to bytes codec.
 fn apply_bytes_to_bytes_codec(codec: &ZarrCodec, bytes: &[u8]) -> ZarrResult<Vec<u8>> {
     let mut decompressed_bytes = Vec::new();
     match codec {
@@ -287,6 +294,9 @@ fn apply_bytes_to_bytes_codec(codec: &ZarrCodec, bytes: &[u8]) -> ZarrResult<Vec
     Ok(decompressed_bytes)
 }
 
+
+// decode data that was encoded with a sequence of bytes to bytes codedcs, and return
+// the array to bytes codec and array to array codec that come after, if they are present.
 fn decode_bytes_to_bytes(
     codecs: &Vec<ZarrCodec>, bytes: &[u8], sharding_params: &Option<ShardingOptions>
 ) -> ZarrResult<(Vec<u8>, Option<ZarrCodec>, Option<ZarrCodec>)> {
@@ -323,6 +333,7 @@ fn decode_bytes_to_bytes(
     Ok((decompressed_bytes.unwrap(), array_to_bytes_codec, array_to_array_codec))
 }
 
+// macro to decode data by applying bytes to type conversions.
 macro_rules! convert_bytes {
     ($bytes: expr, $e: expr, $type: ty, 1) => {
         if $e == &Endianness::Little {
@@ -384,11 +395,12 @@ macro_rules! convert_bytes {
     };
 }
 
+// extract the indices for the positions of the inner chunks within a shard.
 fn extract_sharding_index(index_codecs: &Vec<ZarrCodec>, mut bytes: Vec<u8>) -> ZarrResult<(Vec<usize>, Vec<usize>)> {
     // here we are simplifying things, the codecs must include one endianness codec, and
     // optionally one checksum codec. while technically this could change in the future,
     // for now it's the recommended approach, and I think the only one that makes sense,
-    // so nothing else will be allow here, it makes things much easier.
+    // so nothing else will be allowed here, it makes things much easier.
     if index_codecs.len() > 2 {
         return Err(throw_invalid_meta("too many sharding index codecs"))
     }
@@ -420,6 +432,8 @@ fn extract_sharding_index(index_codecs: &Vec<ZarrCodec>, mut bytes: Vec<u8>) -> 
     Ok((offsets, nbytes))
 }
 
+// determine the real dimensions (different from the chunk dimensions if the chunk doesn't exactly
+// line up with the edge of the array) for an inner chunk within a shard.
 fn get_inner_chunk_real_dims(params: &ShardingOptions, outer_real_dims: &Vec<usize>, pos: usize) -> Vec<usize> {
     if &params.chunk_shape == outer_real_dims {
         return params.chunk_shape.clone();
@@ -455,6 +469,7 @@ fn get_inner_chunk_real_dims(params: &ShardingOptions, outer_real_dims: &Vec<usi
     return real_dims;
 }
 
+// a macro that instantiates functions to decode different data types
 macro_rules! create_decode_function {
     ($func_name: tt, $type: ty, $byte_size: tt) => {
         fn $func_name(
@@ -522,6 +537,7 @@ create_decode_function!(decode_i64_chunk, i64, 8);
 create_decode_function!(decode_f32_chunk, f32, 4);
 create_decode_function!(decode_f64_chunk, f64, 8);
 
+// a separate function to decode string data
 fn decode_string_chunk(
     mut bytes: Vec<u8>,
     str_len: usize,
@@ -588,7 +604,7 @@ fn decode_string_chunk(
         return Ok(data);
 }
 
-
+// the entry point for this module, the only function that is meant to be called from other modules
 pub(crate) fn apply_codecs(
     col_name: String,
     raw_data: Vec<u8>,
