@@ -1,21 +1,13 @@
-use std::collections::HashMap;
-use serde_json::{Value, json};
-use regex::Regex;
-use std::str::FromStr;
-use itertools::Itertools;
-use crate::reader::{ZarrError, ZarrResult};
 use crate::reader::codecs::{
-    CodecType,
-    ZarrCodec,
-    BloscOptions,
-    ShardingOptions,
-    ShuffleOptions,
-    CompressorName,
-    Endianness,
-    IndexLocation,
-    ZarrDataType,
-    PY_UNICODE_SIZE,
+    BloscOptions, CodecType, CompressorName, Endianness, IndexLocation, ShardingOptions,
+    ShuffleOptions, ZarrCodec, ZarrDataType, PY_UNICODE_SIZE,
 };
+use crate::reader::{ZarrError, ZarrResult};
+use itertools::Itertools;
+use regex::Regex;
+use serde_json::{json, Value};
+use std::collections::HashMap;
+use std::str::FromStr;
 
 use super::errors::throw_invalid_meta;
 
@@ -33,43 +25,62 @@ fn extract_type_v2(dtype: &str) -> ZarrResult<ZarrDataType> {
 
     if str_re.is_match(dtype) {
         let str_len = dtype[2..dtype.len()].parse::<usize>().unwrap();
-        return Ok(ZarrDataType::FixedLengthString(str_len))
+        return Ok(ZarrDataType::FixedLengthString(str_len));
     }
 
     if uni_re.is_match(dtype) {
         let str_len = dtype[2..dtype.len()].parse::<usize>().unwrap();
-        return Ok(ZarrDataType::FixedLengthPyUnicode(PY_UNICODE_SIZE * str_len))
+        return Ok(ZarrDataType::FixedLengthPyUnicode(
+            PY_UNICODE_SIZE * str_len,
+        ));
     }
 
-    if let Some(capt) = ts_re.captures(&dtype) {
+    if let Some(capt) = ts_re.captures(dtype) {
         return Ok(ZarrDataType::TimeStamp(
             8,
-            capt.get(3).unwrap().as_str().strip_prefix("[").unwrap().strip_suffix("]").unwrap().to_string(),
-        ))
+            capt.get(3)
+                .unwrap()
+                .as_str()
+                .strip_prefix('[')
+                .unwrap()
+                .strip_suffix(']')
+                .unwrap()
+                .to_string(),
+        ));
     }
 
     // all other types should have a length of 3
     if dtype.len() != 3 {
-        return Err(ZarrError::InvalidMetadata("could not match type in zarr metadata".to_string()))
+        return Err(ZarrError::InvalidMetadata(
+            "could not match type in zarr metadata".to_string(),
+        ));
     }
 
-    if let Some(_capt) = bool_re.captures(&dtype) {
-        return Ok(ZarrDataType::Bool)
+    if let Some(_capt) = bool_re.captures(dtype) {
+        return Ok(ZarrDataType::Bool);
     }
 
-    if let Some(capt) = uint_re.captures(&dtype) {
-        return Ok(ZarrDataType::UInt(capt.get(3).unwrap().as_str().parse::<usize>().unwrap()))
+    if let Some(capt) = uint_re.captures(dtype) {
+        return Ok(ZarrDataType::UInt(
+            capt.get(3).unwrap().as_str().parse::<usize>().unwrap(),
+        ));
     }
 
-    if let Some(capt) = int_re.captures(&dtype) {
-        return Ok(ZarrDataType::Int(capt.get(3).unwrap().as_str().parse::<usize>().unwrap()))
+    if let Some(capt) = int_re.captures(dtype) {
+        return Ok(ZarrDataType::Int(
+            capt.get(3).unwrap().as_str().parse::<usize>().unwrap(),
+        ));
     }
 
-    if let Some(capt) = float_re.captures(&dtype) {
-        return Ok(ZarrDataType::Float(capt.get(3).unwrap().as_str().parse::<usize>().unwrap()))
+    if let Some(capt) = float_re.captures(dtype) {
+        return Ok(ZarrDataType::Float(
+            capt.get(3).unwrap().as_str().parse::<usize>().unwrap(),
+        ));
     }
 
-    Err(ZarrError::InvalidMetadata("could not match type in zarr metadata".to_string()))
+    Err(ZarrError::InvalidMetadata(
+        "could not match type in zarr metadata".to_string(),
+    ))
 }
 
 // TODO: need to check for other types, not quite clear from the docs yet.
@@ -77,31 +88,30 @@ fn extract_type_v2(dtype: &str) -> ZarrResult<ZarrDataType> {
 // by this library), but handling invalid types could be improved.
 fn extract_type_v3(dtype: &str) -> ZarrResult<ZarrDataType> {
     let bits_per_byte = 8;
-    
+
     if dtype == "bool" {
-        return Ok(ZarrDataType::Bool)
-    }
-    else if dtype.starts_with("float") {
+        return Ok(ZarrDataType::Bool);
+    } else if dtype.starts_with("float") {
         let size = dtype[5..dtype.len()].parse::<usize>().unwrap() / bits_per_byte;
-        return Ok(ZarrDataType::Float(size))
-    }
-    else if dtype.starts_with("int") {
+        return Ok(ZarrDataType::Float(size));
+    } else if dtype.starts_with("int") {
         let size = dtype[3..dtype.len()].parse::<usize>().unwrap() / bits_per_byte;
-        return Ok(ZarrDataType::Int(size))
-    }
-    else if dtype.starts_with("uint") {
+        return Ok(ZarrDataType::Int(size));
+    } else if dtype.starts_with("uint") {
         let size = dtype[4..dtype.len()].parse::<usize>().unwrap() / bits_per_byte;
-        return Ok(ZarrDataType::UInt(size))
+        return Ok(ZarrDataType::UInt(size));
     }
 
-    Err(ZarrError::InvalidMetadata("could not match type in zarr metadata".to_string()))
+    Err(ZarrError::InvalidMetadata(
+        "could not match type in zarr metadata".to_string(),
+    ))
 }
 
 // Enum for the chunk separator
 #[derive(Debug, PartialEq, Clone)]
 pub enum ChunkSeparator {
     Slash,
-    Period
+    Period,
 }
 
 impl FromStr for ChunkSeparator {
@@ -111,7 +121,9 @@ impl FromStr for ChunkSeparator {
         match input {
             "/" => Ok(ChunkSeparator::Slash),
             "." => Ok(ChunkSeparator::Period),
-            _ => Err(ZarrError::InvalidMetadata("Invalid chunk separator".to_string()))
+            _ => Err(ZarrError::InvalidMetadata(
+                "Invalid chunk separator".to_string(),
+            )),
         }
     }
 }
@@ -144,7 +156,7 @@ impl ZarrArrayMetadata {
             data_type,
             chunk_separator,
             sharding_options,
-            codecs
+            codecs,
         }
     }
 
@@ -174,9 +186,8 @@ pub struct ZarrStoreMetadata {
     chunks: Option<Vec<usize>>,
     shape: Option<Vec<usize>>,
     last_chunk_idx: Option<Vec<usize>>,
-    array_params: HashMap<String, ZarrArrayMetadata>
+    array_params: HashMap<String, ZarrArrayMetadata>,
 }
-
 
 impl ZarrStoreMetadata {
     // creates an empty store metadata structure.
@@ -193,54 +204,68 @@ impl ZarrStoreMetadata {
 
 // several helper functions to extract data from the matadata json object.
 fn extract_string_from_json(map: &Value, key: &str, err_str: &str) -> ZarrResult<String> {
-    let res = map.get(key)
-                 .ok_or(ZarrError::InvalidMetadata(err_str.to_string()))?
-                 .as_str()
-                 .ok_or(ZarrError::InvalidMetadata(err_str.to_string()))?;
+    let res = map
+        .get(key)
+        .ok_or(ZarrError::InvalidMetadata(err_str.to_string()))?
+        .as_str()
+        .ok_or(ZarrError::InvalidMetadata(err_str.to_string()))?;
     Ok(res.to_string())
 }
 
 fn extract_u64_from_json(map: &Value, key: &str, err_str: &str) -> ZarrResult<u64> {
-    let res = map.get(key)
-                 .ok_or(ZarrError::InvalidMetadata(err_str.to_string()))?
-                 .as_u64()
-                 .ok_or(ZarrError::InvalidMetadata(err_str.to_string()))?;
+    let res = map
+        .get(key)
+        .ok_or(ZarrError::InvalidMetadata(err_str.to_string()))?
+        .as_u64()
+        .ok_or(ZarrError::InvalidMetadata(err_str.to_string()))?;
     Ok(res)
 }
 
 fn extract_usize_array_from_json(map: &Value, key: &str, err_str: &str) -> ZarrResult<Vec<usize>> {
-    let arr: Vec<usize> = map.get(key)
-                             .ok_or(ZarrError::InvalidMetadata(err_str.to_string()))?
-                             .as_array()
-                             .ok_or(ZarrError::InvalidMetadata(err_str.to_string()))?
-                             .iter()
-                             .map(|v| v.as_u64().unwrap() as usize)
-                             .collect();
+    let arr: Vec<usize> = map
+        .get(key)
+        .ok_or(ZarrError::InvalidMetadata(err_str.to_string()))?
+        .as_array()
+        .ok_or(ZarrError::InvalidMetadata(err_str.to_string()))?
+        .iter()
+        .map(|v| v.as_u64().unwrap() as usize)
+        .collect();
     Ok(arr)
 }
 
 fn extract_arr_and_check(
-    map: &Value, key: &str, err_str: &str, curr: &Option<Vec<usize>>) -> ZarrResult<Vec<usize>> {
+    map: &Value,
+    key: &str,
+    err_str: &str,
+    curr: &Option<Vec<usize>>,
+) -> ZarrResult<Vec<usize>> {
     let arr = extract_usize_array_from_json(map, key, err_str)?;
 
     if let Some(curr) = curr {
         if curr != &arr {
-            return Err(ZarrError::InvalidMetadata(err_str.to_string()))
+            return Err(ZarrError::InvalidMetadata(err_str.to_string()));
         }
     }
     if arr.len() > 3 {
-        return Err(ZarrError::InvalidMetadata(err_str.to_string()))
+        return Err(ZarrError::InvalidMetadata(err_str.to_string()));
     }
 
     Ok(arr)
 }
 
-fn extract_compressor_params_v2(params_map: &serde_json::Value, dtype: &ZarrDataType) -> ZarrResult<BloscOptions> {
+fn extract_compressor_params_v2(
+    params_map: &serde_json::Value,
+    dtype: &ZarrDataType,
+) -> ZarrResult<BloscOptions> {
     let error_string = "error parsing metadata compressor";
-    let id = params_map.get("id").ok_or(ZarrError::InvalidMetadata(error_string.to_string()))?;
+    let id = params_map
+        .get("id")
+        .ok_or(ZarrError::InvalidMetadata(error_string.to_string()))?;
 
     if id != "blosc" {
-        return Err(ZarrError::InvalidMetadata("only blosc compressor is supported for v2".to_string()))
+        return Err(ZarrError::InvalidMetadata(
+            "only blosc compressor is supported for v2".to_string(),
+        ));
     }
 
     let cname = extract_string_from_json(params_map, "cname", error_string)?;
@@ -251,15 +276,10 @@ fn extract_compressor_params_v2(params_map: &serde_json::Value, dtype: &ZarrData
         0 => Ok(ShuffleOptions::Noshuffle),
         1 => Ok(ShuffleOptions::ByteShuffle(dtype.get_byte_size())),
         2 => Ok(ShuffleOptions::BitShuffle(dtype.get_byte_size())),
-        _ => Err(throw_invalid_meta("invalid compressor shuffle option"))
+        _ => Err(throw_invalid_meta("invalid compressor shuffle option")),
     }?;
 
-    let comp = BloscOptions::new(
-        CompressorName::from_str(&cname)?,
-        clevel as u8,
-        shuffle,
-        0
-    );
+    let comp = BloscOptions::new(CompressorName::from_str(&cname)?, clevel as u8, shuffle, 0);
 
     Ok(comp)
 }
@@ -278,23 +298,25 @@ impl ZarrStoreMetadata {
         // parse shape
         let error_string = "error parsing metadata shape";
         let shape = extract_arr_and_check(&meta_map, "shape", error_string, &self.shape)?;
-        
+
         if chunks.len() != shape.len() {
-            return Err(ZarrError::InvalidMetadata("chunk and shape dimensions must match".to_string()))
+            return Err(ZarrError::InvalidMetadata(
+                "chunk and shape dimensions must match".to_string(),
+            ));
         }
 
         if self.shape.is_none() {
             self.shape = Some(shape.clone());
-        } 
+        }
 
         // the index of the last chunk in each dimension
         if self.last_chunk_idx.is_none() {
             self.last_chunk_idx = Some(
                 chunks
-                .iter()
-                .zip(&shape)
-                .map(|(&chnk, &shp)| (shp as f64 / chnk as f64).ceil() as usize- 1)
-                .collect()
+                    .iter()
+                    .zip(&shape)
+                    .map(|(&chnk, &shp)| (shp as f64 / chnk as f64).ceil() as usize - 1)
+                    .collect(),
             );
         }
 
@@ -307,11 +329,11 @@ impl ZarrStoreMetadata {
         let endianness = match dtype.chars().next().unwrap() {
             '<' | '|' => Endianness::Little,
             '>' => Endianness::Big,
-            _ => return Err(
-                ZarrError::InvalidMetadata(
-                    "error parsing endianness from metadata datatype".to_string()
-                )
-            ),
+            _ => {
+                return Err(ZarrError::InvalidMetadata(
+                    "error parsing endianness from metadata datatype".to_string(),
+                ))
+            }
         };
 
         // parser order
@@ -323,8 +345,9 @@ impl ZarrStoreMetadata {
         // compressor params
         let error_string = "error parsing metadata compressor";
         let mut comp: Option<BloscOptions> = None;
-        let comp_params = meta_map.get("compressor")
-                                  .ok_or(ZarrError::InvalidMetadata(error_string.to_string()))?;
+        let comp_params = meta_map
+            .get("compressor")
+            .ok_or(ZarrError::InvalidMetadata(error_string.to_string()))?;
         if !comp_params.is_null() {
             comp = Some(extract_compressor_params_v2(comp_params, &data_type)?);
         }
@@ -334,8 +357,7 @@ impl ZarrStoreMetadata {
         if order == 'F' {
             if dim == 2 {
                 codecs.push(ZarrCodec::Transpose(vec![1, 0]));
-            }
-            else if dim == 3 {
+            } else if dim == 3 {
                 codecs.push(ZarrCodec::Transpose(vec![2, 1, 0]));
             }
         }
@@ -346,12 +368,12 @@ impl ZarrStoreMetadata {
         }
 
         // finally create the zarr array metadata and insert it in params
-        let array_meta = ZarrArrayMetadata{
+        let array_meta = ZarrArrayMetadata {
             zarr_format: 2,
-            data_type: data_type,
+            data_type,
             chunk_separator: ChunkSeparator::Period,
             sharding_options: None,
-            codecs: codecs,
+            codecs,
         };
 
         self.columns.push(col_name.to_string());
@@ -362,11 +384,11 @@ impl ZarrStoreMetadata {
 }
 
 // some more helpers for zarr format v3
-fn extract_config (map: &Value) -> ZarrResult<(String, &Value)> {
-    let name = extract_string_from_json(&map, "name", "can't retrieve name of configuration")?;
+fn extract_config(map: &Value) -> ZarrResult<(String, &Value)> {
+    let name = extract_string_from_json(map, "name", "can't retrieve name of configuration")?;
     let config = map.get("configuration");
     if config.is_none() {
-        return Ok((name, &json!(null)))
+        return Ok((name, &json!(null)));
     }
 
     Ok((name, config.unwrap()))
@@ -390,54 +412,59 @@ fn extract_codec(config: &Value, last_type: &CodecType) -> ZarrResult<ZarrCodec>
                 blocksize,
             );
             Ok((CodecType::BytesToBytes, ZarrCodec::BloscCompressor(c)))
-        },
+        }
         "bytes" => {
             let e = extract_string_from_json(config, "endian", error_string)?;
-            Ok((CodecType::ArrayToBytes, ZarrCodec::Bytes(Endianness::from_str(&e)?)))
-        },
-        "crc32c" => {
-            Ok((CodecType::BytesToBytes, ZarrCodec::Crc32c))
-        },
+            Ok((
+                CodecType::ArrayToBytes,
+                ZarrCodec::Bytes(Endianness::from_str(&e)?),
+            ))
+        }
+        "crc32c" => Ok((CodecType::BytesToBytes, ZarrCodec::Crc32c)),
         "gzip" => {
             let l = extract_u64_from_json(config, "level", error_string)? as u8;
             Ok((CodecType::BytesToBytes, ZarrCodec::Gzip(l)))
-        },
+        }
         "transpose" => {
             let o = extract_usize_array_from_json(config, "order", error_string)?;
             Ok((CodecType::ArrayToArray, ZarrCodec::Transpose(o)))
         }
-        _ => Err(ZarrError::InvalidMetadata(error_string.to_string()))
+        _ => Err(ZarrError::InvalidMetadata(error_string.to_string())),
     }?;
 
     // verify that codecs are being read in the right order
     if last_type == &CodecType::ArrayToBytes && codec_type == CodecType::ArrayToBytes {
-        return Err(ZarrError::InvalidMetadata(error_string.to_string()))
+        return Err(ZarrError::InvalidMetadata(error_string.to_string()));
     }
-    if last_type != &codec_type {
-        if (last_type == &CodecType::ArrayToArray && codec_type != CodecType::ArrayToBytes) ||
-            (last_type == &CodecType::ArrayToBytes && codec_type != CodecType::BytesToBytes)
-        {
-            return Err(ZarrError::InvalidMetadata(error_string.to_string()))
-        }
+    if last_type != &codec_type
+        && ((last_type == &CodecType::ArrayToArray && codec_type != CodecType::ArrayToBytes)
+            || (last_type == &CodecType::ArrayToBytes && codec_type != CodecType::BytesToBytes))
+    {
+        return Err(ZarrError::InvalidMetadata(error_string.to_string()));
     }
 
     Ok(codec)
 }
 
-fn extract_sharding_options(outer_chunk_shape: &Vec<usize>, config: &Value, pos: usize) -> ZarrResult<ShardingOptions> {
+fn extract_sharding_options(
+    outer_chunk_shape: &[usize],
+    config: &Value,
+    pos: usize,
+) -> ZarrResult<ShardingOptions> {
     let error_string = "error parsing sharding params from metadata";
     let chunk_shape = extract_usize_array_from_json(config, "chunk_shape", error_string)?;
 
     for (outer_n, inner_n) in outer_chunk_shape.iter().zip(chunk_shape.iter()) {
         if outer_n % inner_n != 0 {
-            return Err(throw_invalid_meta(error_string))
+            return Err(throw_invalid_meta(error_string));
         }
     }
 
-    let codec_configs = config.get("codecs")
-                              .ok_or(ZarrError::InvalidMetadata(error_string.to_string()))?
-                              .as_array()
-                              .ok_or(ZarrError::InvalidMetadata(error_string.to_string()))?;
+    let codec_configs = config
+        .get("codecs")
+        .ok_or(ZarrError::InvalidMetadata(error_string.to_string()))?
+        .as_array()
+        .ok_or(ZarrError::InvalidMetadata(error_string.to_string()))?;
     let mut codecs = Vec::new();
     let mut last_type = CodecType::ArrayToArray;
     let mut n_array_to_bytes = 0;
@@ -446,16 +473,17 @@ fn extract_sharding_options(outer_chunk_shape: &Vec<usize>, config: &Value, pos:
         last_type = c.codec_type();
         n_array_to_bytes += (last_type == CodecType::ArrayToBytes) as u32;
         codecs.push(c);
-    };
-
-    if n_array_to_bytes != 1 {
-        return Err(ZarrError::InvalidMetadata(error_string.to_string()))
     }
 
-    let index_codec_configs = config.get("index_codecs")
-                                    .ok_or(ZarrError::InvalidMetadata(error_string.to_string()))?
-                                    .as_array()
-                                    .ok_or(ZarrError::InvalidMetadata(error_string.to_string()))?;
+    if n_array_to_bytes != 1 {
+        return Err(ZarrError::InvalidMetadata(error_string.to_string()));
+    }
+
+    let index_codec_configs = config
+        .get("index_codecs")
+        .ok_or(ZarrError::InvalidMetadata(error_string.to_string()))?
+        .as_array()
+        .ok_or(ZarrError::InvalidMetadata(error_string.to_string()))?;
     let mut index_codecs = Vec::new();
     last_type = CodecType::ArrayToArray;
     n_array_to_bytes = 0;
@@ -464,17 +492,28 @@ fn extract_sharding_options(outer_chunk_shape: &Vec<usize>, config: &Value, pos:
         last_type = c.codec_type();
         n_array_to_bytes += (last_type == CodecType::ArrayToBytes) as u32;
         index_codecs.push(c);
-    };
-
-    if n_array_to_bytes != 1 {
-        return Err(ZarrError::InvalidMetadata(error_string.to_string()))
     }
 
-    let n_chunks = outer_chunk_shape.iter().zip(chunk_shape.iter()).map(|(o, i)| o / i).collect();
+    if n_array_to_bytes != 1 {
+        return Err(ZarrError::InvalidMetadata(error_string.to_string()));
+    }
+
+    let n_chunks = outer_chunk_shape
+        .iter()
+        .zip(chunk_shape.iter())
+        .map(|(o, i)| o / i)
+        .collect();
 
     let loc = extract_string_from_json(config, "index_location", error_string)?;
     let loc = IndexLocation::from_str(&loc)?;
-    Ok(ShardingOptions::new(chunk_shape, n_chunks, codecs, index_codecs, loc, pos))
+    Ok(ShardingOptions::new(
+        chunk_shape,
+        n_chunks,
+        codecs,
+        index_codecs,
+        loc,
+        pos,
+    ))
 }
 
 // Method to populate zarr metadata from zarr arrays metadata, using
@@ -485,7 +524,9 @@ impl ZarrStoreMetadata {
         let error_string = "error parsing node type from metadata";
         let node_type = extract_string_from_json(&meta_map, "node_type", error_string)?;
         if node_type != "array" {
-            return Err(ZarrError::InvalidMetadata("node type in metadata must be array".to_string()))
+            return Err(ZarrError::InvalidMetadata(
+                "node type in metadata must be array".to_string(),
+            ));
         }
 
         // parse shape
@@ -497,12 +538,16 @@ impl ZarrStoreMetadata {
 
         // parse chunks
         let error_string = "error parsing metadata chunks";
-        let chunk_grid = meta_map.get("chunk_grid").ok_or(
-            ZarrError::InvalidMetadata("can't extract chunk_grid from metadata".to_string())
-        )?;
-        let (name, config) = extract_config(&chunk_grid)?;
+        let chunk_grid = meta_map
+            .get("chunk_grid")
+            .ok_or(ZarrError::InvalidMetadata(
+                "can't extract chunk_grid from metadata".to_string(),
+            ))?;
+        let (name, config) = extract_config(chunk_grid)?;
         if name != "regular" {
-            return Err(ZarrError::InvalidMetadata("only regular chunks are supported".to_string()));
+            return Err(ZarrError::InvalidMetadata(
+                "only regular chunks are supported".to_string(),
+            ));
         }
         let chunks = extract_arr_and_check(config, "chunk_shape", error_string, &self.chunks)?;
         if self.chunks.is_none() {
@@ -510,17 +555,19 @@ impl ZarrStoreMetadata {
         }
 
         if chunks.len() != shape.len() {
-            return Err(ZarrError::InvalidMetadata("chunk and shape dimensions must match".to_string()))
+            return Err(ZarrError::InvalidMetadata(
+                "chunk and shape dimensions must match".to_string(),
+            ));
         }
 
         // the index of the last chunk in each dimension
         if self.last_chunk_idx.is_none() {
             self.last_chunk_idx = Some(
                 chunks
-                .iter()
-                .zip(&shape)
-                .map(|(&chnk, &shp)| (shp as f64 / chnk as f64).ceil() as usize- 1)
-                .collect()
+                    .iter()
+                    .zip(&shape)
+                    .map(|(&chnk, &shp)| (shp as f64 / chnk as f64).ceil() as usize - 1)
+                    .collect(),
             );
         }
 
@@ -531,29 +578,33 @@ impl ZarrStoreMetadata {
 
         // chunk separator
         let error_string = "error parsing metadata chunk key encoding";
-        let chunk_key_encoding = meta_map.get("chunk_key_encoding").ok_or(
-            ZarrError::InvalidMetadata("can't extract chunk_key_encoding from metadata".to_string())
-        )?;
-        let (_, config) = extract_config(&chunk_key_encoding)?;
+        let chunk_key_encoding =
+            meta_map
+                .get("chunk_key_encoding")
+                .ok_or(ZarrError::InvalidMetadata(
+                    "can't extract chunk_key_encoding from metadata".to_string(),
+                ))?;
+        let (_, config) = extract_config(chunk_key_encoding)?;
         let chunk_key_encoding = extract_string_from_json(config, "separator", error_string)?;
         let chunk_key_encoding = ChunkSeparator::from_str(&chunk_key_encoding)?;
 
         // codecs
-        let codec_configs = meta_map.get("codecs")
-                                    .ok_or(ZarrError::InvalidMetadata(error_string.to_string()))?
-                                    .as_array()
-                                    .ok_or(ZarrError::InvalidMetadata(error_string.to_string()))?;
+        let codec_configs = meta_map
+            .get("codecs")
+            .ok_or(ZarrError::InvalidMetadata(error_string.to_string()))?
+            .as_array()
+            .ok_or(ZarrError::InvalidMetadata(error_string.to_string()))?;
         let mut codecs = Vec::new();
         let mut sharding_options: Option<ShardingOptions> = None;
         let pos = 0;
         let mut last_type = CodecType::ArrayToArray;
         let error_string = "error parsing codecs";
         let mut n_array_to_bytes = 0;
-        for c in codec_configs{
+        for c in codec_configs {
             let (name, config) = extract_config(c)?;
             if name == "sharding_indexed" {
                 if last_type != CodecType::ArrayToArray {
-                    return Err(ZarrError::InvalidMetadata(error_string.to_string()))
+                    return Err(ZarrError::InvalidMetadata(error_string.to_string()));
                 }
                 let s = extract_sharding_options(&chunks, config, pos)?;
                 last_type = CodecType::ArrayToBytes;
@@ -569,17 +620,12 @@ impl ZarrStoreMetadata {
         }
 
         if n_array_to_bytes != 1 {
-            return Err(ZarrError::InvalidMetadata(error_string.to_string()))
+            return Err(ZarrError::InvalidMetadata(error_string.to_string()));
         }
 
         // finally create the zarr array metadata and insert it in params
-        let array_meta = ZarrArrayMetadata::new(
-            3,
-            data_type,
-            chunk_key_encoding,
-            sharding_options,
-            codecs,
-        );
+        let array_meta =
+            ZarrArrayMetadata::new(3, data_type, chunk_key_encoding, sharding_options, codecs);
 
         self.columns.push(col_name.to_string());
         self.array_params.insert(col_name, array_meta);
@@ -592,19 +638,25 @@ impl ZarrStoreMetadata {
 // zarr_format version 2 or 3.
 impl ZarrStoreMetadata {
     pub(crate) fn add_column(&mut self, col_name: String, metadata_str: &str) -> ZarrResult<()> {
-        let meta_map: Value = serde_json::from_str(metadata_str).or(
-            Err(ZarrError::InvalidMetadata("could not parse metadata string".to_string()))
-        )?;
+        let meta_map: Value = serde_json::from_str(metadata_str).or(Err(
+            ZarrError::InvalidMetadata("could not parse metadata string".to_string()),
+        ))?;
         let err_str = "could not extract valid zarr format from metadata";
         let version = extract_u64_from_json(&meta_map, "zarr_format", err_str)?;
 
         match version {
-            2 => {self.add_column_v2(col_name, meta_map)?;},
-            3 => {self.add_column_v3(col_name, meta_map)?;},
-            _ => {return Err(throw_invalid_meta("invalid zarr format"));}
+            2 => {
+                self.add_column_v2(col_name, meta_map)?;
+            }
+            3 => {
+                self.add_column_v3(col_name, meta_map)?;
+            }
+            _ => {
+                return Err(throw_invalid_meta("invalid zarr format"));
+            }
         }
-    
-        return Ok(())
+
+        Ok(())
     }
 
     pub(crate) fn get_num_columns(&self) -> usize {
@@ -616,16 +668,17 @@ impl ZarrStoreMetadata {
     }
 
     pub(crate) fn get_array_meta(&self, column: &str) -> ZarrResult<&ZarrArrayMetadata> {
-        Ok(
-            self.array_params
+        self.array_params
             .get(column)
-            .ok_or(ZarrError::InvalidMetadata(format!("Cannot find variable {} in metadata", column)))?
-        )
+            .ok_or(ZarrError::InvalidMetadata(format!(
+                "Cannot find variable {} in metadata",
+                column
+            )))
     }
 
     // return the real dimensions of a chhunk, given its position, taking into
     // account that it can be at the "edge" of the array for one or more dimension.
-    pub(crate) fn get_real_dims(&self, pos: &Vec<usize>) -> Vec<usize> {
+    pub(crate) fn get_real_dims(&self, pos: &[usize]) -> Vec<usize> {
         pos.iter()
             .zip(self.last_chunk_idx.as_ref().unwrap())
             .zip(self.chunks.as_ref().unwrap())
@@ -637,7 +690,7 @@ impl ZarrStoreMetadata {
                     } else {
                         *chnk
                     }
-                }
+                },
             )
             .collect()
     }
@@ -652,25 +705,21 @@ impl ZarrStoreMetadata {
             .map(|(&shp, &chnk)| (shp as f64 / chnk as f64).ceil() as usize)
             .collect();
 
-        let grid_positions = match n_chunks.len() {
-            1 => {(0..n_chunks[0]).map(|x| vec![x; 1]).collect()}
-            2 => {
-                (0..n_chunks[0])
-                    .cartesian_product(0..n_chunks[1])
-                    .map(|(a, b)| vec![a, b])
-                    .collect()
-            } 
-            3 => {
-                (0..n_chunks[0])
-                    .cartesian_product(0..n_chunks[1])
-                    .cartesian_product(0..n_chunks[2])
-                    .map(|((a, b), c)| vec![a, b, c])
-                    .collect()
+        match n_chunks.len() {
+            1 => (0..n_chunks[0]).map(|x| vec![x; 1]).collect(),
+            2 => (0..n_chunks[0])
+                .cartesian_product(0..n_chunks[1])
+                .map(|(a, b)| vec![a, b])
+                .collect(),
+            3 => (0..n_chunks[0])
+                .cartesian_product(0..n_chunks[1])
+                .cartesian_product(0..n_chunks[2])
+                .map(|((a, b), c)| vec![a, b, c])
+                .collect(),
+            _ => {
+                panic!("Array has more than 3 domensions, 3 is the limit")
             }
-            _ => {panic!("Array has more than 3 domensions, 3 is the limit")}
-        };
-
-        grid_positions
+        }
     }
 
     pub(crate) fn get_chunk_dims(&self) -> &Vec<usize> {
@@ -680,10 +729,13 @@ impl ZarrStoreMetadata {
     pub(crate) fn get_separators(&self) -> HashMap<String, ChunkSeparator> {
         let mut m = HashMap::new();
         for col in &self.columns {
-            m.insert(col.to_string(), self.get_array_meta(&col).unwrap().get_separator());
+            m.insert(
+                col.to_string(),
+                self.get_array_meta(col).unwrap().get_separator(),
+            );
         }
 
-        return m;
+        m
     }
 }
 
@@ -710,7 +762,7 @@ mod zarr_metadata_v3_tests {
                 "shuffle": 1
             }
         }"#;
-        meta.add_column("var1".to_string(), &metadata_str).unwrap();
+        meta.add_column("var1".to_string(), metadata_str).unwrap();
 
         let metadata_str = r#"
         {
@@ -726,7 +778,7 @@ mod zarr_metadata_v3_tests {
                 "shuffle": 2
             }
         }"#;
-        meta.add_column("var2".to_string(), &metadata_str).unwrap();
+        meta.add_column("var2".to_string(), metadata_str).unwrap();
 
         let metadata_str = r#"
         {
@@ -737,7 +789,7 @@ mod zarr_metadata_v3_tests {
             "order": "F",
             "compressor": null
         }"#;
-        meta.add_column("var3".to_string(), &metadata_str).unwrap();
+        meta.add_column("var3".to_string(), metadata_str).unwrap();
 
         let metadata_str = r#"
         {
@@ -753,7 +805,7 @@ mod zarr_metadata_v3_tests {
                 "shuffle": 1
             }
         }"#;
-        meta.add_column("var4".to_string(), &metadata_str).unwrap();
+        meta.add_column("var4".to_string(), metadata_str).unwrap();
 
         assert_eq!(meta.chunks, Some(vec![10, 10]));
         assert_eq!(meta.shape, Some(vec![100, 100]));
@@ -769,14 +821,12 @@ mod zarr_metadata_v3_tests {
                 sharding_options: None,
                 codecs: vec![
                     ZarrCodec::Bytes(Endianness::Little),
-                    ZarrCodec::BloscCompressor(
-                        BloscOptions::new(
-                            CompressorName::Lz4,
-                            1,
-                            ShuffleOptions::ByteShuffle(4),
-                            0,
-                        )
-                    )
+                    ZarrCodec::BloscCompressor(BloscOptions::new(
+                        CompressorName::Lz4,
+                        1,
+                        ShuffleOptions::ByteShuffle(4),
+                        0,
+                    ))
                 ]
             }
         );
@@ -790,14 +840,12 @@ mod zarr_metadata_v3_tests {
                 sharding_options: None,
                 codecs: vec![
                     ZarrCodec::Bytes(Endianness::Little),
-                    ZarrCodec::BloscCompressor(
-                        BloscOptions::new(
-                            CompressorName::Zlib,
-                            1,
-                            ShuffleOptions::BitShuffle(8),
-                            0,
-                        )
-                    )
+                    ZarrCodec::BloscCompressor(BloscOptions::new(
+                        CompressorName::Zlib,
+                        1,
+                        ShuffleOptions::BitShuffle(8),
+                        0,
+                    ))
                 ]
             }
         );
@@ -825,14 +873,12 @@ mod zarr_metadata_v3_tests {
                 sharding_options: None,
                 codecs: vec![
                     ZarrCodec::Bytes(Endianness::Big),
-                    ZarrCodec::BloscCompressor(
-                        BloscOptions::new(
-                            CompressorName::Lz4,
-                            1,
-                            ShuffleOptions::ByteShuffle(112),
-                            0,
-                        )
-                    )
+                    ZarrCodec::BloscCompressor(BloscOptions::new(
+                        CompressorName::Lz4,
+                        1,
+                        ShuffleOptions::ByteShuffle(112),
+                        0,
+                    ))
                 ]
             }
         );
@@ -854,7 +900,7 @@ mod zarr_metadata_v3_tests {
                 "shuffle": 1
             }
         }"#;
-        meta.add_column("var".to_string(), &metadata_str).unwrap();
+        meta.add_column("var".to_string(), metadata_str).unwrap();
         assert_eq!(meta.last_chunk_idx, Some(vec![8, 8]))
     }
 
@@ -879,7 +925,7 @@ mod zarr_metadata_v3_tests {
                 "shuffle": 2
             }
         }"#;
-        assert!(meta.add_column("var".to_string(), &metadata_str).is_err());
+        assert!(meta.add_column("var".to_string(), metadata_str).is_err());
 
         // invalid compressor
         let metadata_str = r#"
@@ -896,7 +942,7 @@ mod zarr_metadata_v3_tests {
                 "shuffle": 2
             }
         }"#;
-        assert!(meta.add_column("var".to_string(), &metadata_str).is_err());
+        assert!(meta.add_column("var".to_string(), metadata_str).is_err());
 
         // mismatch between chunks
         // first let's create one valid array metadata
@@ -914,7 +960,7 @@ mod zarr_metadata_v3_tests {
                 "shuffle": 1
             }
         }"#;
-        meta.add_column("var1".to_string(), &metadata_str).unwrap();
+        meta.add_column("var1".to_string(), metadata_str).unwrap();
 
         let metadata_str = r#"
         {
@@ -930,7 +976,7 @@ mod zarr_metadata_v3_tests {
                 "shuffle": 1
             }
         }"#;
-        assert!(meta.add_column("var2".to_string(), &metadata_str).is_err());
+        assert!(meta.add_column("var2".to_string(), metadata_str).is_err());
 
         // mismatch between shapes
         let metadata_str = r#"
@@ -947,7 +993,7 @@ mod zarr_metadata_v3_tests {
                 "shuffle": 1
             }
         }"#;
-        assert!(meta.add_column("var2".to_string(), &metadata_str).is_err());
+        assert!(meta.add_column("var2".to_string(), metadata_str).is_err());
     }
 
     #[test]
@@ -960,7 +1006,7 @@ mod zarr_metadata_v3_tests {
             "chunk_grid": {
                 "configuration": {"chunk_shape": [4, 4]},
                 "name": "regular"
-            }, 
+            },
             "chunk_key_encoding": {
                 "configuration": {"separator": "/"},
                 "name": "default"
@@ -974,7 +1020,7 @@ mod zarr_metadata_v3_tests {
             "zarr_format": 3,
             "node_type": "array"
         }"#;
-        meta.add_column("var1".to_string(), &metadata_str).unwrap();
+        meta.add_column("var1".to_string(), metadata_str).unwrap();
 
         assert_eq!(meta.chunks, Some(vec![4, 4]));
         assert_eq!(meta.shape, Some(vec![16, 16]));
@@ -990,14 +1036,12 @@ mod zarr_metadata_v3_tests {
                 sharding_options: None,
                 codecs: vec![
                     ZarrCodec::Bytes(Endianness::Little),
-                    ZarrCodec::BloscCompressor(
-                        BloscOptions::new(
-                            CompressorName::Zstd,
-                            5,
-                            ShuffleOptions::Noshuffle,
-                            0,
-                        )
-                    )
+                    ZarrCodec::BloscCompressor(BloscOptions::new(
+                        CompressorName::Zstd,
+                        5,
+                        ShuffleOptions::Noshuffle,
+                        0,
+                    ))
                 ]
             }
         );
@@ -1037,8 +1081,8 @@ mod zarr_metadata_v3_tests {
             "zarr_format": 3,
             "node_type": "array"
         }"#;
-        meta.add_column("var2".to_string(), &metadata_str).unwrap();
-        
+        meta.add_column("var2".to_string(), metadata_str).unwrap();
+
         assert_eq!(meta.chunks, Some(vec![8, 8]));
         assert_eq!(meta.shape, Some(vec![16, 16]));
         assert_eq!(meta.last_chunk_idx, Some(vec![1, 1]));
@@ -1050,29 +1094,22 @@ mod zarr_metadata_v3_tests {
                 zarr_format: 3,
                 data_type: ZarrDataType::Int(4),
                 chunk_separator: ChunkSeparator::Period,
-                sharding_options: Some(
-                    ShardingOptions::new(
-                        vec![4, 4],
-                        vec![2, 2],
-                        vec![
-                            ZarrCodec::Bytes(Endianness::Little),
-                            ZarrCodec::BloscCompressor(
-                                BloscOptions::new(
-                                    CompressorName::Zstd,
-                                    5,
-                                    ShuffleOptions::Noshuffle,
-                                    0,
-                                )
-                            )
-                        ],
-                        vec![
-                            ZarrCodec::Bytes(Endianness::Little),
-                            ZarrCodec::Crc32c,
-                        ],
-                        IndexLocation::End,
-                        0   
-                    )
-                ),
+                sharding_options: Some(ShardingOptions::new(
+                    vec![4, 4],
+                    vec![2, 2],
+                    vec![
+                        ZarrCodec::Bytes(Endianness::Little),
+                        ZarrCodec::BloscCompressor(BloscOptions::new(
+                            CompressorName::Zstd,
+                            5,
+                            ShuffleOptions::Noshuffle,
+                            0,
+                        ))
+                    ],
+                    vec![ZarrCodec::Bytes(Endianness::Little), ZarrCodec::Crc32c,],
+                    IndexLocation::End,
+                    0
+                )),
                 codecs: vec![],
             }
         );
@@ -1090,7 +1127,7 @@ mod zarr_metadata_v3_tests {
             "chunk_grid": {
                 "configuration": {"chunk_shape": [4, 4]},
                 "name": "regular"
-            }, 
+            },
             "chunk_key_encoding": {
                 "configuration": {"separator": "/"},
                 "name": "default"
@@ -1101,7 +1138,7 @@ mod zarr_metadata_v3_tests {
             "zarr_format": 3,
             "node_type": "array"
         }"#;
-        assert!(meta.add_column("var1".to_string(), &metadata_str).is_err());
+        assert!(meta.add_column("var1".to_string(), metadata_str).is_err());
 
         // mismatch between shape and chunks
         let metadata_str = r#"
@@ -1111,7 +1148,7 @@ mod zarr_metadata_v3_tests {
             "chunk_grid": {
                 "configuration": {"chunk_shape": [4, 4, 4]},
                 "name": "regular"
-            }, 
+            },
             "chunk_key_encoding": {
                 "configuration": {"separator": "/"},
                 "name": "default"
@@ -1123,6 +1160,6 @@ mod zarr_metadata_v3_tests {
             "zarr_format": 3,
             "node_type": "array"
         }"#;
-        assert!(meta.add_column("var2".to_string(), &metadata_str).is_err());
+        assert!(meta.add_column("var2".to_string(), metadata_str).is_err());
     }
 }

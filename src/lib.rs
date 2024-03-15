@@ -1,2 +1,2 @@
-pub mod reader;
 pub mod async_reader;
+pub mod reader;

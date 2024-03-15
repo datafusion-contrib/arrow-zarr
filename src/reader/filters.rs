@@ -1,9 +1,8 @@
 use arrow_array::{BooleanArray, RecordBatch};
 use arrow_schema::ArrowError;
-use dyn_clone::{DynClone, clone_trait_object};
+use dyn_clone::{clone_trait_object, DynClone};
 
 use crate::reader::ZarrProjection;
-
 
 /// A predicate operating on [`RecordBatch`]. Here we have the [`DynClone`] trait
 /// bound because when dealing with the async zarr reader, it's useful to be able
@@ -23,7 +22,6 @@ pub trait ZarrArrowPredicate: Send + DynClone + 'static {
 }
 clone_trait_object!(ZarrArrowPredicate);
 
-
 /// A [`ZarrArrowPredicate`] created from an [`FnMut`]. The predicate function has
 /// to be [`Clone`] because of the trait bound on [`ZarrArrowPredicate`].
 #[derive(Clone)]
@@ -41,7 +39,6 @@ where
     }
 }
 
-
 impl<F> ZarrArrowPredicate for ZarrArrowPredicateFn<F>
 where
     F: FnMut(&RecordBatch) -> Result<BooleanArray, ArrowError> + Send + Clone + 'static,
@@ -55,21 +52,20 @@ where
     }
 }
 
-
 /// A collection of one or more objects that implement [`ZarrArrowPredicate`]. The way
 /// filters are used for zarr store is by determining whether or not the a chunk needs to be
 /// read based on the predicate. First, only the columns needed in the predicate are read,
 /// then the predicate is evaluated, and if there is a least one row that satistifes the
 /// condition, the other variables that we requested are read.
-/// 
+///
 /// When the predicate is evaluated, the row indices that satisfy the predicate are carried
 /// over to when the reuqested data is fetched. However, because zarr data is typically
 /// compressed, here even when we have a subset of the rows to read, the whole chunk is read,
 /// and the rows mask is applied after.
-/// 
+///
 /// Additionally, if the data needed for the predicate is also requested, it is read twice,
 /// once for the predicate and once when the actual data is fetched. In the end, if a lot of
-/// columns are being requested, and the predicate only needs a few columns, AND if the 
+/// columns are being requested, and the predicate only needs a few columns, AND if the
 /// predicate only evaluates to true for the data in a small fraction of the chunks, then
 /// a lot of data reads can be avoided. Under other circumstances though, applying filters
 /// that way could be somewhat inefficient, but there's not much else that can be done,
@@ -86,7 +82,7 @@ impl ZarrChunkFilter {
         Self { predicates }
     }
 
-    /// Get the combined projections for all the predicates in the filter. 
+    /// Get the combined projections for all the predicates in the filter.
     pub fn get_all_projections(&self) -> ZarrProjection {
         let mut proj = ZarrProjection::all();
         for pred in self.predicates.iter() {
@@ -97,14 +93,13 @@ impl ZarrChunkFilter {
     }
 }
 
-
 #[cfg(test)]
 mod zarr_predicate_tests {
-    use arrow_array::RecordBatch;
-    use std::sync::Arc;
-    use arrow_schema::{Schema, Field, DataType};
-    use arrow_array::{BooleanArray, Float64Array, ArrayRef};
     use arrow::compute::kernels::cmp::eq;
+    use arrow_array::RecordBatch;
+    use arrow_array::{ArrayRef, BooleanArray, Float64Array};
+    use arrow_schema::{DataType, Field, Schema};
+    use std::sync::Arc;
 
     use super::*;
     use crate::reader::ZarrProjection;
@@ -129,7 +124,12 @@ mod zarr_predicate_tests {
         let rec = generate_rec_batch();
         let mut filter = ZarrArrowPredicateFn::new(
             ZarrProjection::keep(vec!["var1".to_string(), "var2".to_string()]),
-            move |batch| eq(batch.column_by_name("var1").unwrap(), batch.column_by_name("var2").unwrap()),
+            move |batch| {
+                eq(
+                    batch.column_by_name("var1").unwrap(),
+                    batch.column_by_name("var2").unwrap(),
+                )
+            },
         );
         let mask = filter.evaluate(&rec).unwrap();
         assert_eq!(
@@ -140,7 +140,12 @@ mod zarr_predicate_tests {
         let rec = generate_rec_batch();
         let mut filter = ZarrArrowPredicateFn::new(
             ZarrProjection::keep(vec!["var1".to_string(), "var3".to_string()]),
-            move |batch| eq(batch.column_by_name("var1").unwrap(), batch.column_by_name("var3").unwrap()),
+            move |batch| {
+                eq(
+                    batch.column_by_name("var1").unwrap(),
+                    batch.column_by_name("var3").unwrap(),
+                )
+            },
         );
         let mask = filter.evaluate(&rec).unwrap();
         assert_eq!(
