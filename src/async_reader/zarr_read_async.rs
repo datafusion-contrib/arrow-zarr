@@ -101,7 +101,7 @@ mod zarr_read_async_tests {
 
     fn get_test_data_file_system() -> LocalFileSystem {
         LocalFileSystem::new_with_prefix(
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testing/data/zarr/v2_data")
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test-data/data/zarr/v2_data")
         ).unwrap()
     }
 
