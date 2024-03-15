@@ -7,7 +7,7 @@
 //! # use std::path::PathBuf;
 //! #
 //! # fn get_test_data_path(zarr_store: String) -> PathBuf {
-//! #    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testing/data/zarr/v2_data").join(zarr_store)
+//! #    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test-data/data/zarr/v2_data").join(zarr_store)
 //! # }
 //! #
 //! # fn assert_batches_eq(batches: &[RecordBatch], expected_lines: &[&str]) {
@@ -463,7 +463,7 @@ mod zarr_reader_tests {
     // zarr format v2 tests
     //**************************
     fn get_v2_test_data_path(zarr_store: String) -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testing/data/zarr/v2_data").join(zarr_store)
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test-data/data/zarr/v2_data").join(zarr_store)
     }
 
     #[test]
@@ -844,7 +844,7 @@ mod zarr_reader_tests {
     // zarr format v3 tests
     //**************************
     fn get_v3_test_data_path(zarr_store: String) -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testing/data/zarr/v3_data").join(zarr_store)
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test-data/data/zarr/v3_data").join(zarr_store)
     }
 
     #[test]

@@ -16,7 +16,7 @@
 //! #
 //! # fn get_test_data_path(zarr_store: String) -> ZarrPath {
 //! #   let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-//! #                   .join("testing/data/zarr/v2_data")
+//! #                   .join("test-data/data/zarr/v2_data")
 //! #                   .join(zarr_store);
 //! #   ZarrPath::new(
 //! #       Arc::new(LocalFileSystem::new()),
@@ -468,7 +468,7 @@ mod zarr_async_reader_tests {
 
     fn get_v2_test_data_path(zarr_store: String) -> ZarrPath {
         let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                        .join("testing/data/zarr/v2_data")
+                        .join("test-data/data/zarr/v2_data")
                         .join(zarr_store);
         ZarrPath::new(
             Arc::new(LocalFileSystem::new()),
@@ -662,7 +662,7 @@ mod zarr_async_reader_tests {
 
     fn get_v3_test_data_path(zarr_store: String) -> ZarrPath {
         let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                        .join("testing/data/zarr/v3_data")
+                        .join("test-data/data/zarr/v3_data")
                         .join(zarr_store);
         ZarrPath::new(
             Arc::new(LocalFileSystem::new()),

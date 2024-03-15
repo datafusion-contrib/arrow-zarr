@@ -234,7 +234,7 @@ mod zarr_read_tests {
     use crate::reader::codecs::{ZarrCodec, ZarrDataType, Endianness};
 
     fn get_test_data_path(zarr_store: String) -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testing/data/zarr/v2_data").join(zarr_store)
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test-data/data/zarr/v2_data").join(zarr_store)
     }
 
     // read the store metadata, given a path to a zarr store.

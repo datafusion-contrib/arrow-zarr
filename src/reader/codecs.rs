@@ -706,7 +706,7 @@ mod zarr_codecs_tests {
     use super::*;
 
     fn get_test_data_path(zarr_array: String) -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testing/data/zarr/v3_data").join(zarr_array)
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test-data/data/zarr/v3_data").join(zarr_array)
     }
 
     // reading a chunk and decoding it using hard coded, known options. this test
