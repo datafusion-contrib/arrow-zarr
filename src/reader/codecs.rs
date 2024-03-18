@@ -1,14 +1,14 @@
-use std::io::Read;
-use std::sync::Arc;
-use std::str::FromStr;
-use std::vec;
-use crate::reader::{ZarrError, ZarrResult};
 use crate::reader::errors::throw_invalid_meta;
-use itertools::Itertools;
+use crate::reader::{ZarrError, ZarrResult};
 use arrow_array::*;
-use arrow_schema::{Field, FieldRef, DataType, TimeUnit};
-use flate2::read::GzDecoder;
+use arrow_schema::{DataType, Field, FieldRef, TimeUnit};
 use crc32c::crc32c;
+use flate2::read::GzDecoder;
+use itertools::Itertools;
+use std::io::Read;
+use std::str::FromStr;
+use std::sync::Arc;
+use std::vec;
 
 // Type enum and for the various support zarr types
 #[derive(Debug, PartialEq, Clone)]
@@ -26,11 +26,12 @@ impl ZarrDataType {
     pub(crate) fn get_byte_size(&self) -> usize {
         match self {
             Self::Bool => 1,
-            Self::UInt(s) | Self::Int(s) | Self::Float(s) |
-            Self::FixedLengthString(s) | Self::FixedLengthPyUnicode(s) |
-            Self::TimeStamp(s, _) => {
-                *s
-            }
+            Self::UInt(s)
+            | Self::Int(s)
+            | Self::Float(s)
+            | Self::FixedLengthString(s)
+            | Self::FixedLengthPyUnicode(s)
+            | Self::TimeStamp(s, _) => *s,
         }
     }
 }
@@ -79,7 +80,7 @@ impl ShuffleOptions {
             "noshuffle" => Ok(ShuffleOptions::Noshuffle),
             "shuffle" => Ok(ShuffleOptions::ByteShuffle(typesize)),
             "bitshuffle" => Ok(ShuffleOptions::BitShuffle(typesize)),
-            _ => Err(throw_invalid_meta("Invalid shuffle options"))
+            _ => Err(throw_invalid_meta("Invalid shuffle options")),
         }
     }
 }
@@ -93,9 +94,17 @@ pub(crate) struct BloscOptions {
 }
 
 impl BloscOptions {
-    pub(crate) fn new(cname: CompressorName, clevel: u8, shuffle: ShuffleOptions, blocksize: usize) -> Self {
+    pub(crate) fn new(
+        cname: CompressorName,
+        clevel: u8,
+        shuffle: ShuffleOptions,
+        blocksize: usize,
+    ) -> Self {
         Self {
-            cname, clevel, shuffle, blocksize
+            cname,
+            clevel,
+            shuffle,
+            blocksize,
         }
     }
 }
@@ -114,14 +123,14 @@ impl FromStr for Endianness {
         match input {
             "big" => Ok(Endianness::Big),
             "little" => Ok(Endianness::Little),
-            _ => Err(throw_invalid_meta("Invalid endianness"))
+            _ => Err(throw_invalid_meta("Invalid endianness")),
         }
     }
 }
 
 // Sharding options
 #[derive(Debug, PartialEq, Clone)]
-pub(crate) enum IndexLocation{
+pub(crate) enum IndexLocation {
     Start,
     End,
 }
@@ -133,7 +142,7 @@ impl FromStr for IndexLocation {
         match input {
             "start" => Ok(IndexLocation::Start),
             "end" => Ok(IndexLocation::End),
-            _ => Err(throw_invalid_meta("Invalid sharding index location"))
+            _ => Err(throw_invalid_meta("Invalid sharding index location")),
         }
     }
 }
@@ -155,10 +164,15 @@ impl ShardingOptions {
         codecs: Vec<ZarrCodec>,
         index_codecs: Vec<ZarrCodec>,
         index_location: IndexLocation,
-        position_in_codecs: usize
+        position_in_codecs: usize,
     ) -> Self {
         Self {
-            chunk_shape, n_chunks, codecs, index_codecs, index_location, position_in_codecs
+            chunk_shape,
+            n_chunks,
+            codecs,
+            index_codecs,
+            index_location,
+            position_in_codecs,
         }
     }
 }
@@ -185,48 +199,45 @@ impl ZarrCodec {
         match self {
             Self::Transpose(_) => CodecType::ArrayToArray,
             Self::Bytes(_) => CodecType::ArrayToBytes,
-            Self::BloscCompressor(_) | Self::Crc32c | Self::Gzip(_) => {
-                CodecType::BytesToBytes
-            }
+            Self::BloscCompressor(_) | Self::Crc32c | Self::Gzip(_) => CodecType::BytesToBytes,
         }
     }
 }
 
 // function to decode data that was encoded using a transpose codec
-fn decode_transpose<T: Clone>(input: Vec<T>, chunk_dims: &Vec<usize>, order: &Vec<usize>) -> ZarrResult<Vec<T>> {
+fn decode_transpose<T: Clone>(
+    input: Vec<T>,
+    chunk_dims: &[usize],
+    order: &[usize],
+) -> ZarrResult<Vec<T>> {
     let new_indices: Vec<_> = match order.len() {
-        2 => {
-            (0..chunk_dims[order[0]])
-                .cartesian_product(0..chunk_dims[order[1]])
-                .map(|t| t.0 * chunk_dims[1] + t.1)
-                .collect()
-        }
-        3 => {
-            (0..chunk_dims[order[0]])
+        2 => (0..chunk_dims[order[0]])
+            .cartesian_product(0..chunk_dims[order[1]])
+            .map(|t| t.0 * chunk_dims[1] + t.1)
+            .collect(),
+        3 => (0..chunk_dims[order[0]])
             .cartesian_product(0..chunk_dims[order[1]])
             .cartesian_product(0..chunk_dims[order[2]])
-            .map(|t| {
-                t.0 .0 * chunk_dims[1] * chunk_dims[2]
-                + t.0 .1 * chunk_dims[2]
-                + t.1
-            })
-            .collect()
+            .map(|t| t.0 .0 * chunk_dims[1] * chunk_dims[2] + t.0 .1 * chunk_dims[2] + t.1)
+            .collect(),
+        _ => {
+            panic!("Invalid number of dims for transpose")
         }
-        _ => {panic!("Invalid number of dims for transpose")}
     };
 
-   Ok(new_indices.into_iter().map(move |idx| input[idx].clone()).collect::<Vec<T>>())
+    Ok(new_indices
+        .into_iter()
+        .map(move |idx| input[idx].clone())
+        .collect::<Vec<T>>())
 }
 
 // function to only keep the data at the specified indices from a vector.
 // it function only works if the indices to keep are ordered.
-fn keep_indices<T: Clone + Default>(v: &mut Vec<T>, indices: &Vec<usize>) {
-    let mut move_to: usize = 0;
-    for i in indices.iter() {
+fn keep_indices<T: Clone + Default>(v: &mut Vec<T>, indices: &[usize]) {
+    for (move_to, i) in indices.iter().enumerate() {
         if i != &move_to {
             v[move_to] = v[*i].clone();
         }
-        move_to += 1;
     }
     v.resize(indices.len(), T::default());
 }
@@ -239,29 +250,25 @@ fn process_edge_chunk<T: Clone + Default>(
     chunk_dims: &Vec<usize>,
     real_dims: &Vec<usize>,
 ) {
-    if chunk_dims == real_dims {return}
+    if chunk_dims == real_dims {
+        return;
+    }
 
     let n_dims = chunk_dims.len();
     let indices_to_keep: Vec<_> = match n_dims {
-        1 => {(0..real_dims[0]).collect()},
-        2 => {
-            (0..real_dims[0])
-                .cartesian_product(0..real_dims[1])
-                .map(|t| t.0 * chunk_dims[1] + t.1)
-                .collect()
-        },
-        3 => {
-            (0..real_dims[0])
+        1 => (0..real_dims[0]).collect(),
+        2 => (0..real_dims[0])
+            .cartesian_product(0..real_dims[1])
+            .map(|t| t.0 * chunk_dims[1] + t.1)
+            .collect(),
+        3 => (0..real_dims[0])
             .cartesian_product(0..real_dims[1])
             .cartesian_product(0..real_dims[2])
-            .map(|t| {
-                t.0.0 * chunk_dims[1] * chunk_dims[2]
-                + t.0.1 * chunk_dims[2]
-                + t.1
-            })
-            .collect()
-        },
-        _ => {panic!("Zarr edge chunk with more than 3 dimensions, 3 is the limit")}
+            .map(|t| t.0 .0 * chunk_dims[1] * chunk_dims[2] + t.0 .1 * chunk_dims[2] + t.1)
+            .collect(),
+        _ => {
+            panic!("Zarr edge chunk with more than 3 dimensions, 3 is the limit")
+        }
     };
 
     keep_indices(buf, &indices_to_keep);
@@ -274,31 +281,32 @@ fn apply_bytes_to_bytes_codec(codec: &ZarrCodec, bytes: &[u8]) -> ZarrResult<Vec
         ZarrCodec::Gzip(_) => {
             let mut decoder = GzDecoder::new(bytes);
             decoder.read_to_end(&mut decompressed_bytes)?;
-        },
+        }
         ZarrCodec::BloscCompressor(_) => {
             decompressed_bytes = unsafe { blosc::decompress_bytes(bytes).unwrap() };
-        },
+        }
         ZarrCodec::Crc32c => {
             let mut bytes = bytes.to_vec();
             let l = bytes.len();
-            let checksum = bytes.split_off(l-4);
+            let checksum = bytes.split_off(l - 4);
             let checksum = [checksum[0], checksum[1], checksum[2], checksum[3]];
             if crc32c(&bytes[..]) != u32::from_le_bytes(checksum) {
-                return Err(throw_invalid_meta("crc32c checksum failed"))
+                return Err(throw_invalid_meta("crc32c checksum failed"));
             }
             decompressed_bytes = bytes;
-        },
-        _ => return Err(throw_invalid_meta("invalid bytes to bytes codec"))
+        }
+        _ => return Err(throw_invalid_meta("invalid bytes to bytes codec")),
     }
 
     Ok(decompressed_bytes)
 }
 
-
 // decode data that was encoded with a sequence of bytes to bytes codedcs, and return
 // the array to bytes codec and array to array codec that come after, if they are present.
 fn decode_bytes_to_bytes(
-    codecs: &Vec<ZarrCodec>, bytes: &[u8], sharding_params: &Option<ShardingOptions>
+    codecs: &[ZarrCodec],
+    bytes: &[u8],
+    sharding_params: &Option<ShardingOptions>,
 ) -> ZarrResult<(Vec<u8>, Option<ZarrCodec>, Option<ZarrCodec>)> {
     let mut array_to_bytes_codec: Option<ZarrCodec> = None;
     let mut array_to_array_codec: Option<ZarrCodec> = None;
@@ -307,19 +315,21 @@ fn decode_bytes_to_bytes(
         match codec.codec_type() {
             CodecType::BytesToBytes => {
                 if array_to_bytes_codec.is_some() {
-                    return Err(throw_invalid_meta("incorrect codec order in zarr metadata"))
+                    return Err(throw_invalid_meta("incorrect codec order in zarr metadata"));
                 }
                 decompressed_bytes = Some(apply_bytes_to_bytes_codec(codec, bytes)?);
-            },
+            }
             CodecType::ArrayToBytes => {
                 if array_to_bytes_codec.is_some() {
-                    return Err(throw_invalid_meta("only one array to bytes codec is allowed"))
+                    return Err(throw_invalid_meta(
+                        "only one array to bytes codec is allowed",
+                    ));
                 }
                 array_to_bytes_codec = Some(codec.clone());
-            },
+            }
             CodecType::ArrayToArray => {
                 if sharding_params.is_none() && array_to_bytes_codec.is_none() {
-                    return Err(throw_invalid_meta("incorrect codec order in zarr metadata"))
+                    return Err(throw_invalid_meta("incorrect codec order in zarr metadata"));
                 }
                 array_to_array_codec = Some(codec.clone());
             }
@@ -330,84 +340,101 @@ fn decode_bytes_to_bytes(
         decompressed_bytes = Some(bytes.to_vec());
     }
 
-    Ok((decompressed_bytes.unwrap(), array_to_bytes_codec, array_to_array_codec))
+    Ok((
+        decompressed_bytes.unwrap(),
+        array_to_bytes_codec,
+        array_to_array_codec,
+    ))
 }
 
 // macro to decode data by applying bytes to type conversions.
 macro_rules! convert_bytes {
     ($bytes: expr, $e: expr, $type: ty, 1) => {
         if $e == &Endianness::Little {
-            $bytes.into_iter()
-                  .map(|b| <$type>::from_le_bytes([b]))
-                  .collect()
-        }
-        else {
-            $bytes.into_iter()
-                  .map(|b| <$type>::from_be_bytes([b]))
-                  .collect()
+            $bytes
+                .into_iter()
+                .map(|b| <$type>::from_le_bytes([b]))
+                .collect()
+        } else {
+            $bytes
+                .into_iter()
+                .map(|b| <$type>::from_be_bytes([b]))
+                .collect()
         }
     };
     ($bytes: expr, $e: expr, $type: ty, 2) => {
         if $e == &Endianness::Little {
-            $bytes.chunks(2)
-                  .into_iter()
-                  .map(|arr| <$type>::from_le_bytes([arr[0], arr[1]]))
-                  .collect()
-        }
-        else {
-            $bytes.chunks(2)
-                  .into_iter()
-                  .map(|arr| <$type>::from_be_bytes([arr[0], arr[1]]))
-                  .collect()
+            $bytes
+                .chunks(2)
+                .into_iter()
+                .map(|arr| <$type>::from_le_bytes([arr[0], arr[1]]))
+                .collect()
+        } else {
+            $bytes
+                .chunks(2)
+                .into_iter()
+                .map(|arr| <$type>::from_be_bytes([arr[0], arr[1]]))
+                .collect()
         }
     };
     ($bytes: expr, $e: expr, $type: ty, 4) => {
         if $e == &Endianness::Little {
-            $bytes.chunks(4)
-                  .into_iter()
-                  .map(|arr| <$type>::from_le_bytes([arr[0], arr[1], arr[2], arr[3]]))
-                  .collect()
-        }
-        else {
-            $bytes.chunks(4)
-                  .into_iter()
-                  .map(|arr| <$type>::from_be_bytes([arr[0], arr[1], arr[2], arr[3]]))
-                  .collect()
+            $bytes
+                .chunks(4)
+                .into_iter()
+                .map(|arr| <$type>::from_le_bytes([arr[0], arr[1], arr[2], arr[3]]))
+                .collect()
+        } else {
+            $bytes
+                .chunks(4)
+                .into_iter()
+                .map(|arr| <$type>::from_be_bytes([arr[0], arr[1], arr[2], arr[3]]))
+                .collect()
         }
     };
     ($bytes: expr, $e: expr, $type: ty, 8) => {
         if $e == &Endianness::Little {
-            $bytes.chunks(8)
-                  .into_iter()
-                  .map(|arr| <$type>::from_le_bytes(
-                    [arr[0], arr[1], arr[2], arr[3], arr[4], arr[5], arr[6], arr[7]]
-                   ))
-                  .collect()
-        }
-        else {
-            $bytes.chunks(8)
-                  .into_iter()
-                  .map(|arr| <$type>::from_be_bytes(
-                    [arr[0], arr[1], arr[2], arr[3], arr[4], arr[5], arr[6], arr[7]]
-                   ))
-                  .collect()
+            $bytes
+                .chunks(8)
+                .into_iter()
+                .map(|arr| {
+                    <$type>::from_le_bytes([
+                        arr[0], arr[1], arr[2], arr[3], arr[4], arr[5], arr[6], arr[7],
+                    ])
+                })
+                .collect()
+        } else {
+            $bytes
+                .chunks(8)
+                .into_iter()
+                .map(|arr| {
+                    <$type>::from_be_bytes([
+                        arr[0], arr[1], arr[2], arr[3], arr[4], arr[5], arr[6], arr[7],
+                    ])
+                })
+                .collect()
         }
     };
 }
 
 // extract the indices for the positions of the inner chunks within a shard.
-fn extract_sharding_index(index_codecs: &Vec<ZarrCodec>, mut bytes: Vec<u8>) -> ZarrResult<(Vec<usize>, Vec<usize>)> {
+fn extract_sharding_index(
+    index_codecs: &[ZarrCodec],
+    mut bytes: Vec<u8>,
+) -> ZarrResult<(Vec<usize>, Vec<usize>)> {
     // here we are simplifying things, the codecs must include one endianness codec, and
     // optionally one checksum codec. while technically this could change in the future,
     // for now it's the recommended approach, and I think the only one that makes sense,
     // so nothing else will be allowed here, it makes things much easier.
     if index_codecs.len() > 2 {
-        return Err(throw_invalid_meta("too many sharding index codecs"))
+        return Err(throw_invalid_meta("too many sharding index codecs"));
     }
 
     if index_codecs.len() == 2 {
         if index_codecs[1] != ZarrCodec::Crc32c {
-            return Err(throw_invalid_meta("second sharding index codec, if provided, must crc32c"))
+            return Err(throw_invalid_meta(
+                "second sharding index codec, if provided, must crc32c",
+            ));
         }
         bytes = apply_bytes_to_bytes_codec(&ZarrCodec::Crc32c, &bytes[..])?;
     }
@@ -426,7 +453,9 @@ fn extract_sharding_index(index_codecs: &Vec<ZarrCodec>, mut bytes: Vec<u8>) -> 
             flip = !flip;
         }
     } else {
-        return Err(throw_invalid_meta("sharding index codecs must contain a bytes codec"))
+        return Err(throw_invalid_meta(
+            "sharding index codecs must contain a bytes codec",
+        ));
     }
 
     Ok((offsets, nbytes))
@@ -434,39 +463,44 @@ fn extract_sharding_index(index_codecs: &Vec<ZarrCodec>, mut bytes: Vec<u8>) -> 
 
 // determine the real dimensions (different from the chunk dimensions if the chunk doesn't exactly
 // line up with the edge of the array) for an inner chunk within a shard.
-fn get_inner_chunk_real_dims(params: &ShardingOptions, outer_real_dims: &Vec<usize>, pos: usize) -> Vec<usize> {
+fn get_inner_chunk_real_dims(
+    params: &ShardingOptions,
+    outer_real_dims: &Vec<usize>,
+    pos: usize,
+) -> Vec<usize> {
     if &params.chunk_shape == outer_real_dims {
         return params.chunk_shape.clone();
     }
 
     let vec_pos: Vec<usize>;
     match params.n_chunks.len() {
-        1 => {vec_pos = vec![pos]},
+        1 => vec_pos = vec![pos],
         2 => {
             let i = pos / params.n_chunks[0];
             let j = pos - (i * params.n_chunks[0]);
-            vec_pos = vec![i, j]; 
-        },
+            vec_pos = vec![i, j];
+        }
         3 => {
             let s = params.n_chunks[0] * params.n_chunks[1];
             let i = pos / s;
             let j = (pos - i * s) / params.n_chunks[0];
-            let k = pos - (i * s) - j* params.n_chunks[0];
+            let k = pos - (i * s) - j * params.n_chunks[0];
             vec_pos = vec![i, j, k];
         }
-        _ => {panic!("Zarr chunk with more than 3 dimensions, 3 is the limit")}
+        _ => {
+            panic!("Zarr chunk with more than 3 dimensions, 3 is the limit")
+        }
     }
 
-    let real_dims = params.chunk_shape.iter()
-                                      .zip(outer_real_dims.iter())
-                                      .zip(vec_pos.iter())
-                                      .map(
-                                        |((cs, ord), vp)| {
-                                            return std::cmp::min((vp+1) * cs, *ord) - vp * cs;
-                                        }
-                                      )
-                                      .collect();
-    return real_dims;
+    let real_dims = params
+        .chunk_shape
+        .iter()
+        .zip(outer_real_dims.iter())
+        .zip(vec_pos.iter())
+        .map(|((cs, ord), vp)| std::cmp::min((vp + 1) * cs, *ord) - vp * cs)
+        .collect();
+
+    real_dims
 }
 
 // a macro that instantiates functions to decode different data types
@@ -481,21 +515,27 @@ macro_rules! create_decode_function {
         ) -> ZarrResult<Vec<$type>> {
             let array_to_bytes_codec: Option<ZarrCodec>;
             let array_to_array_codec: Option<ZarrCodec>;
-            (bytes, array_to_bytes_codec, array_to_array_codec) = decode_bytes_to_bytes(&codecs, &bytes[..], &sharding_params)?;
+            (bytes, array_to_bytes_codec, array_to_array_codec) =
+                decode_bytes_to_bytes(&codecs, &bytes[..], &sharding_params)?;
 
             let mut data = Vec::new();
             if let Some(sharding_params) = sharding_params.as_ref() {
-                let mut index_size: usize = 2 * 8 * sharding_params.n_chunks.iter().fold(1, |mult, x| mult * x);
-                index_size += sharding_params.index_codecs.iter().any(|c| c == &ZarrCodec::Crc32c) as usize;
+                let mut index_size: usize =
+                    2 * 8 * sharding_params.n_chunks.iter().fold(1, |mult, x| mult * x);
+                index_size += sharding_params
+                    .index_codecs
+                    .iter()
+                    .any(|c| c == &ZarrCodec::Crc32c) as usize;
                 let index_bytes = match sharding_params.index_location {
-                    IndexLocation::Start => {bytes[0..index_size].to_vec()},
-                    IndexLocation::End => {bytes[(bytes.len()-index_size)..].to_vec()}
+                    IndexLocation::Start => bytes[0..index_size].to_vec(),
+                    IndexLocation::End => bytes[(bytes.len() - index_size)..].to_vec(),
                 };
-                let (offsets, nbytes) = extract_sharding_index(&sharding_params.index_codecs, index_bytes)?;  
+                let (offsets, nbytes) =
+                    extract_sharding_index(&sharding_params.index_codecs, index_bytes)?;
 
                 for (pos, (o, n)) in offsets.iter().zip(nbytes.iter()).enumerate() {
                     let inner_data = $func_name(
-                        bytes[*o..o+n].to_vec(),
+                        bytes[*o..o + n].to_vec(),
                         &sharding_params.chunk_shape,
                         &get_inner_chunk_real_dims(&sharding_params, &real_dims, pos), // TODO: fix this to real dims
                         &sharding_params.codecs,
@@ -513,7 +553,9 @@ macro_rules! create_decode_function {
 
             if let Some(ZarrCodec::Transpose(o)) = array_to_array_codec {
                 if sharding_params.is_some() {
-                    return Err(throw_invalid_meta("no array to array codec allowed outside of sharding codec."));
+                    return Err(throw_invalid_meta(
+                        "no array to array codec allowed outside of sharding codec.",
+                    ));
                 }
                 data = decode_transpose(data, chunk_dims, &o)?
             }
@@ -523,8 +565,8 @@ macro_rules! create_decode_function {
 
             return Ok(data);
         }
-    }
-} 
+    };
+}
 
 create_decode_function!(decode_u8_chunk, u8, 1);
 create_decode_function!(decode_u16_chunk, u16, 2);
@@ -543,68 +585,73 @@ fn decode_string_chunk(
     str_len: usize,
     chunk_dims: &Vec<usize>,
     real_dims: &Vec<usize>,
-    codecs: &Vec<ZarrCodec>,
+    codecs: &[ZarrCodec],
     sharding_params: Option<ShardingOptions>,
     pyunicode: bool,
 ) -> ZarrResult<Vec<String>> {
-        let array_to_bytes_codec: Option<ZarrCodec>;
-        let array_to_array_codec: Option<ZarrCodec>;
-        (bytes, array_to_bytes_codec, array_to_array_codec) = decode_bytes_to_bytes(&codecs, &bytes[..], &sharding_params)?;
+    let array_to_bytes_codec: Option<ZarrCodec>;
+    let array_to_array_codec: Option<ZarrCodec>;
+    (bytes, array_to_bytes_codec, array_to_array_codec) =
+        decode_bytes_to_bytes(codecs, &bytes[..], &sharding_params)?;
 
-        // special case of Py Unicode, with 4 byte characters. Here we simply
-        // keep one byte, might need to be more robust, perhaps throw an error
-        // if the other 3 bytes are not 0s. Might also not work with big endian?
-        if pyunicode {
-            bytes = bytes.iter().step_by(PY_UNICODE_SIZE).copied().collect();
+    // special case of Py Unicode, with 4 byte characters. Here we simply
+    // keep one byte, might need to be more robust, perhaps throw an error
+    // if the other 3 bytes are not 0s. Might also not work with big endian?
+    if pyunicode {
+        bytes = bytes.iter().step_by(PY_UNICODE_SIZE).copied().collect();
+    }
+
+    let mut data = Vec::new();
+    if let Some(sharding_params) = sharding_params.as_ref() {
+        let mut index_size: usize = 2 * 8 * sharding_params.n_chunks.iter().product::<usize>();
+        index_size += sharding_params
+            .index_codecs
+            .iter()
+            .any(|c| c == &ZarrCodec::Crc32c) as usize;
+        let index_bytes = match sharding_params.index_location {
+            IndexLocation::Start => bytes[0..index_size].to_vec(),
+            IndexLocation::End => bytes[(bytes.len() - index_size)..].to_vec(),
+        };
+        let (offsets, nbytes) = extract_sharding_index(&sharding_params.index_codecs, index_bytes)?;
+
+        for (pos, (o, n)) in offsets.iter().zip(nbytes.iter()).enumerate() {
+            let inner_data = decode_string_chunk(
+                bytes[*o..o + n].to_vec(),
+                str_len,
+                &sharding_params.chunk_shape,
+                &get_inner_chunk_real_dims(sharding_params, real_dims, pos), // TODO: fix this to real dims
+                &sharding_params.codecs,
+                None,
+                pyunicode,
+            )?;
+            data.extend(inner_data);
         }
+    } else if let Some(ZarrCodec::Bytes(_)) = array_to_bytes_codec {
+        data = bytes
+            .chunks(str_len)
+            .map(|arr| std::str::from_utf8(arr).unwrap().to_string())
+            .collect()
+    } else {
+        panic!("No bytes codec to apply on zarr chunk");
+    }
 
-        let mut data = Vec::new();
-        if let Some(sharding_params) = sharding_params.as_ref() {
-            let mut index_size: usize = 2 * 8 * sharding_params.n_chunks.iter().fold(1, |mult, x| mult * x);
-            index_size += sharding_params.index_codecs.iter().any(|c| c == &ZarrCodec::Crc32c) as usize;
-            let index_bytes = match sharding_params.index_location {
-                IndexLocation::Start => {bytes[0..index_size].to_vec()},
-                IndexLocation::End => {bytes[(bytes.len()-index_size)..].to_vec()}
-            };
-            let (offsets, nbytes) = extract_sharding_index(&sharding_params.index_codecs, index_bytes)?;  
-
-            for (pos, (o, n)) in offsets.iter().zip(nbytes.iter()).enumerate() {
-                let inner_data = decode_string_chunk(
-                    bytes[*o..o+n].to_vec(),
-                    str_len,
-                    &sharding_params.chunk_shape,
-                    &get_inner_chunk_real_dims(&sharding_params, &real_dims, pos), // TODO: fix this to real dims
-                    &sharding_params.codecs,
-                    None,
-                    pyunicode,
-                )?;
-                data.extend(inner_data);
-            }
-        } else {
-            if let Some(ZarrCodec::Bytes(_)) = array_to_bytes_codec {
-                data = bytes.chunks(str_len)
-                            .into_iter()
-                            .map(|arr| std::str::from_utf8(arr).unwrap().to_string())
-                            .collect()
-            } else {
-                panic!("No bytes codec to apply on zarr chunk");
-            }
+    if let Some(ZarrCodec::Transpose(o)) = array_to_array_codec {
+        if sharding_params.is_some() {
+            return Err(throw_invalid_meta(
+                "no array to array codec allowed outside of sharding codec.",
+            ));
         }
+        data = decode_transpose(data, chunk_dims, &o)?
+    }
+    if sharding_params.is_none() {
+        process_edge_chunk(&mut data, chunk_dims, real_dims);
+    }
 
-        if let Some(ZarrCodec::Transpose(o)) = array_to_array_codec {
-            if sharding_params.is_some() {
-                return Err(throw_invalid_meta("no array to array codec allowed outside of sharding codec."));
-            }
-            data = decode_transpose(data, chunk_dims, &o)?
-        }
-        if sharding_params.is_none() {
-            process_edge_chunk(&mut data, chunk_dims, real_dims);
-        }
-
-        return Ok(data);
+    Ok(data)
 }
 
 // the entry point for this module, the only function that is meant to be called from other modules
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_codecs(
     col_name: String,
     raw_data: Vec<u8>,
@@ -614,7 +661,7 @@ pub(crate) fn apply_codecs(
     codecs: &Vec<ZarrCodec>,
     sharding_params: Option<ShardingOptions>,
     final_indices: Option<&Vec<usize>>,
-) ->  ZarrResult<(ArrayRef, FieldRef)> {
+) -> ZarrResult<(ArrayRef, FieldRef)> {
     macro_rules! return_array {
         ($func_name: tt, $data_t: expr, $array_t: ty) => {
             let mut data = $func_name(raw_data, &chunk_dims, &real_dims, &codecs, sharding_params)?;
@@ -624,53 +671,89 @@ pub(crate) fn apply_codecs(
             let field = Field::new(col_name, $data_t, false);
             let arr: $array_t = data.into();
             return Ok((Arc::new(arr), Arc::new(field)))
-        }
+        };
     }
 
     match data_type {
         ZarrDataType::Bool => {
-            let data = decode_u8_chunk(raw_data, &chunk_dims, &real_dims, &codecs, sharding_params)?;
+            let data = decode_u8_chunk(raw_data, chunk_dims, real_dims, codecs, sharding_params)?;
             let mut data: Vec<bool> = data.iter().map(|x| *x != 0).collect();
             if let Some(indices) = final_indices {
-                keep_indices(&mut data, &indices);
+                keep_indices(&mut data, indices);
             };
             let field = Field::new(col_name, DataType::Boolean, false);
             let arr: BooleanArray = data.into();
-            return Ok((Arc::new(arr), Arc::new(field)));
-        },
-        ZarrDataType::UInt(s) => {
-            match s {
-                1 => {return_array!(decode_u8_chunk, DataType::UInt8, UInt8Array);},
-                2 => {return_array!(decode_u16_chunk, DataType::UInt16, UInt16Array);},
-                4 => {return_array!(decode_u32_chunk, DataType::UInt32, UInt32Array);},
-                8 => {return_array!(decode_u64_chunk, DataType::UInt64, UInt64Array);},
-                _ => {return Err(throw_invalid_meta("Invalid zarr data type"))}
+            Ok((Arc::new(arr), Arc::new(field)))
+        }
+        ZarrDataType::UInt(s) => match s {
+            1 => {
+                return_array!(decode_u8_chunk, DataType::UInt8, UInt8Array);
             }
-        },
-        ZarrDataType::Int(s) => {
-            match s {
-                1 => {return_array!(decode_i8_chunk, DataType::Int8, Int8Array);},
-                2 => {return_array!(decode_i16_chunk, DataType::Int16, Int16Array);},
-                4 => {return_array!(decode_i32_chunk, DataType::Int32, Int32Array);},
-                8 => {return_array!(decode_i64_chunk, DataType::Int64, Int64Array);},
-                _ => {return Err(throw_invalid_meta("Invalid zarr data type"))}
+            2 => {
+                return_array!(decode_u16_chunk, DataType::UInt16, UInt16Array);
             }
-        },
-        ZarrDataType::Float(s) => {
-            match s {
-                4 => {return_array!(decode_f32_chunk, DataType::Float32, Float32Array);},
-                8 => {return_array!(decode_f64_chunk, DataType::Float64, Float64Array);},
-                _ => {return Err(throw_invalid_meta("Invalid zarr data type"))}
+            4 => {
+                return_array!(decode_u32_chunk, DataType::UInt32, UInt32Array);
             }
-        },
-        ZarrDataType::TimeStamp(8, u) => {
-            match u.as_str() {
-                "s" => {return_array!(decode_i64_chunk, DataType::Timestamp(TimeUnit::Second, None), TimestampSecondArray);},
-                "ms" => {return_array!(decode_i64_chunk, DataType::Timestamp(TimeUnit::Millisecond, None), TimestampMillisecondArray);},
-                "us" => {return_array!(decode_i64_chunk, DataType::Timestamp(TimeUnit::Microsecond, None), TimestampMicrosecondArray);},
-                "ns" => {return_array!(decode_i64_chunk, DataType::Timestamp(TimeUnit::Nanosecond, None), TimestampNanosecondArray);},
-                _ => {return Err(throw_invalid_meta("Invalid zarr data type"))}
+            8 => {
+                return_array!(decode_u64_chunk, DataType::UInt64, UInt64Array);
             }
+            _ => Err(throw_invalid_meta("Invalid zarr data type")),
+        },
+        ZarrDataType::Int(s) => match s {
+            1 => {
+                return_array!(decode_i8_chunk, DataType::Int8, Int8Array);
+            }
+            2 => {
+                return_array!(decode_i16_chunk, DataType::Int16, Int16Array);
+            }
+            4 => {
+                return_array!(decode_i32_chunk, DataType::Int32, Int32Array);
+            }
+            8 => {
+                return_array!(decode_i64_chunk, DataType::Int64, Int64Array);
+            }
+            _ => Err(throw_invalid_meta("Invalid zarr data type")),
+        },
+        ZarrDataType::Float(s) => match s {
+            4 => {
+                return_array!(decode_f32_chunk, DataType::Float32, Float32Array);
+            }
+            8 => {
+                return_array!(decode_f64_chunk, DataType::Float64, Float64Array);
+            }
+            _ => Err(throw_invalid_meta("Invalid zarr data type")),
+        },
+        ZarrDataType::TimeStamp(8, u) => match u.as_str() {
+            "s" => {
+                return_array!(
+                    decode_i64_chunk,
+                    DataType::Timestamp(TimeUnit::Second, None),
+                    TimestampSecondArray
+                );
+            }
+            "ms" => {
+                return_array!(
+                    decode_i64_chunk,
+                    DataType::Timestamp(TimeUnit::Millisecond, None),
+                    TimestampMillisecondArray
+                );
+            }
+            "us" => {
+                return_array!(
+                    decode_i64_chunk,
+                    DataType::Timestamp(TimeUnit::Microsecond, None),
+                    TimestampMicrosecondArray
+                );
+            }
+            "ns" => {
+                return_array!(
+                    decode_i64_chunk,
+                    DataType::Timestamp(TimeUnit::Nanosecond, None),
+                    TimestampNanosecondArray
+                );
+            }
+            _ => Err(throw_invalid_meta("Invalid zarr data type")),
         },
         ZarrDataType::FixedLengthString(s) | ZarrDataType::FixedLengthPyUnicode(s) => {
             let mut pyunicode = false;
@@ -682,31 +765,34 @@ pub(crate) fn apply_codecs(
             let mut data = decode_string_chunk(
                 raw_data,
                 *s / str_len_adjustment,
-                &chunk_dims,
-                &real_dims,
-                &codecs,
+                chunk_dims,
+                real_dims,
+                codecs,
                 sharding_params,
                 pyunicode,
             )?;
             if let Some(indices) = final_indices {
-                keep_indices(&mut data, &indices);
+                keep_indices(&mut data, indices);
             };
             let field = Field::new(col_name, DataType::Utf8, false);
             let arr: StringArray = data.into();
-            return Ok((Arc::new(arr), Arc::new(field)));
-        },
-        _ => {return Err(throw_invalid_meta("Invalid zarr data type"))}
+
+            Ok((Arc::new(arr), Arc::new(field)))
+        }
+        _ => Err(throw_invalid_meta("Invalid zarr data type")),
     }
 }
 
 #[cfg(test)]
 mod zarr_codecs_tests {
-    use::std::fs::read;
-    use std::path::PathBuf;
     use super::*;
+    use ::std::fs::read;
+    use std::path::PathBuf;
 
     fn get_test_data_path(zarr_array: String) -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test-data/data/zarr/v3_data").join(zarr_array)
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("test-data/data/zarr/v3_data")
+            .join(zarr_array)
     }
 
     // reading a chunk and decoding it using hard coded, known options. this test
@@ -721,14 +807,12 @@ mod zarr_codecs_tests {
         let data_type = ZarrDataType::Int(4);
         let codecs = vec![
             ZarrCodec::Bytes(Endianness::Little),
-            ZarrCodec::BloscCompressor(
-                BloscOptions::new(
-                    CompressorName::Zstd,
-                    5,
-                    ShuffleOptions::Noshuffle,
-                    0,
-                )
-            )
+            ZarrCodec::BloscCompressor(BloscOptions::new(
+                CompressorName::Zstd,
+                5,
+                ShuffleOptions::Noshuffle,
+                0,
+            )),
         ];
         let sharding_params: Option<ShardingOptions> = None;
 
@@ -741,14 +825,17 @@ mod zarr_codecs_tests {
             &codecs,
             sharding_params,
             None,
-        ).unwrap();
+        )
+        .unwrap();
 
         assert_eq!(
             field,
             Arc::new(Field::new("int_data", DataType::Int32, false))
         );
-        let target_arr: Int32Array = vec![68, 69, 70, 71, 84, 85, 86, 87,
-                                          100, 101, 102, 103, 116, 117, 118, 119].into();
+        let target_arr: Int32Array = vec![
+            68, 69, 70, 71, 84, 85, 86, 87, 100, 101, 102, 103, 116, 117, 118, 119,
+        ]
+        .into();
         assert_eq!(*arr, target_arr);
     }
 
@@ -763,28 +850,22 @@ mod zarr_codecs_tests {
         let real_dims = vec![4, 4];
         let data_type = ZarrDataType::Float(8);
         let codecs: Vec<ZarrCodec> = vec![];
-        let sharding_params =  Some(
-            ShardingOptions::new(
-                vec![2, 2],
-                vec![2, 2],
-                vec![
-                    ZarrCodec::Bytes(Endianness::Little),
-                    ZarrCodec::BloscCompressor(
-                        BloscOptions::new(
-                            CompressorName::Zstd,
-                            5,
-                            ShuffleOptions::Noshuffle,
-                            0,
-                        )
-                    )
-                ],
-                vec![
-                    ZarrCodec::Bytes(Endianness::Little),
-                ],
-                IndexLocation::End,
-                0   
-            )
-        );
+        let sharding_params = Some(ShardingOptions::new(
+            vec![2, 2],
+            vec![2, 2],
+            vec![
+                ZarrCodec::Bytes(Endianness::Little),
+                ZarrCodec::BloscCompressor(BloscOptions::new(
+                    CompressorName::Zstd,
+                    5,
+                    ShuffleOptions::Noshuffle,
+                    0,
+                )),
+            ],
+            vec![ZarrCodec::Bytes(Endianness::Little)],
+            IndexLocation::End,
+            0,
+        ));
 
         let (arr, field) = apply_codecs(
             "float_data".to_string(),
@@ -795,14 +876,18 @@ mod zarr_codecs_tests {
             &codecs,
             sharding_params,
             None,
-        ).unwrap();
+        )
+        .unwrap();
 
         assert_eq!(
             field,
             Arc::new(Field::new("float_data", DataType::Float64, false))
         );
-        let target_arr: Float64Array = vec![36.0, 37.0, 44.0, 45.0, 38.0, 39.0, 46.0, 47.0,
-                                            52.0, 53.0, 60.0, 61.0, 54.0, 55.0, 62.0, 63.0,].into();
+        let target_arr: Float64Array = vec![
+            36.0, 37.0, 44.0, 45.0, 38.0, 39.0, 46.0, 47.0, 52.0, 53.0, 60.0, 61.0, 54.0, 55.0,
+            62.0, 63.0,
+        ]
+        .into();
         assert_eq!(*arr, target_arr);
     }
 
@@ -817,28 +902,22 @@ mod zarr_codecs_tests {
         let real_dims = vec![3, 3];
         let data_type = ZarrDataType::UInt(2);
         let codecs: Vec<ZarrCodec> = vec![];
-        let sharding_params =  Some(
-            ShardingOptions::new(
-                vec![2, 2],
-                vec![2, 2],
-                vec![
-                    ZarrCodec::Bytes(Endianness::Little),
-                    ZarrCodec::BloscCompressor(
-                        BloscOptions::new(
-                            CompressorName::Zstd,
-                            5,
-                            ShuffleOptions::Noshuffle,
-                            0,
-                        )
-                    )
-                ],
-                vec![
-                    ZarrCodec::Bytes(Endianness::Little),
-                ],
-                IndexLocation::End,
-                0   
-            )
-        );
+        let sharding_params = Some(ShardingOptions::new(
+            vec![2, 2],
+            vec![2, 2],
+            vec![
+                ZarrCodec::Bytes(Endianness::Little),
+                ZarrCodec::BloscCompressor(BloscOptions::new(
+                    CompressorName::Zstd,
+                    5,
+                    ShuffleOptions::Noshuffle,
+                    0,
+                )),
+            ],
+            vec![ZarrCodec::Bytes(Endianness::Little)],
+            IndexLocation::End,
+            0,
+        ));
 
         let (arr, field) = apply_codecs(
             "uint_data".to_string(),
@@ -849,13 +928,14 @@ mod zarr_codecs_tests {
             &codecs,
             sharding_params,
             None,
-        ).unwrap();
+        )
+        .unwrap();
 
         assert_eq!(
             field,
             Arc::new(Field::new("uint_data", DataType::UInt16, false))
         );
-        let target_arr: UInt16Array = vec![32, 33, 39, 40, 34, 41, 46, 47, 48,].into();
+        let target_arr: UInt16Array = vec![32, 33, 39, 40, 34, 41, 46, 47, 48].into();
         assert_eq!(*arr, target_arr);
     }
 }

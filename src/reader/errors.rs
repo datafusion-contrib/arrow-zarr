@@ -1,8 +1,8 @@
+use arrow_schema::ArrowError;
+use object_store::Error as ObjStoreError;
 use std::error::Error;
 use std::io;
 use std::result::Result;
-use arrow_schema::ArrowError;
-use object_store::Error as ObjStoreError;
 use std::str::Utf8Error;
 
 /// An error enumeration for the zarr operations in the crate.
@@ -24,14 +24,17 @@ impl std::fmt::Display for ZarrError {
             ZarrError::InvalidMetadata(msg) => write!(fmt, "Invalid zarr metadata: {msg}"),
             ZarrError::InvalidPredicate(msg) => write!(fmt, "Invalid zarr predicate: {msg}"),
             ZarrError::MissingChunk(pos) => {
-                let s: Vec<String> = pos.into_iter().map(|i| i.to_string()).collect();
+                let s: Vec<String> = pos.iter().map(|i| i.to_string()).collect();
                 let s = s.join(".");
                 write!(fmt, "Missing zarr chunk file: {s}")
-            },
+            }
             ZarrError::MissingArray(arr_name) => write!(fmt, "Missing zarr chunk file: {arr_name}"),
             ZarrError::InvalidChunkRange(start, end, l) => {
-                write!(fmt, "Invalid chunk range {start}, {end} with store on length {l}")
-            },
+                write!(
+                    fmt,
+                    "Invalid chunk range {start}, {end} with store on length {l}"
+                )
+            }
             ZarrError::Io(e) => write!(fmt, "IO error: {e}"),
             ZarrError::Arrow(e) => write!(fmt, "Arrow error: {e}"),
             ZarrError::ObjectStore(e) => write!(fmt, "Arrow error: {e}"),

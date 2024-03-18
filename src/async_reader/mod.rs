@@ -1,5 +1,5 @@
 //! A module tha provides an asychronous reader for zarr store, to generate [`RecordBatch`]es.
-//! 
+//!
 //! ```
 //! # #[tokio::main(flavor="current_thread")]
 //! # async fn main() {
@@ -33,15 +33,15 @@
 //! #          expected_lines, actual_lines
 //! #      );
 //! #  }
-//! 
+//!
 //! // The ZarrReadAsync trait is implemented for the ZarrPath struct.
 //! let p: ZarrPath = get_test_data_path("lat_lon_example.zarr".to_string());
-//! 
+//!
 //! let proj = ZarrProjection::keep(vec!["lat".to_string(), "float_data".to_string()]);
 //! let builder = ZarrRecordBatchStreamBuilder::new(p).with_projection(proj);
 //! let mut stream = builder.build().await.unwrap();
 //! let mut rec_batches: Vec<_> = stream.try_collect().await.unwrap();
-//! 
+//!
 //! assert_batches_eq(
 //!     &[rec_batches.remove(0)],
 //!     &[
@@ -70,25 +70,25 @@
 //! # }
 //! ```
 
+use arrow_array::{BooleanArray, RecordBatch};
+use async_trait::async_trait;
+use futures::stream::Stream;
+use futures::{ready, FutureExt};
+use futures_util::future::BoxFuture;
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use futures::{ready, FutureExt};
-use futures::stream::Stream;
-use async_trait::async_trait;
-use futures_util::future::BoxFuture;
-use arrow_array::{RecordBatch, BooleanArray};
 
-use crate::reader::{ZarrProjection, ZarrInMemoryChunk, ZarrStoreMetadata};
-use crate::reader::{ZarrResult, ZarrError};
 use crate::reader::ZarrChunkFilter;
-use crate::reader::{unwrap_or_return, ZarrRecordBatchReader, ZarrIterator};
+use crate::reader::{unwrap_or_return, ZarrIterator, ZarrRecordBatchReader};
+use crate::reader::{ZarrError, ZarrResult};
+use crate::reader::{ZarrInMemoryChunk, ZarrProjection, ZarrStoreMetadata};
 
 pub use crate::async_reader::zarr_read_async::{ZarrPath, ZarrReadAsync};
 
 pub mod zarr_read_async;
 
 /// A zarr store that holds an async reader for all the zarr data.
-pub struct ZarrStoreAsync<T: ZarrReadAsync> {
+pub struct ZarrStoreAsync<T: for<'a> ZarrReadAsync<'a>> {
     meta: ZarrStoreMetadata,
     chunk_positions: Vec<Vec<usize>>,
     zarr_reader: T,
@@ -96,7 +96,7 @@ pub struct ZarrStoreAsync<T: ZarrReadAsync> {
     curr_chunk: usize,
 }
 
-impl<T: ZarrReadAsync> ZarrStoreAsync<T> {
+impl<T: for<'a> ZarrReadAsync<'a>> ZarrStoreAsync<T> {
     async fn new(
         zarr_reader: T,
         chunk_positions: Vec<Vec<usize>>,
@@ -104,7 +104,7 @@ impl<T: ZarrReadAsync> ZarrStoreAsync<T> {
     ) -> ZarrResult<Self> {
         let meta = zarr_reader.get_zarr_metadata().await?;
         Ok(Self {
-            meta: meta,
+            meta,
             chunk_positions,
             zarr_reader,
             projection,
@@ -124,9 +124,9 @@ pub trait ZarrStream {
 /// Implementation of the [`ZarrStream`] trait for the [`ZarrStoreAsync`] struct, which
 /// itself holds an asynchronous reader for the zarr data.
 #[async_trait]
-impl<T> ZarrStream for ZarrStoreAsync<T> 
+impl<T> ZarrStream for ZarrStoreAsync<T>
 where
-    T: ZarrReadAsync + Unpin + Send + 'static,
+    T: for<'a> ZarrReadAsync<'a> + Unpin + Send + 'static,
 {
     async fn poll_next_chunk(&mut self) -> Option<ZarrResult<ZarrInMemoryChunk>> {
         if self.curr_chunk == self.chunk_positions.len() {
@@ -137,9 +137,10 @@ where
         let cols = self.projection.apply_selection(self.meta.get_columns());
         let cols = unwrap_or_return!(cols);
 
-        let chnk = self.zarr_reader.get_zarr_chunk(
-            pos, &cols, self.meta.get_real_dims(pos),
-        ).await;
+        let chnk = self
+            .zarr_reader
+            .get_zarr_chunk(pos, &cols, self.meta.get_real_dims(pos))
+            .await;
 
         self.curr_chunk += 1;
         Some(chnk)
@@ -152,16 +153,16 @@ where
     }
 }
 
-// a simple struct to expose the zarr iterator trait for a single, 
+// a simple struct to expose the zarr iterator trait for a single,
 // preprocessed in memory chunk.
 struct ZarrInMemoryChunkContainer {
     data: ZarrInMemoryChunk,
-    done: bool
+    done: bool,
 }
 
 impl ZarrInMemoryChunkContainer {
     fn new(data: ZarrInMemoryChunk) -> Self {
-        Self{data, done: false}
+        Self { data, done: false }
     }
 }
 
@@ -182,17 +183,17 @@ impl ZarrIterator for ZarrInMemoryChunkContainer {
 // struct to bundle the store and the chunk data it returns together
 // in a future so that that future's lifetime is static.
 struct ZarrStoreWrapper<T: ZarrStream> {
-    store: T
+    store: T,
 }
 
 impl<T: ZarrStream> ZarrStoreWrapper<T> {
     fn new(store: T) -> Self {
-        Self{store}
+        Self { store }
     }
 
     async fn get_next(mut self) -> (Self, Option<ZarrResult<ZarrInMemoryChunk>>) {
         let next = self.store.poll_next_chunk().await;
-        return (self, next);
+        (self, next)
     }
 }
 type StoreReadResults<T> = (ZarrStoreWrapper<T>, Option<ZarrResult<ZarrInMemoryChunk>>);
@@ -209,10 +210,9 @@ enum ZarrStreamState<T: ZarrStream> {
 /// A struct to read all the requested content from a zarr store, through the implementation
 /// of the [`Stream`] trait, with [`Item = ZarrResult<RecordBatch>`]. Can only be created
 /// through a [`ZarrRecordBatchStreamBuilder`]. The data is read asynchronously.
-/// 
+///
 /// For a sync API see [`crate::reader::ZarrRecordBatchReader`].
-pub struct ZarrRecordBatchStream<T: ZarrStream> 
-{
+pub struct ZarrRecordBatchStream<T: ZarrStream> {
     meta: ZarrStoreMetadata,
     filter: Option<ZarrChunkFilter>,
     state: ZarrStreamState<T>,
@@ -221,7 +221,7 @@ pub struct ZarrRecordBatchStream<T: ZarrStream>
     // an option so that we can "take" the wrapper and bundle it
     // in a future when polling the stream.
     store_wrapper: Option<ZarrStoreWrapper<T>>,
-    
+
     // this one is an option because it may or may not be present, not
     // just so that we can take it later (but it's useful for that too)
     predicate_store_wrapper: Option<ZarrStoreWrapper<T>>,
@@ -232,7 +232,7 @@ impl<T: ZarrStream> ZarrRecordBatchStream<T> {
         meta: ZarrStoreMetadata,
         zarr_store: T,
         filter: Option<ZarrChunkFilter>,
-        mut predicate_store: Option<T>
+        mut predicate_store: Option<T>,
     ) -> Self {
         let mut predicate_store_wrapper = None;
         if predicate_store.is_some() {
@@ -249,11 +249,10 @@ impl<T: ZarrStream> ZarrRecordBatchStream<T> {
     }
 }
 
-
 const LOST_STORE_ERR: &str = "unexpectedly lost store wrapper in zarr record batch stream";
 /// The [`Stream`] trait implementation for a [`ZarrRecordBatchStream`]. Provides the interface
 /// through which the record batches can be retrieved.
-impl<T> Stream for ZarrRecordBatchStream<T> 
+impl<T> Stream for ZarrRecordBatchStream<T>
 where
     T: ZarrStream + Unpin + Send + 'static,
 {
@@ -266,13 +265,12 @@ where
                         let wrapper = self.store_wrapper.take().expect(LOST_STORE_ERR);
                         let fut = wrapper.get_next().boxed();
                         self.state = ZarrStreamState::Reading(fut);
-
                     } else {
                         let wrapper = self.predicate_store_wrapper.take().unwrap();
                         let fut = wrapper.get_next().boxed();
                         self.state = ZarrStreamState::ReadingPredicateData(fut);
                     }
-                },
+                }
                 ZarrStreamState::ReadingPredicateData(f) => {
                     let (wrapper, chunk) = ready!(f.poll_unpin(cx));
                     self.predicate_store_wrapper = Some(wrapper);
@@ -288,28 +286,32 @@ where
                     if let Err(e) = chunk {
                         self.state = ZarrStreamState::Error;
                         return Poll::Ready(Some(Err(e)));
-                    } 
+                    }
 
                     let chunk = chunk.unwrap();
                     let container = ZarrInMemoryChunkContainer::new(chunk);
 
                     if self.filter.is_none() {
                         self.state = ZarrStreamState::Error;
-                        return Poll::Ready(
-                            Some(Err(ZarrError::InvalidMetadata(
-                                "predicate store provided with no filter in zarr record batch stream".to_string()
-                            )))
-                        );
+                        return Poll::Ready(Some(Err(ZarrError::InvalidMetadata(
+                            "predicate store provided with no filter in zarr record batch stream"
+                                .to_string(),
+                        ))));
                     }
                     let zarr_reader = ZarrRecordBatchReader::new(
-                        self.meta.clone(), None, self.filter.as_ref().cloned(), Some(container)
+                        self.meta.clone(),
+                        None,
+                        self.filter.as_ref().cloned(),
+                        Some(container),
                     );
                     self.state = ZarrStreamState::ProcessingPredicate(zarr_reader);
-                },
+                }
                 ZarrStreamState::ProcessingPredicate(reader) => {
                     // this call should always return something, we should never get a None because
                     // if we're here it means we provided a filter and some predicate data to evaluate.
-                    let mask = reader.next().expect("could not get mask in zarr record batch stream");
+                    let mask = reader
+                        .next()
+                        .expect("could not get mask in zarr record batch stream");
                     if let Err(e) = mask {
                         self.state = ZarrStreamState::Error;
                         return Poll::Ready(Some(Err(e)));
@@ -317,17 +319,19 @@ where
 
                     // here we know that mask will have a single boolean array column because of the
                     // way the reader was created in the previous state.
-                    let mask = mask.unwrap()
-                                   .column(0)
-                                   .as_any()
-                                   .downcast_ref::<BooleanArray>()
-                                   .expect("could not cast mask to boolean array in zarr record batch stream")
-                                   .clone();
+                    let mask = mask
+                        .unwrap()
+                        .column(0)
+                        .as_any()
+                        .downcast_ref::<BooleanArray>()
+                        .expect("could not cast mask to boolean array in zarr record batch stream")
+                        .clone();
                     if mask.true_count() == 0 {
-                        self.store_wrapper.as_mut()
-                                          .expect(LOST_STORE_ERR)
-                                          .store
-                                          .skip_next_chunk();
+                        self.store_wrapper
+                            .as_mut()
+                            .expect(LOST_STORE_ERR)
+                            .store
+                            .skip_next_chunk();
                         self.state = ZarrStreamState::Init;
                     } else {
                         self.mask = Some(mask);
@@ -335,8 +339,7 @@ where
                         let fut = wrapper.get_next().boxed();
                         self.state = ZarrStreamState::Reading(fut);
                     }
-
-                },
+                }
                 ZarrStreamState::Reading(f) => {
                     let (wrapper, chunk) = ready!(f.poll_unpin(cx));
                     self.store_wrapper = Some(wrapper);
@@ -351,23 +354,24 @@ where
                     if let Err(e) = chunk {
                         self.state = ZarrStreamState::Error;
                         return Poll::Ready(Some(Err(e)));
-                    } 
+                    }
 
                     let chunk = chunk.unwrap();
                     let container = ZarrInMemoryChunkContainer::new(chunk);
-                    let mut zarr_reader = ZarrRecordBatchReader::new(
-                        self.meta.clone(), Some(container), None, None
-                    );
-                    
+                    let mut zarr_reader =
+                        ZarrRecordBatchReader::new(self.meta.clone(), Some(container), None, None);
+
                     if self.mask.is_some() {
                         zarr_reader = zarr_reader.with_row_mask(self.mask.take().unwrap());
                     }
                     self.state = ZarrStreamState::Decoding(zarr_reader);
-                },
+                }
                 ZarrStreamState::Decoding(reader) => {
                     // this call should always return something, we should never get a None because
                     // if we're here it means we provided store with a zarr in memory chunk to the reader
-                    let rec_batch = reader.next().expect("could not get record batch in zarr record batch stream");
+                    let rec_batch = reader
+                        .next()
+                        .expect("could not get record batch in zarr record batch stream");
 
                     if let Err(e) = rec_batch {
                         self.state = ZarrStreamState::Error;
@@ -376,7 +380,7 @@ where
 
                     self.state = ZarrStreamState::Init;
                     return Poll::Ready(Some(rec_batch));
-                },
+                }
                 ZarrStreamState::Error => return Poll::Ready(None),
             }
         }
@@ -384,44 +388,57 @@ where
 }
 
 /// A builder used to construct a [`ZarrRecordBatchStream`] for a zarr store.
-/// 
+///
 /// To build the equivalent synchronous reader see [`crate::reader::ZarrRecordBatchReaderBuilder`].
-pub struct ZarrRecordBatchStreamBuilder<T: ZarrReadAsync + Clone + Unpin + Send> 
-{
+pub struct ZarrRecordBatchStreamBuilder<T: for<'a> ZarrReadAsync<'a> + Clone + Unpin + Send> {
     zarr_reader_async: T,
     projection: ZarrProjection,
     filter: Option<ZarrChunkFilter>,
 }
 
-impl<T: ZarrReadAsync + Clone + Unpin + Send + 'static> ZarrRecordBatchStreamBuilder<T> {
-    /// Create a [`ZarrRecordBatchStreamBuilder`] from a [`ZarrReadAsync`] struct. 
+impl<T: for<'a> ZarrReadAsync<'a> + Clone + Unpin + Send + 'static>
+    ZarrRecordBatchStreamBuilder<T>
+{
+    /// Create a [`ZarrRecordBatchStreamBuilder`] from a [`ZarrReadAsync`] struct.
     pub fn new(zarr_reader_async: T) -> Self {
-        Self{zarr_reader_async, projection: ZarrProjection::all(), filter: None}
+        Self {
+            zarr_reader_async,
+            projection: ZarrProjection::all(),
+            filter: None,
+        }
     }
 
     /// Adds a column projection to the builder, so that the resulting reader will only
     /// read some of the columns (zarr arrays) from the zarr store.
     pub fn with_projection(self, projection: ZarrProjection) -> Self {
-        Self {projection: projection, ..self}
+        Self { projection, ..self }
     }
 
     /// Adds a row filter to the builder, so that the resulting reader will only
     /// read rows that satisfy some conditions from the zarr store.
     pub fn with_filter(self, filter: ZarrChunkFilter) -> Self {
-        Self {filter: Some(filter), ..self}
+        Self {
+            filter: Some(filter),
+            ..self
+        }
     }
 
     /// Build a [`ZarrRecordBatchStream`], consuming the builder. The option range
     /// argument controls the start and end chunk (following the way zarr chunks are
     /// named and numbered).
     pub async fn build_partial_reader(
-        self, chunk_range: Option<(usize, usize)>
+        self,
+        chunk_range: Option<(usize, usize)>,
     ) -> ZarrResult<ZarrRecordBatchStream<ZarrStoreAsync<T>>> {
         let meta = self.zarr_reader_async.get_zarr_metadata().await?;
         let mut chunk_pos: Vec<Vec<usize>> = meta.get_chunk_positions();
         if let Some(chunk_range) = chunk_range {
             if (chunk_range.0 > chunk_range.1) | (chunk_range.1 > chunk_pos.len()) {
-                return Err(ZarrError::InvalidChunkRange(chunk_range.0, chunk_range.1, chunk_pos.len()))
+                return Err(ZarrError::InvalidChunkRange(
+                    chunk_range.0,
+                    chunk_range.1,
+                    chunk_pos.len(),
+                ));
             }
             chunk_pos = chunk_pos[chunk_range.0..chunk_range.1].to_vec();
         }
@@ -431,15 +448,22 @@ impl<T: ZarrReadAsync + Clone + Unpin + Send + 'static> ZarrRecordBatchStreamBui
             let predicate_proj = filter.get_all_projections();
             predicate_stream = Some(
                 ZarrStoreAsync::new(
-                    self.zarr_reader_async.clone(), chunk_pos.clone(), predicate_proj.clone()
-                ).await?
+                    self.zarr_reader_async.clone(),
+                    chunk_pos.clone(),
+                    predicate_proj.clone(),
+                )
+                .await?,
             );
         }
 
-        let zarr_stream = ZarrStoreAsync::new(
-            self.zarr_reader_async, chunk_pos, self.projection.clone()
-        ).await?;
-        Ok(ZarrRecordBatchStream::new(meta, zarr_stream, self.filter, predicate_stream))
+        let zarr_stream =
+            ZarrStoreAsync::new(self.zarr_reader_async, chunk_pos, self.projection.clone()).await?;
+        Ok(ZarrRecordBatchStream::new(
+            meta,
+            zarr_stream,
+            self.filter,
+            predicate_stream,
+        ))
     }
 
     /// Build a [`ZarrRecordBatchStream`], consuming the builder. The resulting reader
@@ -451,28 +475,28 @@ impl<T: ZarrReadAsync + Clone + Unpin + Send + 'static> ZarrRecordBatchStreamBui
 
 #[cfg(test)]
 mod zarr_async_reader_tests {
-    use arrow_array::*;
-    use arrow_array::types::*;
+    use arrow::compute::kernels::cmp::{gt_eq, lt};
     use arrow_array::cast::AsArray;
+    use arrow_array::types::*;
+    use arrow_array::*;
     use arrow_schema::DataType;
     use futures_util::TryStreamExt;
-    use object_store::{path::Path, local::LocalFileSystem};
-    use std::sync::Arc;
     use itertools::enumerate;
-    use arrow::compute::kernels::cmp::{gt_eq, lt};
-    use std::{path::PathBuf, collections::HashMap, fmt::Debug};
+    use object_store::{local::LocalFileSystem, path::Path};
+    use std::sync::Arc;
+    use std::{collections::HashMap, fmt::Debug, path::PathBuf};
 
     use super::*;
     use crate::async_reader::zarr_read_async::ZarrPath;
-    use crate::reader::{ZarrArrowPredicateFn, ZarrArrowPredicate};
+    use crate::reader::{ZarrArrowPredicate, ZarrArrowPredicateFn};
 
     fn get_v2_test_data_path(zarr_store: String) -> ZarrPath {
         let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                        .join("test-data/data/zarr/v2_data")
-                        .join(zarr_store);
+            .join("test-data/data/zarr/v2_data")
+            .join(zarr_store);
         ZarrPath::new(
             Arc::new(LocalFileSystem::new()),
-            Path::from_absolute_path(p).unwrap()
+            Path::from_absolute_path(p).unwrap(),
         )
     }
 
@@ -486,10 +510,7 @@ mod zarr_async_reader_tests {
         assert_eq!(from_rec, target_cols);
 
         for field in schema.fields.iter() {
-            assert_eq!(
-                field.data_type(),
-                targets.get(field.name()).unwrap()
-            );
+            assert_eq!(field.data_type(), targets.get(field.name()).unwrap());
         }
     }
 
@@ -507,19 +528,16 @@ mod zarr_async_reader_tests {
         assert!(matched);
     }
 
-    fn validate_primitive_column<T, U>(col_name: &str, rec: &RecordBatch, targets: &[U]) 
+    fn validate_primitive_column<T, U>(col_name: &str, rec: &RecordBatch, targets: &[U])
     where
         T: ArrowPrimitiveType,
         [U]: AsRef<[<T as arrow_array::ArrowPrimitiveType>::Native]>,
-        U: Debug
+        U: Debug,
     {
         let mut matched = false;
         for (idx, col) in enumerate(rec.schema().fields.iter()) {
             if col.name().as_str() == col_name {
-                assert_eq!(
-                    rec.column(idx).as_primitive::<T>().values(),
-                    targets,
-                );
+                assert_eq!(rec.column(idx).as_primitive::<T>().values(), targets,);
                 matched = true;
             }
         }
@@ -543,8 +561,16 @@ mod zarr_async_reader_tests {
         // center chunk
         let rec = &records[4];
         validate_names_and_types(&target_types, rec);
-        validate_bool_column(&"bool_data", rec, &[false, true, false, false, true, false, false, true, false]);
-        validate_primitive_column::<Int64Type, i64>(&"int_data", rec, &[-4, -3, -2, 4, 5, 6, 12, 13, 14]);
+        validate_bool_column(
+            "bool_data",
+            rec,
+            &[false, true, false, false, true, false, false, true, false],
+        );
+        validate_primitive_column::<Int64Type, i64>(
+            "int_data",
+            rec,
+            &[-4, -3, -2, 4, 5, 6, 12, 13, 14],
+        );
     }
 
     #[tokio::test]
@@ -554,28 +580,38 @@ mod zarr_async_reader_tests {
         let mut filters: Vec<Box<dyn ZarrArrowPredicate>> = Vec::new();
         let f = ZarrArrowPredicateFn::new(
             ZarrProjection::keep(vec!["lat".to_string()]),
-            move |batch| (
-                gt_eq(batch.column_by_name("lat").unwrap(), &Scalar::new(&Float64Array::from(vec![38.6])))
-            ),
+            move |batch| {
+                gt_eq(
+                    batch.column_by_name("lat").unwrap(),
+                    &Scalar::new(&Float64Array::from(vec![38.6])),
+                )
+            },
         );
         filters.push(Box::new(f));
         let f = ZarrArrowPredicateFn::new(
             ZarrProjection::keep(vec!["lon".to_string()]),
-            move |batch| (
-                gt_eq(batch.column_by_name("lon").unwrap(), &Scalar::new(&Float64Array::from(vec![-109.7])))
-            ),
+            move |batch| {
+                gt_eq(
+                    batch.column_by_name("lon").unwrap(),
+                    &Scalar::new(&Float64Array::from(vec![-109.7])),
+                )
+            },
         );
         filters.push(Box::new(f));
         let f = ZarrArrowPredicateFn::new(
             ZarrProjection::keep(vec!["lon".to_string()]),
-            move |batch| (
-               lt(batch.column_by_name("lon").unwrap(), &Scalar::new(&Float64Array::from(vec![-109.2])))
-            ),
+            move |batch| {
+                lt(
+                    batch.column_by_name("lon").unwrap(),
+                    &Scalar::new(&Float64Array::from(vec![-109.2])),
+                )
+            },
         );
         filters.push(Box::new(f));
 
         let zp = get_v2_test_data_path("lat_lon_example.zarr".to_string());
-        let stream_builder = ZarrRecordBatchStreamBuilder::new(zp).with_filter(ZarrChunkFilter::new(filters));
+        let stream_builder =
+            ZarrRecordBatchStreamBuilder::new(zp).with_filter(ZarrChunkFilter::new(filters));
         let stream = stream_builder.build().await.unwrap();
         let records: Vec<_> = stream.try_collect().await.unwrap();
 
@@ -587,16 +623,22 @@ mod zarr_async_reader_tests {
 
         let rec = &records[1];
         validate_names_and_types(&target_types, rec);
-        validate_primitive_column::<Float64Type, f64>(&"lat", rec, &[38.8, 38.9, 39.0]);
-        validate_primitive_column::<Float64Type, f64>(&"lon", rec, &[-109.7, -109.7, -109.7]);
-        validate_primitive_column::<Float64Type, f64>(&"float_data", rec, &[1042.0, 1043.0, 1044.0]);
+        validate_primitive_column::<Float64Type, f64>("lat", rec, &[38.8, 38.9, 39.0]);
+        validate_primitive_column::<Float64Type, f64>("lon", rec, &[-109.7, -109.7, -109.7]);
+        validate_primitive_column::<Float64Type, f64>("float_data", rec, &[1042.0, 1043.0, 1044.0]);
     }
 
     #[tokio::test]
     async fn multiple_readers_tests() {
         let zp = get_v2_test_data_path("compression_example.zarr".to_string());
-        let stream1 = ZarrRecordBatchStreamBuilder::new(zp.clone()).build_partial_reader(Some((0, 5))).await.unwrap();
-        let stream2 = ZarrRecordBatchStreamBuilder::new(zp).build_partial_reader(Some((5, 9))).await.unwrap();
+        let stream1 = ZarrRecordBatchStreamBuilder::new(zp.clone())
+            .build_partial_reader(Some((0, 5)))
+            .await
+            .unwrap();
+        let stream2 = ZarrRecordBatchStreamBuilder::new(zp)
+            .build_partial_reader(Some((5, 9)))
+            .await
+            .unwrap();
 
         let records1: Vec<_> = stream1.try_collect().await.unwrap();
         let records2: Vec<_> = stream2.try_collect().await.unwrap();
@@ -612,27 +654,47 @@ mod zarr_async_reader_tests {
         // center chunk
         let rec = &records1[4];
         validate_names_and_types(&target_types, rec);
-        validate_bool_column(&"bool_data", rec, &[false, true, false, false, true, false, false, true, false]);
-        validate_primitive_column::<Int64Type, i64>(&"int_data", rec, &[-4, -3, -2, 4, 5, 6, 12, 13, 14]);
-        validate_primitive_column::<UInt64Type, u64>(&"uint_data", rec, &[27, 28, 29, 35, 36, 37, 43, 44, 45]);
-        validate_primitive_column::<Float64Type, f64>(
-            &"float_data", rec, &[127., 128., 129., 135., 136., 137., 143., 144., 145.]
+        validate_bool_column(
+            "bool_data",
+            rec,
+            &[false, true, false, false, true, false, false, true, false],
+        );
+        validate_primitive_column::<Int64Type, i64>(
+            "int_data",
+            rec,
+            &[-4, -3, -2, 4, 5, 6, 12, 13, 14],
+        );
+        validate_primitive_column::<UInt64Type, u64>(
+            "uint_data",
+            rec,
+            &[27, 28, 29, 35, 36, 37, 43, 44, 45],
         );
         validate_primitive_column::<Float64Type, f64>(
-            &"float_data_no_comp", rec, &[227., 228., 229., 235., 236., 237., 243., 244., 245.]
+            "float_data",
+            rec,
+            &[127., 128., 129., 135., 136., 137., 143., 144., 145.],
+        );
+        validate_primitive_column::<Float64Type, f64>(
+            "float_data_no_comp",
+            rec,
+            &[227., 228., 229., 235., 236., 237., 243., 244., 245.],
         );
 
         // bottom edge chunk
         let rec = &records2[2];
         validate_names_and_types(&target_types, rec);
-        validate_bool_column(&"bool_data", rec, &[false, true, false, false, true, false]);
-        validate_primitive_column::<Int64Type, i64>(&"int_data", rec, &[20, 21, 22, 28, 29, 30]);
-        validate_primitive_column::<UInt64Type, u64>(&"uint_data", rec, &[51, 52, 53, 59, 60, 61]);
+        validate_bool_column("bool_data", rec, &[false, true, false, false, true, false]);
+        validate_primitive_column::<Int64Type, i64>("int_data", rec, &[20, 21, 22, 28, 29, 30]);
+        validate_primitive_column::<UInt64Type, u64>("uint_data", rec, &[51, 52, 53, 59, 60, 61]);
         validate_primitive_column::<Float64Type, f64>(
-            &"float_data", rec, &[151.0, 152.0, 153.0, 159.0, 160.0, 161.0]
+            "float_data",
+            rec,
+            &[151.0, 152.0, 153.0, 159.0, 160.0, 161.0],
         );
         validate_primitive_column::<Float64Type, f64>(
-            &"float_data_no_comp", rec, &[251.0, 252.0, 253.0, 259.0, 260.0, 261.0]
+            "float_data_no_comp",
+            rec,
+            &[251.0, 252.0, 253.0, 259.0, 260.0, 261.0],
         );
     }
 
@@ -646,9 +708,12 @@ mod zarr_async_reader_tests {
         let mut filters: Vec<Box<dyn ZarrArrowPredicate>> = Vec::new();
         let f = ZarrArrowPredicateFn::new(
             ZarrProjection::keep(vec!["lat".to_string()]),
-            move |batch| (
-                gt_eq(batch.column_by_name("lat").unwrap(), &Scalar::new(&Float64Array::from(vec![100.0])))
-            ),
+            move |batch| {
+                gt_eq(
+                    batch.column_by_name("lat").unwrap(),
+                    &Scalar::new(&Float64Array::from(vec![100.0])),
+                )
+            },
         );
         filters.push(Box::new(f));
 
@@ -662,11 +727,11 @@ mod zarr_async_reader_tests {
 
     fn get_v3_test_data_path(zarr_store: String) -> ZarrPath {
         let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                        .join("test-data/data/zarr/v3_data")
-                        .join(zarr_store);
+            .join("test-data/data/zarr/v3_data")
+            .join(zarr_store);
         ZarrPath::new(
             Arc::new(LocalFileSystem::new()),
-            Path::from_absolute_path(p).unwrap()
+            Path::from_absolute_path(p).unwrap(),
         )
     }
 
@@ -686,10 +751,19 @@ mod zarr_async_reader_tests {
         let rec = &records[2];
         validate_names_and_types(&target_types, rec);
         validate_primitive_column::<Float64Type, f64>(
-            &"float_data", rec, &[32.0, 33.0, 40.0, 41.0, 34.0, 35.0, 42.0, 43.0, 48.0, 49.0, 56.0, 57.0, 50.0, 51.0, 58.0, 59.0]
+            "float_data",
+            rec,
+            &[
+                32.0, 33.0, 40.0, 41.0, 34.0, 35.0, 42.0, 43.0, 48.0, 49.0, 56.0, 57.0, 50.0, 51.0,
+                58.0, 59.0,
+            ],
         );
         validate_primitive_column::<Int64Type, i64>(
-            &"int_data", rec, &[32, 33, 40, 41, 34, 35, 42, 43, 48, 49, 56, 57, 50, 51, 58, 59]
+            "int_data",
+            rec,
+            &[
+                32, 33, 40, 41, 34, 35, 42, 43, 48, 49, 56, 57, 50, 51, 58, 59,
+            ],
         );
     }
 
@@ -706,12 +780,14 @@ mod zarr_async_reader_tests {
         let rec = &records[23];
         validate_names_and_types(&target_types, rec);
         validate_primitive_column::<Float64Type, f64>(
-            &"float_data", rec, &[1020.0, 1021.0, 1031.0, 1032.0, 1141.0, 1142.0,
-                                  1152.0, 1153.0, 1022.0, 1033.0, 1143.0, 1154.0,
-                                  1042.0, 1043.0, 1053.0, 1054.0, 1163.0, 1164.0,
-                                  1174.0, 1175.0, 1044.0, 1055.0, 1165.0, 1176.0,
-                                  1262.0, 1263.0, 1273.0, 1274.0, 1264.0, 1275.0,
-                                  1284.0, 1285.0, 1295.0, 1296.0, 1286.0, 1297.0]
+            "float_data",
+            rec,
+            &[
+                1020.0, 1021.0, 1031.0, 1032.0, 1141.0, 1142.0, 1152.0, 1153.0, 1022.0, 1033.0,
+                1143.0, 1154.0, 1042.0, 1043.0, 1053.0, 1054.0, 1163.0, 1164.0, 1174.0, 1175.0,
+                1044.0, 1055.0, 1165.0, 1176.0, 1262.0, 1263.0, 1273.0, 1274.0, 1264.0, 1275.0,
+                1284.0, 1285.0, 1295.0, 1296.0, 1286.0, 1297.0,
+            ],
         );
     }
 }

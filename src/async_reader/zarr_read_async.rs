@@ -1,28 +1,27 @@
 use async_trait::async_trait;
-use object_store::{ObjectStore, path::Path};
-use std::sync::Arc;
 use futures_util::{pin_mut, StreamExt};
+use object_store::{path::Path, ObjectStore};
+use std::sync::Arc;
 
+use crate::reader::{ZarrError, ZarrResult};
 use crate::reader::{ZarrInMemoryChunk, ZarrStoreMetadata};
-use crate::reader::{ZarrResult, ZarrError};
 
 /// A trait that exposes methods to get data from a zarr store asynchronously.
 #[async_trait]
-pub trait ZarrReadAsync {
+pub trait ZarrReadAsync<'a> {
     /// Method to retrieve the metadata from a zarr store asynchronously.
     async fn get_zarr_metadata(&self) -> ZarrResult<ZarrStoreMetadata>;
-    
+
     /// Method to retrive the data in a zarr chunk asynchronously, which is really
-    /// the data contained into one or more chunk files, one per zarr array in 
+    /// the data contained into one or more chunk files, one per zarr array in
     /// the store.
     async fn get_zarr_chunk(
         &self,
-        position: &Vec<usize>,
-        cols: &Vec<String>,
+        position: &'a [usize],
+        cols: &'a [String],
         real_dims: Vec<usize>,
     ) -> ZarrResult<ZarrInMemoryChunk>;
 }
-
 
 /// A wrapper around a pointer to an [`ObjectStore`] an a path that points
 /// to a zarr store.
@@ -32,16 +31,16 @@ pub struct ZarrPath {
     location: Path,
 }
 
-impl ZarrPath{
+impl ZarrPath {
     pub fn new(store: Arc<dyn ObjectStore>, location: Path) -> Self {
-        Self {store, location}
+        Self { store, location }
     }
 }
 
 /// Implementation of the [`ZarrReadAsync`] trait for a [`ZarrPath`] which contains the
 /// object store that the data will be read from.
 #[async_trait]
-impl ZarrReadAsync for ZarrPath {
+impl<'a> ZarrReadAsync<'a> for ZarrPath {
     async fn get_zarr_metadata(&self) -> ZarrResult<ZarrStoreMetadata> {
         let mut meta = ZarrStoreMetadata::new();
         let stream = self.store.list(Some(&self.location));
@@ -62,20 +61,22 @@ impl ZarrReadAsync for ZarrPath {
         }
 
         if meta.get_num_columns() == 0 {
-            return Err(ZarrError::InvalidMetadata("Could not find valid metadata in zarr store".to_string()))
+            return Err(ZarrError::InvalidMetadata(
+                "Could not find valid metadata in zarr store".to_string(),
+            ));
         }
         Ok(meta)
     }
 
     async fn get_zarr_chunk(
         &self,
-        position: &Vec<usize>,
-        cols: &Vec<String>,
+        position: &'a [usize],
+        cols: &'a [String],
         real_dims: Vec<usize>,
     ) -> ZarrResult<ZarrInMemoryChunk> {
         let mut chunk = ZarrInMemoryChunk::new(real_dims);
         for var in cols {
-            let s: Vec<String> = position.into_iter().map(|i| i.to_string()).collect();
+            let s: Vec<String> = position.iter().map(|i| i.to_string()).collect();
             let s = s.join(".");
 
             let p = self.location.child(var.to_string()).child(s);
@@ -89,20 +90,21 @@ impl ZarrReadAsync for ZarrPath {
 
 #[cfg(test)]
 mod zarr_read_async_tests {
-    use object_store::{path::Path, local::LocalFileSystem};
+    use object_store::{local::LocalFileSystem, path::Path};
+    use std::collections::HashSet;
     use std::path::PathBuf;
     use std::sync::Arc;
-    use std::collections::HashSet;
 
     use super::*;
-    use crate::reader::metadata::{ZarrArrayMetadata, ChunkSeparator};
-    use crate::reader::codecs::{ZarrCodec, ZarrDataType, Endianness};
+    use crate::reader::codecs::{Endianness, ZarrCodec, ZarrDataType};
+    use crate::reader::metadata::{ChunkSeparator, ZarrArrayMetadata};
     use crate::reader::ZarrProjection;
 
     fn get_test_data_file_system() -> LocalFileSystem {
         LocalFileSystem::new_with_prefix(
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test-data/data/zarr/v2_data")
-        ).unwrap()
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test-data/data/zarr/v2_data"),
+        )
+        .unwrap()
     }
 
     #[tokio::test]
@@ -146,9 +148,10 @@ mod zarr_read_async_tests {
 
         // test read from an array where the data is just raw bytes
         let pos = vec![1, 2];
-        let chunk = store.get_zarr_chunk(
-            &pos, meta.get_columns(), meta.get_real_dims(&pos)
-        ).await.unwrap();
+        let chunk = store
+            .get_zarr_chunk(&pos, meta.get_columns(), meta.get_real_dims(&pos))
+            .await
+            .unwrap();
         assert_eq!(
             chunk.data.keys().collect::<HashSet<&String>>(),
             HashSet::from([&"float_data".to_string(), &"byte_data".to_string()])
@@ -161,14 +164,25 @@ mod zarr_read_async_tests {
         // test selecting only one of the 2 columns
         let col_proj = ZarrProjection::skip(vec!["float_data".to_string()]);
         let cols = col_proj.apply_selection(meta.get_columns()).unwrap();
-        let chunk = store.get_zarr_chunk(&pos, &cols, meta.get_real_dims(&pos)).await.unwrap();
-        assert_eq!(chunk.data.keys().collect::<Vec<&String>>(), vec!["byte_data"]);
+        let chunk = store
+            .get_zarr_chunk(&pos, &cols, meta.get_real_dims(&pos))
+            .await
+            .unwrap();
+        assert_eq!(
+            chunk.data.keys().collect::<Vec<&String>>(),
+            vec!["byte_data"]
+        );
 
         // same as above, but specify columsn to keep instead of to skip
         let col_proj = ZarrProjection::keep(vec!["float_data".to_string()]);
         let cols = col_proj.apply_selection(meta.get_columns()).unwrap();
-        let chunk = store.get_zarr_chunk(
-            &pos, &cols, meta.get_real_dims(&pos)).await.unwrap();
-        assert_eq!(chunk.data.keys().collect::<Vec<&String>>(), vec!["float_data"]);
+        let chunk = store
+            .get_zarr_chunk(&pos, &cols, meta.get_real_dims(&pos))
+            .await
+            .unwrap();
+        assert_eq!(
+            chunk.data.keys().collect::<Vec<&String>>(),
+            vec!["float_data"]
+        );
     }
 }
