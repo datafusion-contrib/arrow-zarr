@@ -61,7 +61,7 @@ impl FileOpener for ZarrFileOpener {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{error::Error, sync::Arc};
 
     use datafusion::datasource::physical_plan::FileMeta;
     use object_store::{local::LocalFileSystem, path::Path, ObjectMeta};
@@ -71,20 +71,17 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn test_open() {
+    async fn test_open() -> Result<(), Box<dyn Error>> {
         let local_fs = LocalFileSystem::new();
 
         let test_data = get_test_v2_data_path("lat_lon_example.zarr".to_string());
 
-        let config = ZarrConfig {
-            object_store: Arc::new(local_fs),
-        };
-
+        let config = ZarrConfig::new(Arc::new(local_fs));
         let opener = ZarrFileOpener::new(config);
 
         let file_meta = FileMeta {
             object_meta: ObjectMeta {
-                location: Path::from_filesystem_path(test_data).unwrap(),
+                location: Path::from_filesystem_path(test_data)?,
                 last_modified: chrono::Utc::now(),
                 size: 0,
                 e_tag: None,
@@ -94,12 +91,12 @@ mod tests {
             extensions: None,
         };
 
-        let open_future = opener.open(file_meta).unwrap();
-
-        let stream = open_future.await.unwrap();
-
-        let batches: Vec<_> = stream.try_collect().await.unwrap();
+        let open_future = opener.open(file_meta)?;
+        let stream = open_future.await?;
+        let batches: Vec<_> = stream.try_collect().await?;
 
         assert_eq!(batches.len(), 9);
+
+        Ok(())
     }
 }

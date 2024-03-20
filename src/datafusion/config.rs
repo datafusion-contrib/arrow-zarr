@@ -24,3 +24,9 @@ pub struct ZarrConfig {
     // The object store to use.
     pub object_store: Arc<dyn ObjectStore>,
 }
+
+impl ZarrConfig {
+    pub fn new(object_store: Arc<dyn ObjectStore>) -> Self {
+        Self { object_store }
+    }
+}
