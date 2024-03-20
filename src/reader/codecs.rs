@@ -785,15 +785,10 @@ pub(crate) fn apply_codecs(
 
 #[cfg(test)]
 mod zarr_codecs_tests {
+    use crate::tests::get_test_data_path;
+
     use super::*;
     use ::std::fs::read;
-    use std::path::PathBuf;
-
-    fn get_test_data_path(zarr_array: String) -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("test-data/data/zarr/v3_data")
-            .join(zarr_array)
-    }
 
     // reading a chunk and decoding it using hard coded, known options. this test
     // doesn't included any sharding.
