@@ -785,7 +785,7 @@ pub(crate) fn apply_codecs(
 
 #[cfg(test)]
 mod zarr_codecs_tests {
-    use crate::tests::get_test_data_path;
+    use crate::tests::get_test_v3_data_path;
 
     use super::*;
     use ::std::fs::read;
@@ -794,7 +794,7 @@ mod zarr_codecs_tests {
     // doesn't included any sharding.
     #[test]
     fn no_sharding_tests() {
-        let path = get_test_data_path("no_sharding.zarr/int_data/c/1/1".to_string());
+        let path = get_test_v3_data_path("no_sharding.zarr/int_data/c/1/1".to_string());
         let raw_data = read(path).unwrap();
 
         let chunk_shape = vec![4, 4];
@@ -838,7 +838,7 @@ mod zarr_codecs_tests {
     // includes sharding.
     #[test]
     fn with_sharding_tests() {
-        let path = get_test_data_path("with_sharding.zarr/float_data/1.1".to_string());
+        let path = get_test_v3_data_path("with_sharding.zarr/float_data/1.1".to_string());
         let raw_data = read(path).unwrap();
 
         let chunk_shape = vec![4, 4];
@@ -890,7 +890,7 @@ mod zarr_codecs_tests {
     // includes sharding, and the shape doesn't exactly line up with the chunks.
     #[test]
     fn with_sharding_with_edge_tests() {
-        let path = get_test_data_path("with_sharding_with_edge.zarr/uint_data/1.1".to_string());
+        let path = get_test_v3_data_path("with_sharding_with_edge.zarr/uint_data/1.1".to_string());
         let raw_data = read(path).unwrap();
 
         let chunk_shape = vec![4, 4];

@@ -66,7 +66,7 @@ mod tests {
     use datafusion::datasource::physical_plan::FileMeta;
     use object_store::{local::LocalFileSystem, path::Path, ObjectMeta};
 
-    use crate::tests::get_test_data_path;
+    use crate::tests::get_test_v2_data_path;
 
     use super::*;
 
@@ -74,7 +74,7 @@ mod tests {
     async fn test_open() {
         let local_fs = LocalFileSystem::new();
 
-        let test_data = get_test_data_path("lat_lon_example.zarr".to_string());
+        let test_data = get_test_v2_data_path("lat_lon_example.zarr".to_string());
 
         let config = ZarrConfig {
             object_store: Arc::new(local_fs),
