@@ -3,6 +3,7 @@ use crate::reader::codecs::{
     ShuffleOptions, ZarrCodec, ZarrDataType, PY_UNICODE_SIZE,
 };
 use crate::reader::{ZarrError, ZarrResult};
+use arrow_schema::{Field, Schema};
 use itertools::Itertools;
 use regex::Regex;
 use serde_json::{json, Value};
@@ -199,6 +200,24 @@ impl ZarrStoreMetadata {
             last_chunk_idx: None,
             array_params: HashMap::new(),
         }
+    }
+
+    pub fn arrow_schema(&self) -> ZarrResult<Schema> {
+        let mut fields = Vec::new();
+        for col in &self.columns {
+            let meta = self
+                .array_params
+                .get(col)
+                .ok_or(ZarrError::InvalidMetadata(
+                    "could not find metadata for column".to_string(),
+                ))?;
+
+            let data_type = meta.get_type().to_arrow_type()?;
+            let field = Field::new(col, data_type, true);
+            fields.push(field);
+        }
+
+        Ok(Schema::new(fields))
     }
 }
 

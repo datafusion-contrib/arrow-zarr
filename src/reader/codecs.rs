@@ -34,6 +34,34 @@ impl ZarrDataType {
             | Self::TimeStamp(s, _) => *s,
         }
     }
+
+    pub(crate) fn to_arrow_type(&self) -> ZarrResult<DataType> {
+        match self {
+            Self::Bool => Ok(DataType::Boolean),
+            Self::UInt(s) => match s {
+                1 => Ok(DataType::UInt8),
+                2 => Ok(DataType::UInt16),
+                4 => Ok(DataType::UInt32),
+                8 => Ok(DataType::UInt64),
+                _ => Err(throw_invalid_meta("Invalid uint size")),
+            },
+            Self::Int(s) => match s {
+                1 => Ok(DataType::Int8),
+                2 => Ok(DataType::Int16),
+                4 => Ok(DataType::Int32),
+                8 => Ok(DataType::Int64),
+                _ => Err(throw_invalid_meta("Invalid int size")),
+            },
+            Self::Float(s) => match s {
+                4 => Ok(DataType::Float32),
+                8 => Ok(DataType::Float64),
+                _ => Err(throw_invalid_meta("Invalid float size")),
+            },
+            Self::FixedLengthString(_) => Ok(DataType::Utf8),
+            Self::FixedLengthPyUnicode(_) => Ok(DataType::Utf8),
+            Self::TimeStamp(_, _) => todo!(),
+        }
+    }
 }
 
 // This is the byte length of the Py Unicode characters that zarr writes

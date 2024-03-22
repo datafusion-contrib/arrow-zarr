@@ -42,6 +42,8 @@ impl std::fmt::Display for ZarrError {
     }
 }
 
+impl Error for ZarrError {}
+
 impl From<io::Error> for ZarrError {
     fn from(e: io::Error) -> ZarrError {
         ZarrError::Io(Box::new(e))

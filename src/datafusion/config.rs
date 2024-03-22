@@ -19,14 +19,36 @@ use std::sync::Arc;
 
 use object_store::ObjectStore;
 
+const DEFAULT_BATCH_SIZE: usize = 8096;
+
 #[derive(Clone)]
 pub struct ZarrConfig {
     // The object store to use.
     pub object_store: Arc<dyn ObjectStore>,
+
+    // The projection for the scan.
+    pub projection: Option<Vec<usize>>,
+
+    // The batch size for the scan.
+    pub batch_size: usize,
 }
 
 impl ZarrConfig {
     pub fn new(object_store: Arc<dyn ObjectStore>) -> Self {
-        Self { object_store }
+        Self {
+            object_store,
+            projection: None,
+            batch_size: DEFAULT_BATCH_SIZE,
+        }
+    }
+
+    pub fn with_batch_size(mut self, batch_size: usize) -> Self {
+        self.batch_size = batch_size;
+        self
+    }
+
+    pub fn with_projection(mut self, projection: Option<Vec<usize>>) -> Self {
+        self.projection = projection;
+        self
     }
 }
