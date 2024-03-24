@@ -48,21 +48,15 @@ impl FileOpener for ZarrFileOpener {
 
             let rng = file_meta.range.map(|r| (r.start as usize, r.end as usize));
 
-            let projection = match config.projection {
-                Some(ref p) => ZarrProjection::from(p.clone()),
-                None => ZarrProjection::all(),
-            };
+            let projection = ZarrProjection::from(config.projection.as_ref());
 
             let batch_reader = ZarrRecordBatchStreamBuilder::new(zarr_path)
                 .with_projection(projection)
                 .build_partial_reader(rng)
                 .await
-                .map_err(|_| {
-                    DataFusionError::Execution("Error creating zarr reader".to_string())
-                })?;
+                .map_err(|e| DataFusionError::External(Box::new(e)))?;
 
-            let stream = batch_reader
-                .map_err(|_| ArrowError::ComputeError("Error reading zarr".to_string()));
+            let stream = batch_reader.map_err(|e| ArrowError::from_external_error(Box::new(e)));
 
             Ok(stream.boxed())
         }))

@@ -34,32 +34,42 @@ impl ZarrDataType {
             | Self::TimeStamp(s, _) => *s,
         }
     }
+}
 
-    pub(crate) fn to_arrow_type(&self) -> ZarrResult<DataType> {
-        match self {
-            Self::Bool => Ok(DataType::Boolean),
-            Self::UInt(s) => match s {
+impl TryFrom<&ZarrDataType> for DataType {
+    type Error = ZarrError;
+
+    fn try_from(value: &ZarrDataType) -> ZarrResult<Self> {
+        match value {
+            ZarrDataType::Bool => Ok(DataType::Boolean),
+            ZarrDataType::UInt(s) => match s {
                 1 => Ok(DataType::UInt8),
                 2 => Ok(DataType::UInt16),
                 4 => Ok(DataType::UInt32),
                 8 => Ok(DataType::UInt64),
                 _ => Err(throw_invalid_meta("Invalid uint size")),
             },
-            Self::Int(s) => match s {
+            ZarrDataType::Int(s) => match s {
                 1 => Ok(DataType::Int8),
                 2 => Ok(DataType::Int16),
                 4 => Ok(DataType::Int32),
                 8 => Ok(DataType::Int64),
                 _ => Err(throw_invalid_meta("Invalid int size")),
             },
-            Self::Float(s) => match s {
+            ZarrDataType::Float(s) => match s {
                 4 => Ok(DataType::Float32),
                 8 => Ok(DataType::Float64),
                 _ => Err(throw_invalid_meta("Invalid float size")),
             },
-            Self::FixedLengthString(_) => Ok(DataType::Utf8),
-            Self::FixedLengthPyUnicode(_) => Ok(DataType::Utf8),
-            Self::TimeStamp(_, _) => todo!(),
+            ZarrDataType::FixedLengthString(_) => Ok(DataType::Utf8),
+            ZarrDataType::FixedLengthPyUnicode(_) => Ok(DataType::Utf8),
+            ZarrDataType::TimeStamp(_, s) => match s.as_str() {
+                "s" => Ok(DataType::Timestamp(TimeUnit::Second, None)),
+                "ms" => Ok(DataType::Timestamp(TimeUnit::Millisecond, None)),
+                "us" => Ok(DataType::Timestamp(TimeUnit::Microsecond, None)),
+                "ns" => Ok(DataType::Timestamp(TimeUnit::Nanosecond, None)),
+                _ => Err(throw_invalid_meta("Invalid timestamp unit")),
+            },
         }
     }
 }
@@ -960,5 +970,19 @@ mod zarr_codecs_tests {
         );
         let target_arr: UInt16Array = vec![32, 33, 39, 40, 34, 41, 46, 47, 48].into();
         assert_eq!(*arr, target_arr);
+    }
+
+    #[test]
+    fn test_zarr_data_type_to_arrow_datatype() -> ZarrResult<()> {
+        let zarr_types = vec![ZarrDataType::Bool, ZarrDataType::UInt(1)];
+        let exepcted_types = vec![DataType::Boolean, DataType::UInt8];
+
+        for (zarr_type, expected_type) in zarr_types.iter().zip(exepcted_types.iter()) {
+            let arrow_type = DataType::try_from(zarr_type)?;
+
+            assert_eq!(arrow_type, *expected_type);
+        }
+
+        Ok(())
     }
 }

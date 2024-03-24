@@ -21,19 +21,21 @@ use object_store::ObjectStore;
 
 const DEFAULT_BATCH_SIZE: usize = 8096;
 
+/// Configuration for Zarr DataFusion processing.
 #[derive(Clone)]
 pub struct ZarrConfig {
-    // The object store to use.
+    /// The object store to use.
     pub object_store: Arc<dyn ObjectStore>,
 
-    // The projection for the scan.
+    /// The projection for the scan.
     pub projection: Option<Vec<usize>>,
 
-    // The batch size for the scan.
+    /// The batch size for the scan.
     pub batch_size: usize,
 }
 
 impl ZarrConfig {
+    /// Create a new ZarrConfig.
     pub fn new(object_store: Arc<dyn ObjectStore>) -> Self {
         Self {
             object_store,
@@ -42,11 +44,13 @@ impl ZarrConfig {
         }
     }
 
+    /// Set the batch size for the scan.
     pub fn with_batch_size(mut self, batch_size: usize) -> Self {
         self.batch_size = batch_size;
         self
     }
 
+    /// Set the projection for the scan.
     pub fn with_projection(mut self, projection: Option<Vec<usize>>) -> Self {
         self.projection = projection;
         self

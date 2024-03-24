@@ -1,4 +1,5 @@
 use arrow_schema::ArrowError;
+use datafusion::error::DataFusionError;
 use object_store::Error as ObjStoreError;
 use std::error::Error;
 use std::io;
@@ -15,6 +16,7 @@ pub enum ZarrError {
     InvalidChunkRange(usize, usize, usize),
     Io(Box<dyn Error + Send + Sync>),
     Arrow(Box<dyn Error + Send + Sync>),
+    DataFusion(Box<dyn Error + Send + Sync>),
     ObjectStore(Box<dyn Error + Send + Sync>),
 }
 
@@ -37,7 +39,8 @@ impl std::fmt::Display for ZarrError {
             }
             ZarrError::Io(e) => write!(fmt, "IO error: {e}"),
             ZarrError::Arrow(e) => write!(fmt, "Arrow error: {e}"),
-            ZarrError::ObjectStore(e) => write!(fmt, "Arrow error: {e}"),
+            ZarrError::ObjectStore(e) => write!(fmt, "ObjectStore error: {e}"),
+            ZarrError::DataFusion(e) => write!(fmt, "DataFusion error: {e}"),
         }
     }
 }
@@ -65,6 +68,12 @@ impl From<ObjStoreError> for ZarrError {
 impl From<Utf8Error> for ZarrError {
     fn from(e: Utf8Error) -> ZarrError {
         ZarrError::InvalidMetadata(e.to_string())
+    }
+}
+
+impl From<DataFusionError> for ZarrError {
+    fn from(e: DataFusionError) -> ZarrError {
+        ZarrError::Arrow(Box::new(e))
     }
 }
 

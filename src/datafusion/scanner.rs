@@ -44,7 +44,7 @@ use datafusion::{
 use super::{config::ZarrConfig, file_opener::ZarrFileOpener};
 
 #[derive(Debug, Clone)]
-/// Implements a datafusion `ExecutionPlan` for Genbank files.
+/// Implements a DataFusion `ExecutionPlan` for Genbank files.
 pub struct ZarrScan {
     /// The base configuration for the file scan.
     base_config: FileScanConfig,

@@ -3,7 +3,7 @@ use crate::reader::codecs::{
     ShuffleOptions, ZarrCodec, ZarrDataType, PY_UNICODE_SIZE,
 };
 use crate::reader::{ZarrError, ZarrResult};
-use arrow_schema::{Field, Schema};
+use arrow_schema::{DataType, Field, Schema};
 use itertools::Itertools;
 use regex::Regex;
 use serde_json::{json, Value};
@@ -212,7 +212,7 @@ impl ZarrStoreMetadata {
                     "could not find metadata for column".to_string(),
                 ))?;
 
-            let data_type = meta.get_type().to_arrow_type()?;
+            let data_type = DataType::try_from(meta.get_type())?;
             let field = Field::new(col, data_type, true);
             fields.push(field);
         }

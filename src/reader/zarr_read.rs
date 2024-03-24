@@ -82,9 +82,12 @@ impl From<Vec<usize>> for ZarrProjection {
     }
 }
 
-impl From<Vec<String>> for ZarrProjection {
-    fn from(names: Vec<String>) -> Self {
-        Self::keep(names)
+impl From<Option<&Vec<usize>>> for ZarrProjection {
+    fn from(indices: Option<&Vec<usize>>) -> Self {
+        match indices {
+            Some(i) => Self::keep_by_index(i.to_vec()),
+            None => Self::all(),
+        }
     }
 }
 
