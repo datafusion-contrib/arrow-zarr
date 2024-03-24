@@ -73,7 +73,7 @@ impl From<Utf8Error> for ZarrError {
 
 impl From<DataFusionError> for ZarrError {
     fn from(e: DataFusionError) -> ZarrError {
-        ZarrError::Arrow(Box::new(e))
+        ZarrError::DataFusion(Box::new(e))
     }
 }
 

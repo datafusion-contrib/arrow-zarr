@@ -1046,6 +1046,11 @@ mod zarr_metadata_v3_tests {
         assert_eq!(meta.last_chunk_idx, Some(vec![3, 3]));
         assert_eq!(meta.columns, vec!["var1"]);
 
+        let arrow_schema = meta.arrow_schema().unwrap();
+        assert_eq!(arrow_schema.fields().len(), 1);
+        assert_eq!(arrow_schema.field(0).name(), "var1");
+        assert_eq!(arrow_schema.field(0).data_type(), &DataType::Int32);
+
         assert_eq!(
             meta.array_params["var1"],
             ZarrArrayMetadata {
@@ -1106,6 +1111,11 @@ mod zarr_metadata_v3_tests {
         assert_eq!(meta.shape, Some(vec![16, 16]));
         assert_eq!(meta.last_chunk_idx, Some(vec![1, 1]));
         assert_eq!(meta.columns, vec!["var2"]);
+
+        let arrow_schema = meta.arrow_schema().unwrap();
+        assert_eq!(arrow_schema.fields().len(), 1);
+        assert_eq!(arrow_schema.field(0).name(), "var2");
+        assert_eq!(arrow_schema.field(0).data_type(), &DataType::Int32);
 
         assert_eq!(
             meta.array_params["var2"],
