@@ -974,8 +974,43 @@ mod zarr_codecs_tests {
 
     #[test]
     fn test_zarr_data_type_to_arrow_datatype() -> ZarrResult<()> {
-        let zarr_types = vec![ZarrDataType::Bool, ZarrDataType::UInt(1)];
-        let exepcted_types = vec![DataType::Boolean, DataType::UInt8];
+        let zarr_types = [
+            ZarrDataType::Bool,
+            ZarrDataType::UInt(1),
+            ZarrDataType::UInt(2),
+            ZarrDataType::UInt(4),
+            ZarrDataType::UInt(8),
+            ZarrDataType::Int(1),
+            ZarrDataType::Int(2),
+            ZarrDataType::Int(4),
+            ZarrDataType::Int(8),
+            ZarrDataType::Float(4),
+            ZarrDataType::Float(8),
+            ZarrDataType::TimeStamp(8, "s".to_string()),
+            ZarrDataType::TimeStamp(8, "ms".to_string()),
+            ZarrDataType::TimeStamp(8, "us".to_string()),
+            ZarrDataType::TimeStamp(8, "ns".to_string()),
+        ];
+
+        let exepcted_types = [
+            DataType::Boolean,
+            DataType::UInt8,
+            DataType::UInt16,
+            DataType::UInt32,
+            DataType::UInt64,
+            DataType::Int8,
+            DataType::Int16,
+            DataType::Int32,
+            DataType::Int64,
+            DataType::Float32,
+            DataType::Float64,
+            DataType::Timestamp(TimeUnit::Second, None),
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+            DataType::Timestamp(TimeUnit::Microsecond, None),
+            DataType::Timestamp(TimeUnit::Nanosecond, None),
+        ];
+
+        assert_eq!(zarr_types.len(), exepcted_types.len());
 
         for (zarr_type, expected_type) in zarr_types.iter().zip(exepcted_types.iter()) {
             let arrow_type = DataType::try_from(zarr_type)?;
