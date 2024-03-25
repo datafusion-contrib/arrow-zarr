@@ -1,4 +1,5 @@
 use arrow_schema::ArrowError;
+#[cfg(feature = "datafusion")]
 use datafusion::error::DataFusionError;
 use object_store::Error as ObjStoreError;
 use std::error::Error;
@@ -71,6 +72,7 @@ impl From<Utf8Error> for ZarrError {
     }
 }
 
+#[cfg(feature = "datafusion")]
 impl From<DataFusionError> for ZarrError {
     fn from(e: DataFusionError) -> ZarrError {
         ZarrError::DataFusion(Box::new(e))

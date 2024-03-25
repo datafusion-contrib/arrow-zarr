@@ -21,7 +21,7 @@ jobs:
         run: |
           cargo fmt --all -- --check
 
-  check-clippy:
+  check-clippy-all-features:
     name: Check cargo clippy
     runs-on: ubuntu-latest
     container:
@@ -34,3 +34,18 @@ jobs:
       - name: Run check
         run: |
           cargo clippy --all-targets --all-features -- -D warnings
+
+  # Check clippy without features, helps to catch missing feature configurations
+  check-clippy-no-features:
+    name: Check cargo clippy
+    runs-on: ubuntu-latest
+    container:
+      image: amd64/rust
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Run check
+        run: |
+          cargo clippy --all-targets -- -D warnings
