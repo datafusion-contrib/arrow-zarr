@@ -98,11 +98,8 @@ impl ExecutionPlan for ZarrScan {
             .runtime_env()
             .object_store(&self.base_config.object_store_url)?;
 
-        let batch_size = context.session_config().batch_size();
-
-        let config = ZarrConfig::new(object_store)
-            .with_batch_size(batch_size)
-            .with_projection(self.base_config.projection.clone());
+        let config =
+            ZarrConfig::new(object_store).with_projection(self.base_config.projection.clone());
 
         let opener = ZarrFileOpener::new(config);
 
