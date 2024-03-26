@@ -3,6 +3,7 @@ use crate::reader::codecs::{
     ShuffleOptions, ZarrCodec, ZarrDataType, PY_UNICODE_SIZE,
 };
 use crate::reader::{ZarrError, ZarrResult};
+use arrow_schema::{DataType, Field, Schema};
 use itertools::Itertools;
 use regex::Regex;
 use serde_json::{json, Value};
@@ -199,6 +200,24 @@ impl ZarrStoreMetadata {
             last_chunk_idx: None,
             array_params: HashMap::new(),
         }
+    }
+
+    pub fn arrow_schema(&self) -> ZarrResult<Schema> {
+        let mut fields = Vec::new();
+        for col in &self.columns {
+            let meta = self
+                .array_params
+                .get(col)
+                .ok_or(ZarrError::InvalidMetadata(
+                    "could not find metadata for column".to_string(),
+                ))?;
+
+            let data_type = DataType::try_from(meta.get_type())?;
+            let field = Field::new(col, data_type, true);
+            fields.push(field);
+        }
+
+        Ok(Schema::new(fields))
     }
 }
 
@@ -1027,6 +1046,11 @@ mod zarr_metadata_v3_tests {
         assert_eq!(meta.last_chunk_idx, Some(vec![3, 3]));
         assert_eq!(meta.columns, vec!["var1"]);
 
+        let arrow_schema = meta.arrow_schema().unwrap();
+        assert_eq!(arrow_schema.fields().len(), 1);
+        assert_eq!(arrow_schema.field(0).name(), "var1");
+        assert_eq!(arrow_schema.field(0).data_type(), &DataType::Int32);
+
         assert_eq!(
             meta.array_params["var1"],
             ZarrArrayMetadata {
@@ -1087,6 +1111,11 @@ mod zarr_metadata_v3_tests {
         assert_eq!(meta.shape, Some(vec![16, 16]));
         assert_eq!(meta.last_chunk_idx, Some(vec![1, 1]));
         assert_eq!(meta.columns, vec!["var2"]);
+
+        let arrow_schema = meta.arrow_schema().unwrap();
+        assert_eq!(arrow_schema.fields().len(), 1);
+        assert_eq!(arrow_schema.field(0).name(), "var2");
+        assert_eq!(arrow_schema.field(0).data_type(), &DataType::Int32);
 
         assert_eq!(
             meta.array_params["var2"],

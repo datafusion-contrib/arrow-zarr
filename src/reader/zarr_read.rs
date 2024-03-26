@@ -62,6 +62,7 @@ impl ZarrInMemoryChunk {
 #[derive(Clone, PartialEq)]
 pub(crate) enum ProjectionType {
     Select,
+    SelectByIndex,
     Skip,
     Null,
 }
@@ -72,6 +73,22 @@ pub(crate) enum ProjectionType {
 pub struct ZarrProjection {
     projection_type: ProjectionType,
     col_names: Option<Vec<String>>,
+    col_indices: Option<Vec<usize>>,
+}
+
+impl From<Vec<usize>> for ZarrProjection {
+    fn from(indices: Vec<usize>) -> Self {
+        Self::keep_by_index(indices)
+    }
+}
+
+impl From<Option<&Vec<usize>>> for ZarrProjection {
+    fn from(indices: Option<&Vec<usize>>) -> Self {
+        match indices {
+            Some(i) => Self::keep_by_index(i.to_vec()),
+            None => Self::all(),
+        }
+    }
 }
 
 impl ZarrProjection {
@@ -80,6 +97,7 @@ impl ZarrProjection {
         Self {
             projection_type: ProjectionType::Null,
             col_names: None,
+            col_indices: None,
         }
     }
 
@@ -88,6 +106,7 @@ impl ZarrProjection {
         Self {
             projection_type: ProjectionType::Skip,
             col_names: Some(col_names),
+            col_indices: None,
         }
     }
 
@@ -96,6 +115,16 @@ impl ZarrProjection {
         Self {
             projection_type: ProjectionType::Select,
             col_names: Some(col_names),
+            col_indices: None,
+        }
+    }
+
+    /// Create a projection that keeps certain columns by index (and skips all the other columns).
+    pub fn keep_by_index(col_indices: Vec<usize>) -> Self {
+        Self {
+            projection_type: ProjectionType::SelectByIndex,
+            col_names: None,
+            col_indices: Some(col_indices),
         }
     }
 
@@ -120,6 +149,14 @@ impl ZarrProjection {
                     }
                 }
                 Ok(col_names.clone())
+            }
+            ProjectionType::SelectByIndex => {
+                let col_indices = self.col_indices.as_ref().unwrap();
+                let col_names: Vec<String> = col_indices
+                    .iter()
+                    .map(|i| all_cols[*i].to_string())
+                    .collect();
+                Ok(col_names)
             }
         }
     }

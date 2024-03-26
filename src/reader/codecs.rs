@@ -36,6 +36,44 @@ impl ZarrDataType {
     }
 }
 
+impl TryFrom<&ZarrDataType> for DataType {
+    type Error = ZarrError;
+
+    fn try_from(value: &ZarrDataType) -> ZarrResult<Self> {
+        match value {
+            ZarrDataType::Bool => Ok(DataType::Boolean),
+            ZarrDataType::UInt(s) => match s {
+                1 => Ok(DataType::UInt8),
+                2 => Ok(DataType::UInt16),
+                4 => Ok(DataType::UInt32),
+                8 => Ok(DataType::UInt64),
+                _ => Err(throw_invalid_meta("Invalid uint size")),
+            },
+            ZarrDataType::Int(s) => match s {
+                1 => Ok(DataType::Int8),
+                2 => Ok(DataType::Int16),
+                4 => Ok(DataType::Int32),
+                8 => Ok(DataType::Int64),
+                _ => Err(throw_invalid_meta("Invalid int size")),
+            },
+            ZarrDataType::Float(s) => match s {
+                4 => Ok(DataType::Float32),
+                8 => Ok(DataType::Float64),
+                _ => Err(throw_invalid_meta("Invalid float size")),
+            },
+            ZarrDataType::FixedLengthString(_) => Ok(DataType::Utf8),
+            ZarrDataType::FixedLengthPyUnicode(_) => Ok(DataType::Utf8),
+            ZarrDataType::TimeStamp(_, s) => match s.as_str() {
+                "s" => Ok(DataType::Timestamp(TimeUnit::Second, None)),
+                "ms" => Ok(DataType::Timestamp(TimeUnit::Millisecond, None)),
+                "us" => Ok(DataType::Timestamp(TimeUnit::Microsecond, None)),
+                "ns" => Ok(DataType::Timestamp(TimeUnit::Nanosecond, None)),
+                _ => Err(throw_invalid_meta("Invalid timestamp unit")),
+            },
+        }
+    }
+}
+
 // This is the byte length of the Py Unicode characters that zarr writes
 // when the output type is set to U<length>.
 pub(crate) const PY_UNICODE_SIZE: usize = 4;
@@ -932,5 +970,54 @@ mod zarr_codecs_tests {
         );
         let target_arr: UInt16Array = vec![32, 33, 39, 40, 34, 41, 46, 47, 48].into();
         assert_eq!(*arr, target_arr);
+    }
+
+    #[test]
+    fn test_zarr_data_type_to_arrow_datatype() -> ZarrResult<()> {
+        let zarr_types = [
+            ZarrDataType::Bool,
+            ZarrDataType::UInt(1),
+            ZarrDataType::UInt(2),
+            ZarrDataType::UInt(4),
+            ZarrDataType::UInt(8),
+            ZarrDataType::Int(1),
+            ZarrDataType::Int(2),
+            ZarrDataType::Int(4),
+            ZarrDataType::Int(8),
+            ZarrDataType::Float(4),
+            ZarrDataType::Float(8),
+            ZarrDataType::TimeStamp(8, "s".to_string()),
+            ZarrDataType::TimeStamp(8, "ms".to_string()),
+            ZarrDataType::TimeStamp(8, "us".to_string()),
+            ZarrDataType::TimeStamp(8, "ns".to_string()),
+        ];
+
+        let exepcted_types = [
+            DataType::Boolean,
+            DataType::UInt8,
+            DataType::UInt16,
+            DataType::UInt32,
+            DataType::UInt64,
+            DataType::Int8,
+            DataType::Int16,
+            DataType::Int32,
+            DataType::Int64,
+            DataType::Float32,
+            DataType::Float64,
+            DataType::Timestamp(TimeUnit::Second, None),
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+            DataType::Timestamp(TimeUnit::Microsecond, None),
+            DataType::Timestamp(TimeUnit::Nanosecond, None),
+        ];
+
+        assert_eq!(zarr_types.len(), exepcted_types.len());
+
+        for (zarr_type, expected_type) in zarr_types.iter().zip(exepcted_types.iter()) {
+            let arrow_type = DataType::try_from(zarr_type)?;
+
+            assert_eq!(arrow_type, *expected_type);
+        }
+
+        Ok(())
     }
 }

@@ -19,14 +19,28 @@ use std::sync::Arc;
 
 use object_store::ObjectStore;
 
+/// Configuration for Zarr DataFusion processing.
 #[derive(Clone)]
 pub struct ZarrConfig {
-    // The object store to use.
+    /// The object store to use.
     pub object_store: Arc<dyn ObjectStore>,
+
+    /// The projection for the scan.
+    pub projection: Option<Vec<usize>>,
 }
 
 impl ZarrConfig {
+    /// Create a new ZarrConfig.
     pub fn new(object_store: Arc<dyn ObjectStore>) -> Self {
-        Self { object_store }
+        Self {
+            object_store,
+            projection: None,
+        }
+    }
+
+    /// Set the projection for the scan.
+    pub fn with_projection(mut self, projection: Option<Vec<usize>>) -> Self {
+        self.projection = projection;
+        self
     }
 }

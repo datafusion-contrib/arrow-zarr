@@ -19,7 +19,10 @@ use arrow_schema::ArrowError;
 use datafusion::{datasource::physical_plan::FileOpener, error::DataFusionError};
 use futures::{StreamExt, TryStreamExt};
 
-use crate::async_reader::{ZarrPath, ZarrRecordBatchStreamBuilder};
+use crate::{
+    async_reader::{ZarrPath, ZarrRecordBatchStreamBuilder},
+    reader::ZarrProjection,
+};
 
 use super::config::ZarrConfig;
 
@@ -44,15 +47,16 @@ impl FileOpener for ZarrFileOpener {
             let zarr_path = ZarrPath::new(config.object_store, file_meta.object_meta.location);
 
             let rng = file_meta.range.map(|r| (r.start as usize, r.end as usize));
+
+            let projection = ZarrProjection::from(config.projection.as_ref());
+
             let batch_reader = ZarrRecordBatchStreamBuilder::new(zarr_path)
+                .with_projection(projection)
                 .build_partial_reader(rng)
                 .await
-                .map_err(|_| {
-                    DataFusionError::Execution("Error creating zarr reader".to_string())
-                })?;
+                .map_err(|e| DataFusionError::External(Box::new(e)))?;
 
-            let stream = batch_reader
-                .map_err(|_| ArrowError::ComputeError("Error reading zarr".to_string()));
+            let stream = batch_reader.map_err(|e| ArrowError::from_external_error(Box::new(e)));
 
             Ok(stream.boxed())
         }))
