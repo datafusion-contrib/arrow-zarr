@@ -30,7 +30,7 @@ use datafusion::{
 use super::{config::ZarrConfig, file_opener::ZarrFileOpener};
 
 #[derive(Debug, Clone)]
-/// Implements a DataFusion `ExecutionPlan` for Genbank files.
+/// Implements a DataFusion `ExecutionPlan` for Zarr files.
 pub struct ZarrScan {
     /// The base configuration for the file scan.
     base_config: FileScanConfig,
@@ -46,7 +46,7 @@ pub struct ZarrScan {
 }
 
 impl ZarrScan {
-    /// Create a new Genbank scan.
+    /// Create a new Zarr scan.
     pub fn new(base_config: FileScanConfig) -> Self {
         let (projected_schema, statistics, _lex_sorting) = base_config.project();
 
