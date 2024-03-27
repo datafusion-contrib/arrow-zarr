@@ -18,3 +18,4 @@
 pub mod config;
 pub mod file_opener;
 pub mod scanner;
+pub mod table_provider;
