@@ -22,7 +22,7 @@ use async_trait::async_trait;
 use datafusion::{
     common::Statistics,
     datasource::{
-        listing::{ListingTableConfig, ListingTableUrl, PartitionedFile},
+        listing::{ListingTableUrl, PartitionedFile},
         physical_plan::FileScanConfig,
         TableProvider, TableType,
     },
@@ -30,7 +30,6 @@ use datafusion::{
     logical_expr::{Expr, TableProviderFilterPushDown},
     physical_plan::ExecutionPlan,
 };
-use object_store::{ObjectMeta, ObjectStore};
 
 use crate::{
     async_reader::{ZarrPath, ZarrReadAsync},
@@ -42,12 +41,14 @@ use super::scanner::ZarrScan;
 pub struct ListingZarrTableOptions {}
 
 impl ListingZarrTableOptions {
-    pub async fn infer_schema_from_object(
+    pub async fn infer_schema(
         &self,
-        store: Arc<dyn ObjectStore>,
-        object_meta: &ObjectMeta,
+        state: &SessionState,
+        table_path: &ListingTableUrl,
     ) -> ZarrResult<Schema> {
-        let zarr_path = ZarrPath::new(store, object_meta.location.clone());
+        let store = state.runtime_env().object_store(table_path)?;
+
+        let zarr_path = ZarrPath::new(store, table_path.prefix().clone());
         let schema = zarr_path.get_zarr_metadata().await?.arrow_schema()?;
 
         Ok(schema)
@@ -56,22 +57,13 @@ impl ListingZarrTableOptions {
 
 pub struct ListingZarrTableConfig {
     /// The inner listing table configuration
-    inner: ListingTableConfig,
-
-    options: ListingZarrTableOptions,
+    table_path: ListingTableUrl,
 }
 
 impl ListingZarrTableConfig {
     /// Create a new ListingZarrTableConfig
-    pub fn new(table_path: ListingTableUrl, options: ListingZarrTableOptions) -> Self {
-        Self {
-            inner: ListingTableConfig::new(table_path),
-            options,
-        }
-    }
-
-    pub fn table_paths(&self) -> Vec<ListingTableUrl> {
-        self.inner.table_paths.to_vec()
+    pub fn new(table_path: ListingTableUrl) -> Self {
+        Self { table_path }
     }
 }
 
@@ -116,30 +108,14 @@ impl TableProvider for ZarrTableProvider {
 
     async fn scan(
         &self,
-        state: &SessionState,
+        _state: &SessionState,
         projection: Option<&Vec<usize>>,
         _filters: &[Expr],
         limit: Option<usize>,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
-        if self.config.table_paths().is_empty() {
-            return Err(datafusion::error::DataFusionError::Execution(
-                "No table paths found".to_string(),
-            ));
-        }
+        let object_store_url = self.config.table_path.object_store();
 
-        if self.config.table_paths().len() > 1 {
-            return Err(datafusion::error::DataFusionError::Execution(
-                "Multiple table paths not supported".to_string(),
-            ));
-        }
-
-        let table_path = self.config.table_paths();
-        let table_path = table_path.first().unwrap();
-
-        let object_store_url = table_path.object_store();
-
-        let pf = PartitionedFile::from_path(table_path.to_string())?;
-
+        let pf = PartitionedFile::new(self.config.table_path.prefix().clone(), 0);
         let file_groups = vec![vec![pf]];
 
         let file_scan_config = FileScanConfig {
@@ -156,74 +132,5 @@ impl TableProvider for ZarrTableProvider {
         let scanner = ZarrScan::new(file_scan_config);
 
         Ok(Arc::new(scanner))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-
-    use datafusion::{
-        datasource::{listing::ListingTableUrl, physical_plan::FileMeta},
-        error::DataFusionError,
-        execution::context::SessionContext,
-    };
-    use object_store::{local::LocalFileSystem, path::Path, ObjectMeta};
-
-    use crate::{
-        datafusion::table_provider::{
-            ListingZarrTableConfig, ListingZarrTableOptions, ZarrTableProvider,
-        },
-        tests::get_test_v2_data_path,
-    };
-
-    #[tokio::test]
-    async fn test_table_provider() -> Result<(), Box<dyn std::error::Error>> {
-        let local_fs = Arc::new(LocalFileSystem::new());
-
-        let test_data = get_test_v2_data_path("lat_lon_example.zarr".to_string());
-        let location = Path::from_filesystem_path(&test_data)?;
-
-        let ctx = SessionContext::new();
-
-        let file_meta = FileMeta {
-            object_meta: ObjectMeta {
-                location: location.clone(),
-                last_modified: chrono::Utc::now(),
-                size: 0,
-                e_tag: None,
-                version: None,
-            },
-            range: None,
-            extensions: None,
-        };
-
-        let options = ListingZarrTableOptions {};
-        let schema = options
-            .infer_schema_from_object(local_fs, &file_meta.object_meta)
-            .await
-            .map_err(|e| DataFusionError::Execution(format!("infer error: {:?}", e)))?;
-
-        let listing_table_url = ListingTableUrl::parse(location)?;
-
-        let table_provider = ZarrTableProvider::new(
-            ListingZarrTableConfig::new(
-                ListingTableUrl::parse(location.to_string())?,
-                ListingZarrTableOptions {},
-            ),
-            schema,
-        );
-
-        ctx.register_table("zarr", Arc::new(table_provider))?;
-
-        let df = ctx.sql("SELECT lon, lat FROM zarr LIMIT 10").await?;
-
-        let results = df.collect().await?;
-        assert_eq!(results.len(), 1);
-
-        let batch = &results[0];
-        assert_eq!(batch.num_columns(), 2);
-
-        Ok(())
     }
 }
