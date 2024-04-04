@@ -72,7 +72,7 @@
 
 use arrow_array::{BooleanArray, RecordBatch};
 use async_trait::async_trait;
-use futures::stream::Stream;
+use futures::stream::{BoxStream, Stream};
 use futures::{ready, FutureExt};
 use futures_util::future::BoxFuture;
 use std::pin::Pin;
@@ -470,6 +470,198 @@ impl<T: for<'a> ZarrReadAsync<'a> + Clone + Unpin + Send + 'static>
     /// will read all the chunks in the zarr store.
     pub async fn build(self) -> ZarrResult<ZarrRecordBatchStream<ZarrStoreAsync<T>>> {
         self.build_partial_reader(None).await
+    }
+}
+
+//***********************************************************
+// implementation of an async stream that doesn't block when decompressing chunks. for now, that doesn't
+// to help at all, I need to revisit this at some point, won't be used for now. Also, for now filters are
+// not supported, i needed to add a "wrapper" for the mask stream, that packagaes the stream and the returned
+// chunk into a future, to avoid static lifetime issues.
+//************************************************************
+
+type InterleavedResults<T> = (
+    Result<StoreReadResults<T>, tokio::task::JoinError>,
+    Result<ZarrResult<RecordBatch>, tokio::task::JoinError>,
+);
+enum ZarrStreamStateNonBlocking<T: ZarrStream> {
+    Init,
+    Reading(BoxFuture<'static, StoreReadResults<T>>),
+    _Processing(ZarrRecordBatchReader<ZarrInMemoryChunkContainer>),
+    Interleaving(Option<ZarrRecordBatchReader<ZarrInMemoryChunkContainer>>),
+    ProcessingInterleaved(BoxFuture<'static, InterleavedResults<T>>),
+    Done,
+    Error,
+}
+
+pub struct ZarrRecordBatchStreamNonBlocking<'a, T: ZarrStream> {
+    meta: ZarrStoreMetadata,
+    filter: Option<ZarrChunkFilter>,
+    store_wrapper: Option<ZarrStoreWrapper<T>>,
+    state: ZarrStreamStateNonBlocking<T>,
+
+    // this is an optional record batch stream that will provide masks
+    // to apply to the data.
+    _mask_stream: Option<BoxStream<'a, ZarrResult<RecordBatch>>>,
+    _mask: Option<BooleanArray>,
+}
+
+impl<'a, T: ZarrStream> ZarrRecordBatchStreamNonBlocking<'a, T> {
+    fn new(meta: ZarrStoreMetadata, filter: Option<ZarrChunkFilter>, store: T) -> Self {
+        Self {
+            meta,
+            filter,
+            store_wrapper: Some(ZarrStoreWrapper::new(store)),
+            state: ZarrStreamStateNonBlocking::Init,
+            _mask_stream: None,
+            _mask: None,
+        }
+    }
+}
+
+impl<'a, T> Stream for ZarrRecordBatchStreamNonBlocking<'a, T>
+where
+    T: ZarrStream + Unpin + Send + 'static,
+{
+    type Item = ZarrResult<RecordBatch>;
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        loop {
+            match &mut self.state {
+                ZarrStreamStateNonBlocking::Init => {
+                    let wrapper = self.store_wrapper.take().expect(LOST_STORE_ERR);
+                    let fut = wrapper.get_next().boxed();
+                    self.state = ZarrStreamStateNonBlocking::Reading(fut);
+                }
+                ZarrStreamStateNonBlocking::Reading(f) => {
+                    let (wrapper, chunk) = ready!(f.poll_unpin(cx));
+                    self.store_wrapper = Some(wrapper);
+
+                    // if store returns none, it's the end and it's time to return
+                    if chunk.is_none() {
+                        self.state = ZarrStreamStateNonBlocking::Done;
+                        return Poll::Ready(None);
+                    }
+
+                    let chunk = chunk.unwrap()?;
+                    let container = ZarrInMemoryChunkContainer::new(chunk);
+                    let reader =
+                        ZarrRecordBatchReader::new(self.meta.clone(), Some(container), None, None);
+                    self.state = ZarrStreamStateNonBlocking::Interleaving(Some(reader))
+                }
+                ZarrStreamStateNonBlocking::_Processing(reader) => {
+                    let rec_batch = reader
+                        .next()
+                        .expect("could not get record batch in zarr record batch stream");
+
+                    if let Err(e) = rec_batch {
+                        self.state = ZarrStreamStateNonBlocking::Error;
+                        return Poll::Ready(Some(Err(e)));
+                    }
+
+                    self.state = ZarrStreamStateNonBlocking::Init;
+                    return Poll::Ready(Some(rec_batch));
+                }
+                ZarrStreamStateNonBlocking::Interleaving(reader) => {
+                    let mut reader = reader.take().unwrap();
+                    let wrapper = self.store_wrapper.take().unwrap();
+
+                    let io_fut =
+                        tokio::task::spawn(async move { wrapper.get_next().await }).boxed();
+                    let compute_fut = tokio::task::spawn_blocking(move || {
+                        reader
+                            .next()
+                            .expect("reader should always produce Some data here")
+                    })
+                    .boxed();
+                    let fut = async { tokio::join!(io_fut, compute_fut) }.boxed();
+
+                    self.state = ZarrStreamStateNonBlocking::ProcessingInterleaved(fut);
+                }
+                ZarrStreamStateNonBlocking::ProcessingInterleaved(f) => {
+                    let (io_out, rec_batch) = ready!(f.poll_unpin(cx));
+                    let (wrapper, chnk) = io_out.unwrap();
+                    self.store_wrapper = Some(wrapper);
+
+                    if chnk.is_none() {
+                        self.state = ZarrStreamStateNonBlocking::Done;
+                    } else {
+                        let chnk = chnk.unwrap().unwrap();
+                        let container = ZarrInMemoryChunkContainer::new(chnk);
+                        let reader = if self.filter.is_none() {
+                            ZarrRecordBatchReader::new(
+                                self.meta.clone(),
+                                Some(container),
+                                None,
+                                None,
+                            )
+                        } else {
+                            ZarrRecordBatchReader::new(
+                                self.meta.clone(),
+                                None,
+                                self.filter.as_ref().cloned(),
+                                Some(container),
+                            )
+                        };
+                        self.state = ZarrStreamStateNonBlocking::Interleaving(Some(reader));
+                    }
+
+                    let rec_batch = rec_batch.unwrap();
+                    return Poll::Ready(Some(rec_batch));
+                }
+                ZarrStreamStateNonBlocking::Done => {
+                    return Poll::Ready(None);
+                }
+                ZarrStreamStateNonBlocking::Error => {
+                    return Poll::Ready(None);
+                }
+            }
+        }
+    }
+}
+
+pub struct ZarrRecordBatchStreamBuilderNonBlocking<
+    T: for<'a> ZarrReadAsync<'a> + Clone + Unpin + Send,
+> {
+    zarr_reader_async: T,
+    projection: ZarrProjection,
+    _filter: Option<ZarrChunkFilter>,
+}
+
+impl<T: for<'a> ZarrReadAsync<'a> + Clone + Unpin + Send + 'static>
+    ZarrRecordBatchStreamBuilderNonBlocking<T>
+{
+    pub fn new(zarr_reader_async: T) -> Self {
+        Self {
+            zarr_reader_async,
+            projection: ZarrProjection::all(),
+            _filter: None,
+        }
+    }
+
+    pub fn with_projection(self, projection: ZarrProjection) -> Self {
+        Self { projection, ..self }
+    }
+
+    pub fn with_filter(self, filter: ZarrChunkFilter) -> Self {
+        Self {
+            _filter: Some(filter),
+            ..self
+        }
+    }
+
+    pub async fn build<'a>(
+        self,
+    ) -> ZarrResult<ZarrRecordBatchStreamNonBlocking<'a, ZarrStoreAsync<T>>> {
+        let meta = self.zarr_reader_async.get_zarr_metadata().await?;
+        let chunk_pos: Vec<Vec<usize>> = meta.get_chunk_positions();
+
+        let zarr_stream =
+            ZarrStoreAsync::new(self.zarr_reader_async, chunk_pos, self.projection.clone()).await?;
+        Ok(ZarrRecordBatchStreamNonBlocking::new(
+            meta,
+            None,
+            zarr_stream,
+        ))
     }
 }
 
