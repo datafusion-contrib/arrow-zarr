@@ -139,7 +139,12 @@ where
 
         let chnk = self
             .zarr_reader
-            .get_zarr_chunk(pos, &cols, self.meta.get_real_dims(pos))
+            .get_zarr_chunk(
+                pos,
+                &cols,
+                self.meta.get_real_dims(pos),
+                self.meta.get_separators(),
+            )
             .await;
 
         self.curr_chunk += 1;
@@ -980,6 +985,25 @@ mod zarr_async_reader_tests {
                 1044.0, 1055.0, 1165.0, 1176.0, 1262.0, 1263.0, 1273.0, 1274.0, 1264.0, 1275.0,
                 1284.0, 1285.0, 1295.0, 1296.0, 1286.0, 1297.0,
             ],
+        );
+    }
+
+    #[tokio::test]
+    async fn no_sharding_tests() {
+        let zp = get_v3_test_data_path("no_sharding.zarr".to_string());
+        let stream_builder = ZarrRecordBatchStreamBuilder::new(zp);
+
+        let stream = stream_builder.build().await.unwrap();
+        let records: Vec<_> = stream.try_collect().await.unwrap();
+
+        let target_types = HashMap::from([("int_data".to_string(), DataType::Int32)]);
+
+        let rec = &records[1];
+        validate_names_and_types(&target_types, rec);
+        validate_primitive_column::<Int32Type, i32>(
+            "int_data",
+            rec,
+            &[4, 5, 6, 7, 20, 21, 22, 23, 36, 37, 38, 39, 52, 53, 54, 55],
         );
     }
 }
