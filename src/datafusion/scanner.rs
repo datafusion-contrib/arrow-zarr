@@ -185,10 +185,7 @@ mod tests {
         let schema = first_batch.schema();
 
         let names = schema.fields().iter().map(|f| f.name()).collect::<Vec<_>>();
-        let target_names = ["lon", "lat", "float_data"];
-        assert!(names
-            .iter()
-            .all(|name| target_names.contains(&name.as_str())));
+        assert_eq!(names, vec!["lat", "lon"]);
 
         Ok(())
     }

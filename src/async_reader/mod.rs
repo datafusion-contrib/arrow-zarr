@@ -700,9 +700,8 @@ mod zarr_async_reader_tests {
     fn validate_names_and_types(targets: &HashMap<String, DataType>, rec: &RecordBatch) {
         let mut target_cols: Vec<&String> = targets.keys().collect();
         let schema = rec.schema();
-        let mut from_rec: Vec<&String> = schema.fields.iter().map(|f| f.name()).collect();
+        let from_rec: Vec<&String> = schema.fields.iter().map(|f| f.name()).collect();
 
-        from_rec.sort();
         target_cols.sort();
         assert_eq!(from_rec, target_cols);
 

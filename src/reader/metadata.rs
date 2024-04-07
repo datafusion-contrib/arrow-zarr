@@ -675,6 +675,10 @@ impl ZarrStoreMetadata {
             }
         }
 
+        // the sort below is important, because within a zarr store, the different arrays are
+        // not ordered, so there is no predefined order for the different columns. we effectively
+        // define one here, my ordering the columns alphabetically.
+        self.columns.sort();
         Ok(())
     }
 

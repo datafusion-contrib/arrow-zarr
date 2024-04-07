@@ -45,7 +45,13 @@ impl ZarrInMemoryChunk {
     }
 
     pub(crate) fn get_cols_in_chunk(&self) -> Vec<String> {
-        self.data.keys().map(|s| s.to_string()).collect_vec()
+        let mut cols = self.data.keys().map(|s| s.to_string()).collect_vec();
+
+        // the sort below is important, because within a zarr store, the different arrays are
+        // not ordered, so there is no predefined order for the different columns. we effectively
+        // define one here, my ordering the columns alphabetically.
+        cols.sort();
+        cols
     }
 
     pub(crate) fn get_real_dims(&self) -> &Vec<usize> {
