@@ -192,7 +192,6 @@ impl<T: ZarrIterator> ZarrRecordBatchReader<T> {
         let mut arrs: Vec<ArrayRef> = Vec::with_capacity(self.meta.get_num_columns());
         let mut fields: Vec<FieldRef> = Vec::with_capacity(self.meta.get_num_columns());
 
-
         let cols = chunk.get_cols_in_chunk();
         for col in cols {
             let data = chunk.take_array(&col)?;
