@@ -21,7 +21,7 @@ crc32c = { version = "0.6.5" }
 object_store = { version = "0.9" }
 futures = { version = "0.3" }
 futures-util = { version = "0.3.30" }
-tokio = { version = "1.0" }
+tokio = { version = "1.0", features = ["full"] }
 dyn-clone = { version = "1.0.16" }
 arrow = { version = "50.0.0" }
 arrow-array = { version = "50.0.0" }
@@ -38,3 +38,6 @@ all = ["datafusion"]
 [dev-dependencies]
 arrow-cast = { version = "50.0.0", features = ["prettyprint"] }
 chrono = { version = "0.4" }
+
+[[bin]]
+name = "async-benchmark"

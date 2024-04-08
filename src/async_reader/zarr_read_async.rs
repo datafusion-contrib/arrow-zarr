@@ -1,8 +1,27 @@
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
+//
+//   http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
 use async_trait::async_trait;
 use futures_util::{pin_mut, StreamExt};
 use object_store::{path::Path, ObjectStore};
+use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::reader::metadata::ChunkSeparator;
 use crate::reader::{ZarrError, ZarrResult};
 use crate::reader::{ZarrInMemoryChunk, ZarrStoreMetadata};
 
@@ -20,6 +39,7 @@ pub trait ZarrReadAsync<'a> {
         position: &'a [usize],
         cols: &'a [String],
         real_dims: Vec<usize>,
+        separators: HashMap<String, ChunkSeparator>,
     ) -> ZarrResult<ZarrInMemoryChunk>;
 }
 
@@ -73,13 +93,27 @@ impl<'a> ZarrReadAsync<'a> for ZarrPath {
         position: &'a [usize],
         cols: &'a [String],
         real_dims: Vec<usize>,
+        separators: HashMap<String, ChunkSeparator>,
     ) -> ZarrResult<ZarrInMemoryChunk> {
         let mut chunk = ZarrInMemoryChunk::new(real_dims);
         for var in cols {
             let s: Vec<String> = position.iter().map(|i| i.to_string()).collect();
-            let s = s.join(".");
+            let separator = separators
+                .get(var.as_str())
+                .ok_or(ZarrError::InvalidMetadata(
+                    "Could not find separator for column".to_string(),
+                ))?;
 
-            let p = self.location.child(var.to_string()).child(s);
+            let p = match separator {
+                ChunkSeparator::Period => self.location.child(var.to_string()).child(s.join(".")),
+                ChunkSeparator::Slash => {
+                    let mut partial_path = self.location.child(var.to_string()).child("c");
+                    for idx in s {
+                        partial_path = partial_path.child(idx);
+                    }
+                    partial_path
+                }
+            };
             let data = self.store.get(&p).await?.bytes().await?;
             chunk.add_array(var.to_string(), data.to_vec());
         }
@@ -149,7 +183,12 @@ mod zarr_read_async_tests {
         // test read from an array where the data is just raw bytes
         let pos = vec![1, 2];
         let chunk = store
-            .get_zarr_chunk(&pos, meta.get_columns(), meta.get_real_dims(&pos))
+            .get_zarr_chunk(
+                &pos,
+                meta.get_columns(),
+                meta.get_real_dims(&pos),
+                meta.get_separators(),
+            )
             .await
             .unwrap();
         assert_eq!(
@@ -165,7 +204,7 @@ mod zarr_read_async_tests {
         let col_proj = ZarrProjection::skip(vec!["float_data".to_string()]);
         let cols = col_proj.apply_selection(meta.get_columns()).unwrap();
         let chunk = store
-            .get_zarr_chunk(&pos, &cols, meta.get_real_dims(&pos))
+            .get_zarr_chunk(&pos, &cols, meta.get_real_dims(&pos), meta.get_separators())
             .await
             .unwrap();
         assert_eq!(
@@ -177,7 +216,7 @@ mod zarr_read_async_tests {
         let col_proj = ZarrProjection::keep(vec!["float_data".to_string()]);
         let cols = col_proj.apply_selection(meta.get_columns()).unwrap();
         let chunk = store
-            .get_zarr_chunk(&pos, &cols, meta.get_real_dims(&pos))
+            .get_zarr_chunk(&pos, &cols, meta.get_real_dims(&pos), meta.get_separators())
             .await
             .unwrap();
         assert_eq!(

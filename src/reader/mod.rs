@@ -192,12 +192,7 @@ impl<T: ZarrIterator> ZarrRecordBatchReader<T> {
         let mut arrs: Vec<ArrayRef> = Vec::with_capacity(self.meta.get_num_columns());
         let mut fields: Vec<FieldRef> = Vec::with_capacity(self.meta.get_num_columns());
 
-        // the sort below is important, because within a zarr store, the different arrays are
-        // not ordered, so there is no predefined order for the different columns. we effectively
-        // define one here, my ordering the columns alphabetically.
-        let mut cols = chunk.get_cols_in_chunk();
-        cols.sort();
-
+        let cols = chunk.get_cols_in_chunk();
         for col in cols {
             let data = chunk.take_array(&col)?;
             let (arr, field) = self.unpack_array_chunk(
@@ -438,9 +433,8 @@ mod zarr_reader_tests {
     fn validate_names_and_types(targets: &HashMap<String, DataType>, rec: &RecordBatch) {
         let mut target_cols: Vec<&String> = targets.keys().collect();
         let schema = rec.schema();
-        let mut from_rec: Vec<&String> = schema.fields.iter().map(|f| f.name()).collect();
+        let from_rec: Vec<&String> = schema.fields.iter().map(|f| f.name()).collect();
 
-        from_rec.sort();
         target_cols.sort();
         assert_eq!(from_rec, target_cols);
 

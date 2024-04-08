@@ -1,3 +1,20 @@
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
+//
+//   http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
 //! A module tha provides an asychronous reader for zarr store, to generate [`RecordBatch`]es.
 //!
 //! ```
@@ -72,7 +89,7 @@
 
 use arrow_array::{BooleanArray, RecordBatch};
 use async_trait::async_trait;
-use futures::stream::Stream;
+use futures::stream::{BoxStream, Stream};
 use futures::{ready, FutureExt};
 use futures_util::future::BoxFuture;
 use std::pin::Pin;
@@ -139,7 +156,12 @@ where
 
         let chnk = self
             .zarr_reader
-            .get_zarr_chunk(pos, &cols, self.meta.get_real_dims(pos))
+            .get_zarr_chunk(
+                pos,
+                &cols,
+                self.meta.get_real_dims(pos),
+                self.meta.get_separators(),
+            )
             .await;
 
         self.curr_chunk += 1;
@@ -275,36 +297,35 @@ where
                     let (wrapper, chunk) = ready!(f.poll_unpin(cx));
                     self.predicate_store_wrapper = Some(wrapper);
 
-                    // if the predicate store returns none, it's the end and it's
-                    // time to return
-                    if chunk.is_none() {
+                    if let Some(chunk) = chunk {
+                        if let Err(e) = chunk {
+                            self.state = ZarrStreamState::Error;
+                            return Poll::Ready(Some(Err(e)));
+                        }
+
+                        let chunk = chunk?;
+                        let container = ZarrInMemoryChunkContainer::new(chunk);
+
+                        if self.filter.is_none() {
+                            self.state = ZarrStreamState::Error;
+                            return Poll::Ready(Some(Err(ZarrError::InvalidMetadata(
+                                "predicate store provided with no filter in zarr record batch stream"
+                                    .to_string(),
+                            ))));
+                        }
+                        let zarr_reader = ZarrRecordBatchReader::new(
+                            self.meta.clone(),
+                            None,
+                            self.filter.as_ref().cloned(),
+                            Some(container),
+                        );
+                        self.state = ZarrStreamState::ProcessingPredicate(zarr_reader);
+                    } else {
+                        // if the predicate store returns none, it's the end and it's
+                        // time to return
                         self.state = ZarrStreamState::Init;
                         return Poll::Ready(None);
                     }
-
-                    let chunk = chunk.unwrap();
-                    if let Err(e) = chunk {
-                        self.state = ZarrStreamState::Error;
-                        return Poll::Ready(Some(Err(e)));
-                    }
-
-                    let chunk = chunk.unwrap();
-                    let container = ZarrInMemoryChunkContainer::new(chunk);
-
-                    if self.filter.is_none() {
-                        self.state = ZarrStreamState::Error;
-                        return Poll::Ready(Some(Err(ZarrError::InvalidMetadata(
-                            "predicate store provided with no filter in zarr record batch stream"
-                                .to_string(),
-                        ))));
-                    }
-                    let zarr_reader = ZarrRecordBatchReader::new(
-                        self.meta.clone(),
-                        None,
-                        self.filter.as_ref().cloned(),
-                        Some(container),
-                    );
-                    self.state = ZarrStreamState::ProcessingPredicate(zarr_reader);
                 }
                 ZarrStreamState::ProcessingPredicate(reader) => {
                     // this call should always return something, we should never get a None because
@@ -344,27 +365,30 @@ where
                     let (wrapper, chunk) = ready!(f.poll_unpin(cx));
                     self.store_wrapper = Some(wrapper);
 
-                    // if store returns none, it's the end and it's time to return
-                    if chunk.is_none() {
+                    if let Some(chunk) = chunk {
+                        if let Err(e) = chunk {
+                            self.state = ZarrStreamState::Error;
+                            return Poll::Ready(Some(Err(e)));
+                        }
+
+                        let chunk = chunk?;
+                        let container = ZarrInMemoryChunkContainer::new(chunk);
+                        let mut zarr_reader = ZarrRecordBatchReader::new(
+                            self.meta.clone(),
+                            Some(container),
+                            None,
+                            None,
+                        );
+
+                        if self.mask.is_some() {
+                            zarr_reader = zarr_reader.with_row_mask(self.mask.take().unwrap());
+                        }
+                        self.state = ZarrStreamState::Decoding(zarr_reader);
+                    } else {
+                        // if store returns none, it's the end and it's time to return
                         self.state = ZarrStreamState::Init;
                         return Poll::Ready(None);
                     }
-
-                    let chunk = chunk.unwrap();
-                    if let Err(e) = chunk {
-                        self.state = ZarrStreamState::Error;
-                        return Poll::Ready(Some(Err(e)));
-                    }
-
-                    let chunk = chunk.unwrap();
-                    let container = ZarrInMemoryChunkContainer::new(chunk);
-                    let mut zarr_reader =
-                        ZarrRecordBatchReader::new(self.meta.clone(), Some(container), None, None);
-
-                    if self.mask.is_some() {
-                        zarr_reader = zarr_reader.with_row_mask(self.mask.take().unwrap());
-                    }
-                    self.state = ZarrStreamState::Decoding(zarr_reader);
                 }
                 ZarrStreamState::Decoding(reader) => {
                     // this call should always return something, we should never get a None because
@@ -473,6 +497,202 @@ impl<T: for<'a> ZarrReadAsync<'a> + Clone + Unpin + Send + 'static>
     }
 }
 
+//***********************************************************
+// implementation of an async stream that doesn't block when decompressing chunks. for now, that doesn't
+// to help at all, I need to revisit this at some point, won't be used for now. Also, for now filters are
+// not supported, i needed to add a "wrapper" for the mask stream, that packagaes the stream and the returned
+// chunk into a future, to avoid static lifetime issues.
+//************************************************************
+
+type InterleavedResults<T> = (
+    Result<StoreReadResults<T>, tokio::task::JoinError>,
+    Result<ZarrResult<RecordBatch>, tokio::task::JoinError>,
+);
+enum ZarrStreamStateNonBlocking<T: ZarrStream> {
+    Init,
+    Reading(BoxFuture<'static, StoreReadResults<T>>),
+    _Processing(ZarrRecordBatchReader<ZarrInMemoryChunkContainer>),
+    Interleaving(Option<ZarrRecordBatchReader<ZarrInMemoryChunkContainer>>),
+    ProcessingInterleaved(BoxFuture<'static, InterleavedResults<T>>),
+    Done,
+    Error,
+}
+
+pub struct ZarrRecordBatchStreamNonBlocking<'a, T: ZarrStream> {
+    meta: ZarrStoreMetadata,
+    filter: Option<ZarrChunkFilter>,
+    store_wrapper: Option<ZarrStoreWrapper<T>>,
+    state: ZarrStreamStateNonBlocking<T>,
+
+    // this is an optional record batch stream that will provide masks
+    // to apply to the data.
+    _mask_stream: Option<BoxStream<'a, ZarrResult<RecordBatch>>>,
+    _mask: Option<BooleanArray>,
+}
+
+impl<'a, T: ZarrStream> ZarrRecordBatchStreamNonBlocking<'a, T> {
+    fn new(meta: ZarrStoreMetadata, filter: Option<ZarrChunkFilter>, store: T) -> Self {
+        Self {
+            meta,
+            filter,
+            store_wrapper: Some(ZarrStoreWrapper::new(store)),
+            state: ZarrStreamStateNonBlocking::Init,
+            _mask_stream: None,
+            _mask: None,
+        }
+    }
+}
+
+impl<'a, T> Stream for ZarrRecordBatchStreamNonBlocking<'a, T>
+where
+    T: ZarrStream + Unpin + Send + 'static,
+{
+    type Item = ZarrResult<RecordBatch>;
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        loop {
+            match &mut self.state {
+                ZarrStreamStateNonBlocking::Init => {
+                    let wrapper = self.store_wrapper.take().expect(LOST_STORE_ERR);
+                    let fut = wrapper.get_next().boxed();
+                    self.state = ZarrStreamStateNonBlocking::Reading(fut);
+                }
+                ZarrStreamStateNonBlocking::Reading(f) => {
+                    let (wrapper, chunk) = ready!(f.poll_unpin(cx));
+                    self.store_wrapper = Some(wrapper);
+
+                    // if store returns none, it's the end and it's time to return
+                    if let Some(chunk) = chunk {
+                        let chunk = chunk?;
+                        let container = ZarrInMemoryChunkContainer::new(chunk);
+                        let reader = ZarrRecordBatchReader::new(
+                            self.meta.clone(),
+                            Some(container),
+                            None,
+                            None,
+                        );
+                        self.state = ZarrStreamStateNonBlocking::Interleaving(Some(reader))
+                    } else {
+                        self.state = ZarrStreamStateNonBlocking::Done;
+                        return Poll::Ready(None);
+                    }
+                }
+                ZarrStreamStateNonBlocking::_Processing(reader) => {
+                    let rec_batch = reader
+                        .next()
+                        .expect("could not get record batch in zarr record batch stream");
+
+                    if let Err(e) = rec_batch {
+                        self.state = ZarrStreamStateNonBlocking::Error;
+                        return Poll::Ready(Some(Err(e)));
+                    }
+
+                    self.state = ZarrStreamStateNonBlocking::Init;
+                    return Poll::Ready(Some(rec_batch));
+                }
+                ZarrStreamStateNonBlocking::Interleaving(reader) => {
+                    let mut reader = reader.take().unwrap();
+                    let wrapper = self.store_wrapper.take().unwrap();
+
+                    let io_fut =
+                        tokio::task::spawn(async move { wrapper.get_next().await }).boxed();
+                    let compute_fut = tokio::task::spawn_blocking(move || {
+                        reader
+                            .next()
+                            .expect("reader should always produce Some data here")
+                    })
+                    .boxed();
+                    let fut = async { tokio::join!(io_fut, compute_fut) }.boxed();
+
+                    self.state = ZarrStreamStateNonBlocking::ProcessingInterleaved(fut);
+                }
+                ZarrStreamStateNonBlocking::ProcessingInterleaved(f) => {
+                    let (io_out, rec_batch) = ready!(f.poll_unpin(cx));
+                    let (wrapper, chnk) = io_out.unwrap();
+                    self.store_wrapper = Some(wrapper);
+
+                    if let Some(chnk) = chnk {
+                        let chnk = chnk?;
+                        let container = ZarrInMemoryChunkContainer::new(chnk);
+                        let reader = if self.filter.is_none() {
+                            ZarrRecordBatchReader::new(
+                                self.meta.clone(),
+                                Some(container),
+                                None,
+                                None,
+                            )
+                        } else {
+                            ZarrRecordBatchReader::new(
+                                self.meta.clone(),
+                                None,
+                                self.filter.as_ref().cloned(),
+                                Some(container),
+                            )
+                        };
+                        self.state = ZarrStreamStateNonBlocking::Interleaving(Some(reader));
+                    } else {
+                        self.state = ZarrStreamStateNonBlocking::Done;
+                    }
+
+                    let rec_batch = rec_batch.unwrap();
+                    return Poll::Ready(Some(rec_batch));
+                }
+                ZarrStreamStateNonBlocking::Done => {
+                    return Poll::Ready(None);
+                }
+                ZarrStreamStateNonBlocking::Error => {
+                    return Poll::Ready(None);
+                }
+            }
+        }
+    }
+}
+
+pub struct ZarrRecordBatchStreamBuilderNonBlocking<
+    T: for<'a> ZarrReadAsync<'a> + Clone + Unpin + Send,
+> {
+    zarr_reader_async: T,
+    projection: ZarrProjection,
+    _filter: Option<ZarrChunkFilter>,
+}
+
+impl<T: for<'a> ZarrReadAsync<'a> + Clone + Unpin + Send + 'static>
+    ZarrRecordBatchStreamBuilderNonBlocking<T>
+{
+    pub fn new(zarr_reader_async: T) -> Self {
+        Self {
+            zarr_reader_async,
+            projection: ZarrProjection::all(),
+            _filter: None,
+        }
+    }
+
+    pub fn with_projection(self, projection: ZarrProjection) -> Self {
+        Self { projection, ..self }
+    }
+
+    pub fn with_filter(self, filter: ZarrChunkFilter) -> Self {
+        Self {
+            _filter: Some(filter),
+            ..self
+        }
+    }
+
+    pub async fn build<'a>(
+        self,
+    ) -> ZarrResult<ZarrRecordBatchStreamNonBlocking<'a, ZarrStoreAsync<T>>> {
+        let meta = self.zarr_reader_async.get_zarr_metadata().await?;
+        let chunk_pos: Vec<Vec<usize>> = meta.get_chunk_positions();
+
+        let zarr_stream =
+            ZarrStoreAsync::new(self.zarr_reader_async, chunk_pos, self.projection.clone()).await?;
+        Ok(ZarrRecordBatchStreamNonBlocking::new(
+            meta,
+            None,
+            zarr_stream,
+        ))
+    }
+}
+
 #[cfg(test)]
 mod zarr_async_reader_tests {
     use arrow::compute::kernels::cmp::{gt_eq, lt};
@@ -503,9 +723,8 @@ mod zarr_async_reader_tests {
     fn validate_names_and_types(targets: &HashMap<String, DataType>, rec: &RecordBatch) {
         let mut target_cols: Vec<&String> = targets.keys().collect();
         let schema = rec.schema();
-        let mut from_rec: Vec<&String> = schema.fields.iter().map(|f| f.name()).collect();
+        let from_rec: Vec<&String> = schema.fields.iter().map(|f| f.name()).collect();
 
-        from_rec.sort();
         target_cols.sort();
         assert_eq!(from_rec, target_cols);
 
@@ -788,6 +1007,25 @@ mod zarr_async_reader_tests {
                 1044.0, 1055.0, 1165.0, 1176.0, 1262.0, 1263.0, 1273.0, 1274.0, 1264.0, 1275.0,
                 1284.0, 1285.0, 1295.0, 1296.0, 1286.0, 1297.0,
             ],
+        );
+    }
+
+    #[tokio::test]
+    async fn no_sharding_tests() {
+        let zp = get_v3_test_data_path("no_sharding.zarr".to_string());
+        let stream_builder = ZarrRecordBatchStreamBuilder::new(zp);
+
+        let stream = stream_builder.build().await.unwrap();
+        let records: Vec<_> = stream.try_collect().await.unwrap();
+
+        let target_types = HashMap::from([("int_data".to_string(), DataType::Int32)]);
+
+        let rec = &records[1];
+        validate_names_and_types(&target_types, rec);
+        validate_primitive_column::<Int32Type, i32>(
+            "int_data",
+            rec,
+            &[4, 5, 6, 7, 20, 21, 22, 23, 36, 37, 38, 39, 52, 53, 54, 55],
         );
     }
 }
