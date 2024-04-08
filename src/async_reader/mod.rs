@@ -1,3 +1,20 @@
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
+//
+//   http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
 //! A module tha provides an asychronous reader for zarr store, to generate [`RecordBatch`]es.
 //!
 //! ```
@@ -280,36 +297,35 @@ where
                     let (wrapper, chunk) = ready!(f.poll_unpin(cx));
                     self.predicate_store_wrapper = Some(wrapper);
 
-                    // if the predicate store returns none, it's the end and it's
-                    // time to return
-                    if chunk.is_none() {
+                    if let Some(chunk) = chunk {
+                        if let Err(e) = chunk {
+                            self.state = ZarrStreamState::Error;
+                            return Poll::Ready(Some(Err(e)));
+                        }
+
+                        let chunk = chunk?;
+                        let container = ZarrInMemoryChunkContainer::new(chunk);
+
+                        if self.filter.is_none() {
+                            self.state = ZarrStreamState::Error;
+                            return Poll::Ready(Some(Err(ZarrError::InvalidMetadata(
+                                "predicate store provided with no filter in zarr record batch stream"
+                                    .to_string(),
+                            ))));
+                        }
+                        let zarr_reader = ZarrRecordBatchReader::new(
+                            self.meta.clone(),
+                            None,
+                            self.filter.as_ref().cloned(),
+                            Some(container),
+                        );
+                        self.state = ZarrStreamState::ProcessingPredicate(zarr_reader);
+                    } else {
+                        // if the predicate store returns none, it's the end and it's
+                        // time to return
                         self.state = ZarrStreamState::Init;
                         return Poll::Ready(None);
                     }
-
-                    let chunk = chunk.unwrap();
-                    if let Err(e) = chunk {
-                        self.state = ZarrStreamState::Error;
-                        return Poll::Ready(Some(Err(e)));
-                    }
-
-                    let chunk = chunk.unwrap();
-                    let container = ZarrInMemoryChunkContainer::new(chunk);
-
-                    if self.filter.is_none() {
-                        self.state = ZarrStreamState::Error;
-                        return Poll::Ready(Some(Err(ZarrError::InvalidMetadata(
-                            "predicate store provided with no filter in zarr record batch stream"
-                                .to_string(),
-                        ))));
-                    }
-                    let zarr_reader = ZarrRecordBatchReader::new(
-                        self.meta.clone(),
-                        None,
-                        self.filter.as_ref().cloned(),
-                        Some(container),
-                    );
-                    self.state = ZarrStreamState::ProcessingPredicate(zarr_reader);
                 }
                 ZarrStreamState::ProcessingPredicate(reader) => {
                     // this call should always return something, we should never get a None because
@@ -349,27 +365,30 @@ where
                     let (wrapper, chunk) = ready!(f.poll_unpin(cx));
                     self.store_wrapper = Some(wrapper);
 
-                    // if store returns none, it's the end and it's time to return
-                    if chunk.is_none() {
+                    if let Some(chunk) = chunk {
+                        if let Err(e) = chunk {
+                            self.state = ZarrStreamState::Error;
+                            return Poll::Ready(Some(Err(e)));
+                        }
+
+                        let chunk = chunk?;
+                        let container = ZarrInMemoryChunkContainer::new(chunk);
+                        let mut zarr_reader = ZarrRecordBatchReader::new(
+                            self.meta.clone(),
+                            Some(container),
+                            None,
+                            None,
+                        );
+
+                        if self.mask.is_some() {
+                            zarr_reader = zarr_reader.with_row_mask(self.mask.take().unwrap());
+                        }
+                        self.state = ZarrStreamState::Decoding(zarr_reader);
+                    } else {
+                        // if store returns none, it's the end and it's time to return
                         self.state = ZarrStreamState::Init;
                         return Poll::Ready(None);
                     }
-
-                    let chunk = chunk.unwrap();
-                    if let Err(e) = chunk {
-                        self.state = ZarrStreamState::Error;
-                        return Poll::Ready(Some(Err(e)));
-                    }
-
-                    let chunk = chunk.unwrap();
-                    let container = ZarrInMemoryChunkContainer::new(chunk);
-                    let mut zarr_reader =
-                        ZarrRecordBatchReader::new(self.meta.clone(), Some(container), None, None);
-
-                    if self.mask.is_some() {
-                        zarr_reader = zarr_reader.with_row_mask(self.mask.take().unwrap());
-                    }
-                    self.state = ZarrStreamState::Decoding(zarr_reader);
                 }
                 ZarrStreamState::Decoding(reader) => {
                     // this call should always return something, we should never get a None because
@@ -542,16 +561,20 @@ where
                     self.store_wrapper = Some(wrapper);
 
                     // if store returns none, it's the end and it's time to return
-                    if chunk.is_none() {
+                    if let Some(chunk) = chunk {
+                        let chunk = chunk?;
+                        let container = ZarrInMemoryChunkContainer::new(chunk);
+                        let reader = ZarrRecordBatchReader::new(
+                            self.meta.clone(),
+                            Some(container),
+                            None,
+                            None,
+                        );
+                        self.state = ZarrStreamStateNonBlocking::Interleaving(Some(reader))
+                    } else {
                         self.state = ZarrStreamStateNonBlocking::Done;
                         return Poll::Ready(None);
                     }
-
-                    let chunk = chunk.unwrap()?;
-                    let container = ZarrInMemoryChunkContainer::new(chunk);
-                    let reader =
-                        ZarrRecordBatchReader::new(self.meta.clone(), Some(container), None, None);
-                    self.state = ZarrStreamStateNonBlocking::Interleaving(Some(reader))
                 }
                 ZarrStreamStateNonBlocking::_Processing(reader) => {
                     let rec_batch = reader
@@ -587,10 +610,8 @@ where
                     let (wrapper, chnk) = io_out.unwrap();
                     self.store_wrapper = Some(wrapper);
 
-                    if chnk.is_none() {
-                        self.state = ZarrStreamStateNonBlocking::Done;
-                    } else {
-                        let chnk = chnk.unwrap().unwrap();
+                    if let Some(chnk) = chnk {
+                        let chnk = chnk?;
                         let container = ZarrInMemoryChunkContainer::new(chnk);
                         let reader = if self.filter.is_none() {
                             ZarrRecordBatchReader::new(
@@ -608,6 +629,8 @@ where
                             )
                         };
                         self.state = ZarrStreamStateNonBlocking::Interleaving(Some(reader));
+                    } else {
+                        self.state = ZarrStreamStateNonBlocking::Done;
                     }
 
                     let rec_batch = rec_batch.unwrap();
