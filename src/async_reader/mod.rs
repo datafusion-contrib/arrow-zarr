@@ -469,7 +469,7 @@ impl<T: for<'a> ZarrReadAsync<'a> + Clone + Unpin + Send + 'static>
 
         let mut predicate_stream: Option<ZarrStoreAsync<T>> = None;
         if let Some(filter) = &self.filter {
-            let predicate_proj = filter.get_all_projections();
+            let predicate_proj = filter.get_all_projections()?;
             predicate_stream = Some(
                 ZarrStoreAsync::new(
                     self.zarr_reader_async.clone(),

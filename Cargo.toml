@@ -30,9 +30,17 @@ arrow-cast = { version = "50.0.0" }
 arrow-schema = { version = "50.0.0" }
 arrow-data = { version = "50.0.0" }
 datafusion = { version = "36.0", optional = true }
+datafusion-expr = { version = "36.0", optional = true }
+datafusion-common = { version = "36.0", optional = true }
+datafusion-physical-expr = { version = "36.0", optional = true }
 
 [features]
-datafusion = ["dep:datafusion"]
+datafusion = [
+    "dep:datafusion",
+    "dep:datafusion-physical-expr",
+    "dep:datafusion-expr",
+    "dep:datafusion-common",
+]
 all = ["datafusion"]
 
 [dev-dependencies]

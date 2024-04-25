@@ -394,7 +394,7 @@ impl<T: ZarrRead + Clone> ZarrRecordBatchReaderBuilder<T> {
 
         let mut predicate_store: Option<ZarrStore<T>> = None;
         if let Some(filter) = &self.filter {
-            let predicate_proj = filter.get_all_projections();
+            let predicate_proj = filter.get_all_projections()?;
             predicate_store = Some(ZarrStore::new(
                 self.zarr_reader.clone(),
                 chunk_pos.clone(),
@@ -466,7 +466,7 @@ mod zarr_reader_tests {
         let mut matched = false;
         for (idx, col) in enumerate(rec.schema().fields.iter()) {
             if col.name().as_str() == col_name {
-                assert_eq!(rec.column(idx).as_primitive::<T>().values(), targets,);
+                assert_eq!(rec.column(idx).as_primitive::<T>().values(), targets);
                 matched = true;
             }
         }

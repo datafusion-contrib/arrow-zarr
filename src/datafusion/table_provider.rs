@@ -20,22 +20,24 @@ use std::sync::Arc;
 use arrow_schema::{Schema, SchemaRef};
 use async_trait::async_trait;
 use datafusion::{
-    common::Statistics,
+    common::{Statistics, ToDFSchema},
     datasource::{
         listing::{ListingTableUrl, PartitionedFile},
         physical_plan::FileScanConfig,
         TableProvider, TableType,
     },
     execution::context::SessionState,
-    logical_expr::{Expr, TableProviderFilterPushDown},
+    logical_expr::{utils::conjunction, Expr, TableProviderFilterPushDown},
     physical_plan::ExecutionPlan,
 };
+use datafusion_physical_expr::create_physical_expr;
 
 use crate::{
     async_reader::{ZarrPath, ZarrReadAsync},
     reader::ZarrResult,
 };
 
+use super::helpers::expr_applicable_for_cols;
 use super::scanner::ZarrScan;
 
 pub struct ListingZarrTableOptions {}
@@ -99,24 +101,45 @@ impl TableProvider for ZarrTableProvider {
         &self,
         filters: &[&Expr],
     ) -> datafusion::error::Result<Vec<TableProviderFilterPushDown>> {
-        // TODO: which filters can we push down?
         Ok(filters
             .iter()
-            .map(|_| TableProviderFilterPushDown::Unsupported)
+            .map(|filter| {
+                if expr_applicable_for_cols(
+                    &self
+                        .table_schema
+                        .fields
+                        .iter()
+                        .map(|field| field.name().to_string())
+                        .collect::<Vec<_>>(),
+                    filter,
+                ) {
+                    TableProviderFilterPushDown::Exact
+                } else {
+                    TableProviderFilterPushDown::Unsupported
+                }
+            })
             .collect())
     }
 
     async fn scan(
         &self,
-        _state: &SessionState,
+        state: &SessionState,
         projection: Option<&Vec<usize>>,
-        _filters: &[Expr],
+        filters: &[Expr],
         limit: Option<usize>,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
         let object_store_url = self.config.table_path.object_store();
 
         let pf = PartitionedFile::new(self.config.table_path.prefix().clone(), 0);
         let file_groups = vec![vec![pf]];
+
+        let filters = if let Some(expr) = conjunction(filters.to_vec()) {
+            let table_df_schema = self.table_schema.clone().to_dfschema()?;
+            let filters = create_physical_expr(&expr, &table_df_schema, state.execution_props())?;
+            Some(filters)
+        } else {
+            None
+        };
 
         let file_scan_config = FileScanConfig {
             object_store_url,
@@ -129,7 +152,7 @@ impl TableProvider for ZarrTableProvider {
             output_ordering: vec![],
         };
 
-        let scanner = ZarrScan::new(file_scan_config);
+        let scanner = ZarrScan::new(file_scan_config, filters);
 
         Ok(Arc::new(scanner))
     }

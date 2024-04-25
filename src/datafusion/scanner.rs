@@ -23,7 +23,7 @@ use datafusion::{
     datasource::physical_plan::{FileScanConfig, FileStream},
     physical_plan::{
         metrics::ExecutionPlanMetricsSet, DisplayAs, DisplayFormatType, ExecutionPlan,
-        Partitioning, SendableRecordBatchStream,
+        Partitioning, PhysicalExpr, SendableRecordBatchStream,
     },
 };
 
@@ -43,11 +43,14 @@ pub struct ZarrScan {
 
     /// The statistics for the scan.
     statistics: Statistics,
+
+    /// Filters that will be pushed down to the Zarr stream reader.
+    filters: Option<Arc<dyn PhysicalExpr>>,
 }
 
 impl ZarrScan {
     /// Create a new Zarr scan.
-    pub fn new(base_config: FileScanConfig) -> Self {
+    pub fn new(base_config: FileScanConfig, filters: Option<Arc<dyn PhysicalExpr>>) -> Self {
         let (projected_schema, statistics, _lex_sorting) = base_config.project();
 
         Self {
@@ -55,6 +58,7 @@ impl ZarrScan {
             projected_schema,
             metrics: ExecutionPlanMetricsSet::new(),
             statistics,
+            filters,
         }
     }
 }
@@ -100,9 +104,7 @@ impl ExecutionPlan for ZarrScan {
 
         let config =
             ZarrConfig::new(object_store).with_projection(self.base_config.projection.clone());
-
-        let opener = ZarrFileOpener::new(config);
-
+        let opener = ZarrFileOpener::new(config, self.filters.clone());
         let stream = FileStream::new(&self.base_config, partition, opener, &self.metrics)?;
 
         Ok(Box::pin(stream) as SendableRecordBatchStream)
@@ -169,7 +171,7 @@ mod tests {
             output_ordering: vec![],
         };
 
-        let scanner = ZarrScan::new(scan_config);
+        let scanner = ZarrScan::new(scan_config, None);
 
         let session = datafusion::execution::context::SessionContext::new();
 
