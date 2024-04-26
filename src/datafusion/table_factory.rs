@@ -59,7 +59,6 @@ impl TableProviderFactory for ZarrListingTableFactory {
 
 #[cfg(test)]
 mod tests {
-    use crate::reader::{ZarrError, ZarrResult};
     use crate::tests::get_test_v2_data_path;
     use arrow::record_batch::RecordBatch;
     use arrow_array::cast::AsArray;
@@ -71,26 +70,18 @@ mod tests {
         context::{SessionContext, SessionState},
         runtime_env::RuntimeEnv,
     };
-    use itertools::enumerate;
     use std::sync::Arc;
 
-    fn extract_col<T>(
-        col_name: &str,
-        rec_batch: &RecordBatch,
-    ) -> ZarrResult<ScalarBuffer<T::Native>>
+    fn extract_col<T>(col_name: &str, rec_batch: &RecordBatch) -> ScalarBuffer<T::Native>
     where
         T: ArrowPrimitiveType,
     {
-        for (idx, col) in enumerate(rec_batch.schema().fields.iter()) {
-            if col.name().as_str() == col_name {
-                let values = rec_batch.column(idx).as_primitive::<T>().values();
-                return Ok(values.clone());
-            }
-        }
-
-        Err(ZarrError::InvalidMetadata(
-            "column name not found".to_string(),
-        ))
+        rec_batch
+            .column_by_name(col_name)
+            .unwrap()
+            .as_primitive::<T>()
+            .values()
+            .clone()
     }
 
     #[tokio::test]
@@ -155,7 +146,7 @@ mod tests {
 
         let batches = df.collect().await?;
         for batch in batches {
-            let values = extract_col::<Float64Type>("lat", &batch)?;
+            let values = extract_col::<Float64Type>("lat", &batch);
             assert!(values.iter().all(|v| *v > 38.21));
         }
 
@@ -165,8 +156,8 @@ mod tests {
 
         let batches = df.collect().await?;
         for batch in batches {
-            let lat_values = extract_col::<Float64Type>("lat", &batch)?;
-            let lon_values = extract_col::<Float64Type>("lon", &batch)?;
+            let lat_values = extract_col::<Float64Type>("lat", &batch);
+            let lon_values = extract_col::<Float64Type>("lon", &batch);
             assert!(lat_values
                 .iter()
                 .zip(lon_values.iter())
@@ -179,8 +170,8 @@ mod tests {
 
         let batches = df.collect().await?;
         for batch in batches {
-            let lat_values = extract_col::<Float64Type>("lat", &batch)?;
-            let lon_values = extract_col::<Float64Type>("lon", &batch)?;
+            let lat_values = extract_col::<Float64Type>("lat", &batch);
+            let lon_values = extract_col::<Float64Type>("lon", &batch);
             assert!(lat_values
                 .iter()
                 .zip(lon_values.iter())
@@ -193,8 +184,8 @@ mod tests {
 
         let batches = df.collect().await?;
         for batch in batches {
-            let lat_values = extract_col::<Float64Type>("lat", &batch)?;
-            let lon_values = extract_col::<Float64Type>("lon", &batch)?;
+            let lat_values = extract_col::<Float64Type>("lat", &batch);
+            let lon_values = extract_col::<Float64Type>("lon", &batch);
             assert!(lat_values
                 .iter()
                 .zip(lon_values.iter())
@@ -207,8 +198,8 @@ mod tests {
 
         let batches = df.collect().await?;
         for batch in batches {
-            let lat_values = extract_col::<Float64Type>("lat", &batch)?;
-            let lon_values = extract_col::<Float64Type>("lon", &batch)?;
+            let lat_values = extract_col::<Float64Type>("lat", &batch);
+            let lon_values = extract_col::<Float64Type>("lon", &batch);
             assert!(lat_values
                 .iter()
                 .zip(lon_values.iter())
@@ -221,12 +212,29 @@ mod tests {
 
         let batches = df.collect().await?;
         for batch in batches {
-            let lat_values = extract_col::<Float64Type>("lat", &batch)?;
-            let lon_values = extract_col::<Float64Type>("lon", &batch)?;
+            let lat_values = extract_col::<Float64Type>("lat", &batch);
+            let lon_values = extract_col::<Float64Type>("lon", &batch);
             assert!(lat_values
                 .iter()
                 .zip(lon_values.iter())
                 .all(|(lat, lon)| *lat > 38.21 && *lon > -109.59 && *lat + *lon > -71.09));
+        }
+
+        // check a query that doesn't include the column needed in the predicate. the first query
+        // below is used to produce the reference values, and the second one is the one we're testing
+        // for, since it has a predicate on lon, but doesn't select lon.
+        let sql = "SELECT lat, lon FROM zarr_table WHERE lon > -109.59";
+        let df = session.sql(sql).await?;
+        let lat_lon_batches = df.collect().await?;
+
+        let sql = "SELECT lat FROM zarr_table WHERE lon > -109.59";
+        let df = session.sql(sql).await?;
+        let lat_batches = df.collect().await?;
+
+        for (lat_batch, lat_lon_batch) in lat_batches.iter().zip(lat_lon_batches.iter()) {
+            let lat_values_1 = extract_col::<Float64Type>("lat", lat_batch);
+            let lat_values_2 = extract_col::<Float64Type>("lat", lat_lon_batch);
+            assert_eq!(lat_values_1, lat_values_2);
         }
 
         Ok(())

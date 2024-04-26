@@ -715,14 +715,10 @@ pub(crate) fn apply_codecs(
     data_type: &ZarrDataType,
     codecs: &Vec<ZarrCodec>,
     sharding_params: Option<ShardingOptions>,
-    final_indices: Option<&Vec<usize>>,
 ) -> ZarrResult<(ArrayRef, FieldRef)> {
     macro_rules! return_array {
         ($func_name: tt, $data_t: expr, $array_t: ty) => {
-            let mut data = $func_name(raw_data, &chunk_dims, &real_dims, &codecs, sharding_params)?;
-            if let Some(indices) = final_indices {
-                keep_indices(&mut data, &indices);
-            };
+            let data = $func_name(raw_data, &chunk_dims, &real_dims, &codecs, sharding_params)?;
             let field = Field::new(col_name, $data_t, false);
             let arr: $array_t = data.into();
             return Ok((Arc::new(arr), Arc::new(field)))
@@ -732,10 +728,7 @@ pub(crate) fn apply_codecs(
     match data_type {
         ZarrDataType::Bool => {
             let data = decode_u8_chunk(raw_data, chunk_dims, real_dims, codecs, sharding_params)?;
-            let mut data: Vec<bool> = data.iter().map(|x| *x != 0).collect();
-            if let Some(indices) = final_indices {
-                keep_indices(&mut data, indices);
-            };
+            let data: Vec<bool> = data.iter().map(|x| *x != 0).collect();
             let field = Field::new(col_name, DataType::Boolean, false);
             let arr: BooleanArray = data.into();
             Ok((Arc::new(arr), Arc::new(field)))
@@ -817,7 +810,7 @@ pub(crate) fn apply_codecs(
                 pyunicode = true;
                 str_len_adjustment = PY_UNICODE_SIZE;
             }
-            let mut data = decode_string_chunk(
+            let data = decode_string_chunk(
                 raw_data,
                 *s / str_len_adjustment,
                 chunk_dims,
@@ -826,9 +819,6 @@ pub(crate) fn apply_codecs(
                 sharding_params,
                 pyunicode,
             )?;
-            if let Some(indices) = final_indices {
-                keep_indices(&mut data, indices);
-            };
             let field = Field::new(col_name, DataType::Utf8, false);
             let arr: StringArray = data.into();
 
@@ -874,7 +864,6 @@ mod zarr_codecs_tests {
             &data_type,
             &codecs,
             sharding_params,
-            None,
         )
         .unwrap();
 
@@ -925,7 +914,6 @@ mod zarr_codecs_tests {
             &data_type,
             &codecs,
             sharding_params,
-            None,
         )
         .unwrap();
 
@@ -977,7 +965,6 @@ mod zarr_codecs_tests {
             &data_type,
             &codecs,
             sharding_params,
-            None,
         )
         .unwrap();
 

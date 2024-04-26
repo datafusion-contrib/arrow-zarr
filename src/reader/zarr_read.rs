@@ -193,14 +193,12 @@ impl ZarrProjection {
                 self.col_indices = other_proj.col_indices;
             }
             (ProjectionType::SelectByIndex, ProjectionType::SelectByIndex) => {
-                let mut indices = self
-                    .col_indices
-                    .take()
-                    .expect("ZarrProjection missing indices");
-                for i in other_proj
-                    .col_indices
-                    .expect("ZarrProjection update missing indices")
-                {
+                let mut indices = self.col_indices.take().ok_or(ZarrError::InvalidPredicate(
+                    "ZarrProjection missing indices".to_string(),
+                ))?;
+                for i in other_proj.col_indices.ok_or(ZarrError::InvalidPredicate(
+                    "ZarrProjection update missing indices".to_string(),
+                ))? {
                     if !indices.contains(&i) {
                         indices.push(i);
                     }
@@ -208,14 +206,12 @@ impl ZarrProjection {
                 self.col_indices = Some(indices);
             }
             (ProjectionType::Select, ProjectionType::Select) => {
-                let mut col_names = self
-                    .col_names
-                    .take()
-                    .expect("ZarrProjection missing col names");
-                for col in other_proj
-                    .col_names
-                    .expect("ZarrProjection update missing col names")
-                {
+                let mut col_names = self.col_names.take().ok_or(ZarrError::InvalidPredicate(
+                    "ZarrProjection missing col_names".to_string(),
+                ))?;
+                for col in other_proj.col_names.ok_or(ZarrError::InvalidPredicate(
+                    "ZarrProjection update missing col_names".to_string(),
+                ))? {
                     if !col_names.contains(&col) {
                         col_names.push(col);
                     }
@@ -224,14 +220,12 @@ impl ZarrProjection {
             }
             (ProjectionType::Skip, ProjectionType::Select)
             | (ProjectionType::Select, ProjectionType::Skip) => {
-                let mut col_names = self
-                    .col_names
-                    .take()
-                    .expect("ZarrProjection missing col names");
-                for col in other_proj
-                    .col_names
-                    .expect("ZarrProjection update missing col names")
-                {
+                let mut col_names = self.col_names.take().ok_or(ZarrError::InvalidPredicate(
+                    "ZarrProjection missing col_names".to_string(),
+                ))?;
+                for col in other_proj.col_names.ok_or(ZarrError::InvalidPredicate(
+                    "ZarrProjection update missing col_names".to_string(),
+                ))? {
                     if let Some(index) = col_names.iter().position(|value| value == &col) {
                         col_names.remove(index);
                     }

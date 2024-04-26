@@ -101,6 +101,7 @@ impl TableProvider for ZarrTableProvider {
         &self,
         filters: &[&Expr],
     ) -> datafusion::error::Result<Vec<TableProviderFilterPushDown>> {
+        // TODO handle predicates on partition columns as Exact.
         Ok(filters
             .iter()
             .map(|filter| {
@@ -113,7 +114,7 @@ impl TableProvider for ZarrTableProvider {
                         .collect::<Vec<_>>(),
                     filter,
                 ) {
-                    TableProviderFilterPushDown::Exact
+                    TableProviderFilterPushDown::Inexact
                 } else {
                     TableProviderFilterPushDown::Unsupported
                 }

@@ -158,7 +158,6 @@ pub struct ZarrRecordBatchReader<T: ZarrIterator> {
     zarr_store: Option<T>,
     filter: Option<ZarrChunkFilter>,
     predicate_projection_store: Option<T>,
-    row_mask: Option<BooleanArray>,
 }
 
 impl<T: ZarrIterator> ZarrRecordBatchReader<T> {
@@ -173,22 +172,10 @@ impl<T: ZarrIterator> ZarrRecordBatchReader<T> {
             zarr_store,
             filter,
             predicate_projection_store,
-            row_mask: None,
         }
     }
 
-    pub(crate) fn with_row_mask(self, row_mask: BooleanArray) -> Self {
-        Self {
-            row_mask: Some(row_mask),
-            ..self
-        }
-    }
-
-    pub(crate) fn unpack_chunk(
-        &self,
-        mut chunk: ZarrInMemoryChunk,
-        final_indices: Option<&Vec<usize>>,
-    ) -> ZarrResult<RecordBatch> {
+    pub(crate) fn unpack_chunk(&self, mut chunk: ZarrInMemoryChunk) -> ZarrResult<RecordBatch> {
         let mut arrs: Vec<ArrayRef> = Vec::with_capacity(self.meta.get_num_columns());
         let mut fields: Vec<FieldRef> = Vec::with_capacity(self.meta.get_num_columns());
 
@@ -200,7 +187,6 @@ impl<T: ZarrIterator> ZarrRecordBatchReader<T> {
                 data,
                 chunk.get_real_dims(),
                 self.meta.get_chunk_dims(),
-                final_indices,
             )?;
             arrs.push(arr);
             fields.push(field);
@@ -215,7 +201,6 @@ impl<T: ZarrIterator> ZarrRecordBatchReader<T> {
         arr_chnk: ZarrInMemoryArray,
         real_dims: &Vec<usize>,
         chunk_dims: &Vec<usize>,
-        final_indices: Option<&Vec<usize>>,
     ) -> ZarrResult<(ArrayRef, FieldRef)> {
         // get the metadata for the array
         let meta = self.meta.get_array_meta(&col_name)?;
@@ -232,7 +217,6 @@ impl<T: ZarrIterator> ZarrRecordBatchReader<T> {
             meta.get_type(),
             meta.get_codecs(),
             meta.get_sharding_params(),
-            final_indices,
         )?;
 
         Ok((arr, field))
@@ -246,7 +230,6 @@ impl<T: ZarrIterator> Iterator for ZarrRecordBatchReader<T> {
 
     fn next(&mut self) -> Option<Self::Item> {
         // handle filters first.
-        let mut bool_arr: Option<BooleanArray> = self.row_mask.clone();
         if let Some(store) = self.predicate_projection_store.as_mut() {
             let predicate_proj_chunk = store.next_chunk();
 
@@ -254,9 +237,10 @@ impl<T: ZarrIterator> Iterator for ZarrRecordBatchReader<T> {
 
             let predicate_proj_chunk = unwrap_or_return!(predicate_proj_chunk.unwrap());
 
-            let predicate_rec = self.unpack_chunk(predicate_proj_chunk, None);
+            let predicate_rec = self.unpack_chunk(predicate_proj_chunk);
             let predicate_rec = unwrap_or_return!(predicate_rec);
 
+            let mut bool_arr: Option<BooleanArray> = None;
             if let Some(filter) = self.filter.as_mut() {
                 for predicate in filter.predicates.iter_mut() {
                     let mask = predicate.evaluate(&predicate_rec);
@@ -316,24 +300,9 @@ impl<T: ZarrIterator> Iterator for ZarrRecordBatchReader<T> {
         // main logic for the chunk
         let next_batch = self.zarr_store.as_mut().unwrap().next_chunk();
         next_batch.as_ref()?;
-
         let next_batch = unwrap_or_return!(next_batch.unwrap());
-        let mut final_indices: Option<Vec<usize>> = None;
 
-        // if we have a bool array to mask some values, we get the indices (the rows)
-        // that we need to keep. those are then applied across all zarr array un the chunk.
-        if let Some(mask) = bool_arr {
-            let mask = mask.values();
-            final_indices = Some(
-                mask.iter()
-                    .enumerate()
-                    .filter(|x| x.1)
-                    .map(|x| x.0)
-                    .collect(),
-            );
-        }
-
-        return Some(self.unpack_chunk(next_batch, final_indices.as_ref()));
+        Some(self.unpack_chunk(next_batch))
     }
 }
 
@@ -928,71 +897,41 @@ mod zarr_reader_tests {
         let reader = builder.build().unwrap();
         let records: Vec<RecordBatch> = reader.map(|x| x.unwrap()).collect();
 
-        // check the 4 chunks that have some in the specified lat/lon range
-        // center chunk
         let target_types = HashMap::from([
             ("lat".to_string(), DataType::Float64),
             ("lon".to_string(), DataType::Float64),
             ("float_data".to_string(), DataType::Float64),
         ]);
 
+        // check the values in a chunk. the predicate pushdown only takes care of
+        // skipping whole chunks, so there is no guarantee that the values in the
+        // record batch fully satisfy the predicate, here we are only checking that
+        // the first chunk that was read is the first one with some values that
+        // satisfy the predicate.
         let rec = &records[0];
         validate_names_and_types(&target_types, rec);
-        validate_primitive_column::<Float64Type, f64>("lat", rec, &[38.6, 38.7]);
-        validate_primitive_column::<Float64Type, f64>("lon", rec, &[-109.7, -109.7]);
-        validate_primitive_column::<Float64Type, f64>("float_data", rec, &[1040.0, 1041.0]);
-
-        let rec = &records[1];
-        validate_names_and_types(&target_types, rec);
-        validate_primitive_column::<Float64Type, f64>("lat", rec, &[38.8, 38.9, 39.0]);
-        validate_primitive_column::<Float64Type, f64>("lon", rec, &[-109.7, -109.7, -109.7]);
-        validate_primitive_column::<Float64Type, f64>("float_data", rec, &[1042.0, 1043.0, 1044.0]);
-
-        let rec = &records[2];
-        validate_names_and_types(&target_types, rec);
-        validate_primitive_column::<Float64Type, f64>(
-            "lat",
-            rec,
-            &[38.6, 38.7, 38.6, 38.7, 38.6, 38.7, 38.6, 38.7],
-        );
-        validate_primitive_column::<Float64Type, f64>(
-            "lon",
-            rec,
-            &[
-                -109.6, -109.6, -109.5, -109.5, -109.4, -109.4, -109.3, -109.3,
-            ],
-        );
-        validate_primitive_column::<Float64Type, f64>(
-            "float_data",
-            rec,
-            &[
-                1051.0, 1052.0, 1062.0, 1063.0, 1073.0, 1074.0, 1084.0, 1085.0,
-            ],
-        );
-
-        let rec = &records[3];
-        validate_names_and_types(&target_types, rec);
         validate_primitive_column::<Float64Type, f64>(
             "lat",
             rec,
             &[
-                38.8, 38.9, 39.0, 38.8, 38.9, 39.0, 38.8, 38.9, 39.0, 38.8, 38.9, 39.0,
+                38.4, 38.5, 38.6, 38.7, 38.4, 38.5, 38.6, 38.7, 38.4, 38.5, 38.6, 38.7, 38.4, 38.5,
+                38.6, 38.7,
             ],
         );
         validate_primitive_column::<Float64Type, f64>(
             "lon",
             rec,
             &[
-                -109.6, -109.6, -109.6, -109.5, -109.5, -109.5, -109.4, -109.4, -109.4, -109.3,
-                -109.3, -109.3,
+                -110.0, -110.0, -110.0, -110.0, -109.9, -109.9, -109.9, -109.9, -109.8, -109.8,
+                -109.8, -109.8, -109.7, -109.7, -109.7, -109.7,
             ],
         );
         validate_primitive_column::<Float64Type, f64>(
             "float_data",
             rec,
             &[
-                1053.0, 1054.0, 1055.0, 1064.0, 1065.0, 1066.0, 1075.0, 1076.0, 1077.0, 1086.0,
-                1087.0, 1088.0,
+                1005.0, 1006.0, 1007.0, 1008.0, 1016.0, 1017.0, 1018.0, 1019.0, 1027.0, 1028.0,
+                1029.0, 1030.0, 1038.0, 1039.0, 1040.0, 1041.0,
             ],
         );
     }
