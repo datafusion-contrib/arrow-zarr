@@ -20,6 +20,7 @@ use arrow_schema::ArrowError;
 use dyn_clone::{clone_trait_object, DynClone};
 
 use crate::reader::ZarrProjection;
+use crate::reader::ZarrResult;
 
 /// A predicate operating on [`RecordBatch`]. Here we have the [`DynClone`] trait
 /// bound because when dealing with the async zarr reader, it's useful to be able
@@ -100,13 +101,13 @@ impl ZarrChunkFilter {
     }
 
     /// Get the combined projections for all the predicates in the filter.
-    pub fn get_all_projections(&self) -> ZarrProjection {
+    pub fn get_all_projections(&self) -> ZarrResult<ZarrProjection> {
         let mut proj = ZarrProjection::all();
         for pred in self.predicates.iter() {
-            proj.update(pred.projection().clone());
+            proj.update(pred.projection().clone())?;
         }
 
-        proj
+        Ok(proj)
     }
 }
 

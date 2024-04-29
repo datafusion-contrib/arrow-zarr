@@ -238,7 +238,6 @@ pub struct ZarrRecordBatchStream<T: ZarrStream> {
     meta: ZarrStoreMetadata,
     filter: Option<ZarrChunkFilter>,
     state: ZarrStreamState<T>,
-    mask: Option<BooleanArray>,
 
     // an option so that we can "take" the wrapper and bundle it
     // in a future when polling the stream.
@@ -266,7 +265,6 @@ impl<T: ZarrStream> ZarrRecordBatchStream<T> {
             predicate_store_wrapper,
             store_wrapper: Some(ZarrStoreWrapper::new(zarr_store)),
             state: ZarrStreamState::Init,
-            mask: None,
         }
     }
 }
@@ -355,7 +353,6 @@ where
                             .skip_next_chunk();
                         self.state = ZarrStreamState::Init;
                     } else {
-                        self.mask = Some(mask);
                         let wrapper = self.store_wrapper.take().expect(LOST_STORE_ERR);
                         let fut = wrapper.get_next().boxed();
                         self.state = ZarrStreamState::Reading(fut);
@@ -373,16 +370,13 @@ where
 
                         let chunk = chunk?;
                         let container = ZarrInMemoryChunkContainer::new(chunk);
-                        let mut zarr_reader = ZarrRecordBatchReader::new(
+                        let zarr_reader = ZarrRecordBatchReader::new(
                             self.meta.clone(),
                             Some(container),
                             None,
                             None,
                         );
 
-                        if self.mask.is_some() {
-                            zarr_reader = zarr_reader.with_row_mask(self.mask.take().unwrap());
-                        }
                         self.state = ZarrStreamState::Decoding(zarr_reader);
                     } else {
                         // if store returns none, it's the end and it's time to return
@@ -469,7 +463,7 @@ impl<T: for<'a> ZarrReadAsync<'a> + Clone + Unpin + Send + 'static>
 
         let mut predicate_stream: Option<ZarrStoreAsync<T>> = None;
         if let Some(filter) = &self.filter {
-            let predicate_proj = filter.get_all_projections();
+            let predicate_proj = filter.get_all_projections()?;
             predicate_stream = Some(
                 ZarrStoreAsync::new(
                     self.zarr_reader_async.clone(),
@@ -840,11 +834,37 @@ mod zarr_async_reader_tests {
             ("float_data".to_string(), DataType::Float64),
         ]);
 
-        let rec = &records[1];
+        // check the values in a chunk. the predicate pushdown only takes care of
+        // skipping whole chunks, so there is no guarantee that the values in the
+        // record batch fully satisfy the predicate, here we are only checking that
+        // the first chunk that was read is the first one with some values that
+        // satisfy the predicate.
+        let rec = &records[0];
         validate_names_and_types(&target_types, rec);
-        validate_primitive_column::<Float64Type, f64>("lat", rec, &[38.8, 38.9, 39.0]);
-        validate_primitive_column::<Float64Type, f64>("lon", rec, &[-109.7, -109.7, -109.7]);
-        validate_primitive_column::<Float64Type, f64>("float_data", rec, &[1042.0, 1043.0, 1044.0]);
+        validate_primitive_column::<Float64Type, f64>(
+            "lat",
+            rec,
+            &[
+                38.4, 38.5, 38.6, 38.7, 38.4, 38.5, 38.6, 38.7, 38.4, 38.5, 38.6, 38.7, 38.4, 38.5,
+                38.6, 38.7,
+            ],
+        );
+        validate_primitive_column::<Float64Type, f64>(
+            "lon",
+            rec,
+            &[
+                -110.0, -110.0, -110.0, -110.0, -109.9, -109.9, -109.9, -109.9, -109.8, -109.8,
+                -109.8, -109.8, -109.7, -109.7, -109.7, -109.7,
+            ],
+        );
+        validate_primitive_column::<Float64Type, f64>(
+            "float_data",
+            rec,
+            &[
+                1005.0, 1006.0, 1007.0, 1008.0, 1016.0, 1017.0, 1018.0, 1019.0, 1027.0, 1028.0,
+                1029.0, 1030.0, 1038.0, 1039.0, 1040.0, 1041.0,
+            ],
+        );
     }
 
     #[tokio::test]

@@ -17,6 +17,7 @@
 
 pub mod config;
 pub mod file_opener;
+mod helpers;
 pub mod scanner;
 pub mod table_factory;
 pub mod table_provider;

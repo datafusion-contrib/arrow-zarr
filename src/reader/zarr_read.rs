@@ -16,7 +16,7 @@
 // under the License.
 
 use itertools::Itertools;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs::{read, read_to_string};
 use std::path::PathBuf;
 
@@ -82,7 +82,7 @@ impl ZarrInMemoryChunk {
     }
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Debug)]
 pub(crate) enum ProjectionType {
     Select,
     SelectByIndex,
@@ -92,7 +92,7 @@ pub(crate) enum ProjectionType {
 
 /// A structure to handle skipping or selecting specific columns (zarr arrays) from
 /// a zarr store.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ZarrProjection {
     projection_type: ProjectionType,
     col_names: Option<Vec<String>>,
@@ -184,30 +184,61 @@ impl ZarrProjection {
         }
     }
 
-    pub(crate) fn update(&mut self, other_proj: ZarrProjection) {
-        if other_proj.projection_type == ProjectionType::Null {
-            return;
-        }
-
-        if self.projection_type == ProjectionType::Null {
-            self.projection_type = other_proj.projection_type;
-            self.col_names = other_proj.col_names;
-            return;
-        }
-
-        let col_names = self.col_names.as_mut().unwrap();
-        if other_proj.projection_type == self.projection_type {
-            let mut s: HashSet<String> = HashSet::from_iter(col_names.clone());
-            let other_cols = other_proj.col_names.unwrap();
-            s.extend::<HashSet<String>>(HashSet::from_iter(other_cols));
-            self.col_names = Some(s.into_iter().collect_vec());
-        } else {
-            for col in other_proj.col_names.as_ref().unwrap() {
-                if let Some(index) = col_names.iter().position(|value| value == col) {
-                    col_names.remove(index);
+    pub(crate) fn update(&mut self, other_proj: ZarrProjection) -> ZarrResult<()> {
+        match (&self.projection_type, &other_proj.projection_type) {
+            (_, ProjectionType::Null) => (),
+            (ProjectionType::Null, _) => {
+                self.projection_type = other_proj.projection_type;
+                self.col_names = other_proj.col_names;
+                self.col_indices = other_proj.col_indices;
+            }
+            (ProjectionType::SelectByIndex, ProjectionType::SelectByIndex) => {
+                let mut indices = self.col_indices.take().ok_or(ZarrError::InvalidPredicate(
+                    "ZarrProjection missing indices".to_string(),
+                ))?;
+                for i in other_proj.col_indices.ok_or(ZarrError::InvalidPredicate(
+                    "ZarrProjection update missing indices".to_string(),
+                ))? {
+                    if !indices.contains(&i) {
+                        indices.push(i);
+                    }
+                }
+                self.col_indices = Some(indices);
+            }
+            (ProjectionType::Select, ProjectionType::Select) => {
+                let mut col_names = self.col_names.take().ok_or(ZarrError::InvalidPredicate(
+                    "ZarrProjection missing col_names".to_string(),
+                ))?;
+                for col in other_proj.col_names.ok_or(ZarrError::InvalidPredicate(
+                    "ZarrProjection update missing col_names".to_string(),
+                ))? {
+                    if !col_names.contains(&col) {
+                        col_names.push(col);
+                    }
+                }
+                self.col_names = Some(col_names);
+            }
+            (ProjectionType::Skip, ProjectionType::Select)
+            | (ProjectionType::Select, ProjectionType::Skip) => {
+                let mut col_names = self.col_names.take().ok_or(ZarrError::InvalidPredicate(
+                    "ZarrProjection missing col_names".to_string(),
+                ))?;
+                for col in other_proj.col_names.ok_or(ZarrError::InvalidPredicate(
+                    "ZarrProjection update missing col_names".to_string(),
+                ))? {
+                    if let Some(index) = col_names.iter().position(|value| value == &col) {
+                        col_names.remove(index);
+                    }
                 }
             }
-        }
+            _ => {
+                return Err(ZarrError::InvalidPredicate(
+                    "Invalid ZarrProjection update".to_string(),
+                ))
+            }
+        };
+
+        Ok(())
     }
 }
 

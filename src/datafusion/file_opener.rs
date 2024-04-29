@@ -17,22 +17,26 @@
 
 use arrow_schema::ArrowError;
 use datafusion::{datasource::physical_plan::FileOpener, error::DataFusionError};
+use datafusion_physical_expr::PhysicalExpr;
 use futures::{StreamExt, TryStreamExt};
+use std::sync::Arc;
 
 use crate::{
-    async_reader::{ZarrPath, ZarrRecordBatchStreamBuilder},
+    async_reader::{ZarrPath, ZarrReadAsync, ZarrRecordBatchStreamBuilder},
     reader::ZarrProjection,
 };
 
 use super::config::ZarrConfig;
+use super::helpers::build_row_filter;
 
 pub struct ZarrFileOpener {
     config: ZarrConfig,
+    filters: Option<Arc<dyn PhysicalExpr>>,
 }
 
 impl ZarrFileOpener {
-    pub fn new(config: ZarrConfig) -> Self {
-        Self { config }
+    pub fn new(config: ZarrConfig, filters: Option<Arc<dyn PhysicalExpr>>) -> Self {
+        Self { config, filters }
     }
 }
 
@@ -43,15 +47,27 @@ impl FileOpener for ZarrFileOpener {
     ) -> datafusion::error::Result<datafusion::datasource::physical_plan::FileOpenFuture> {
         let config = self.config.clone();
 
+        let filters_to_pushdown = self.filters.clone();
         Ok(Box::pin(async move {
             let zarr_path = ZarrPath::new(config.object_store, file_meta.object_meta.location);
-
             let rng = file_meta.range.map(|r| (r.start as usize, r.end as usize));
-
             let projection = ZarrProjection::from(config.projection.as_ref());
 
-            let batch_reader = ZarrRecordBatchStreamBuilder::new(zarr_path)
-                .with_projection(projection)
+            let mut batch_reader_builder =
+                ZarrRecordBatchStreamBuilder::new(zarr_path.clone()).with_projection(projection);
+            if let Some(filters) = filters_to_pushdown {
+                let schema = zarr_path
+                    .get_zarr_metadata()
+                    .await
+                    .map_err(|e| DataFusionError::External(Box::new(e)))?
+                    .arrow_schema()
+                    .map_err(|e| DataFusionError::External(Box::new(e)))?;
+                let filters = build_row_filter(&filters, &schema)?;
+                if let Some(filters) = filters {
+                    batch_reader_builder = batch_reader_builder.with_filter(filters);
+                }
+            }
+            let batch_reader = batch_reader_builder
                 .build_partial_reader(rng)
                 .await
                 .map_err(|e| DataFusionError::External(Box::new(e)))?;
@@ -81,7 +97,7 @@ mod tests {
         let test_data = get_test_v2_data_path("lat_lon_example.zarr".to_string());
 
         let config = ZarrConfig::new(Arc::new(local_fs));
-        let opener = ZarrFileOpener::new(config);
+        let opener = ZarrFileOpener::new(config, None);
 
         let file_meta = FileMeta {
             object_meta: ObjectMeta {
