@@ -257,12 +257,16 @@ fn extract_u64_from_json(map: &Value, key: &str, err_str: &str) -> ZarrResult<u6
     Ok(res)
 }
 
-fn extract_usize_array_from_json(map: &Value, key: &str, err_str: &str) -> ZarrResult<Vec<usize>> {
+fn extract_usize_array_from_json(map: &Value, key: &str) -> ZarrResult<Vec<usize>> {
     let arr: Vec<usize> = map
         .get(key)
-        .ok_or(ZarrError::InvalidMetadata(err_str.to_string()))?
+        .ok_or(ZarrError::InvalidMetadata(
+            "could not find key in metadata".to_string(),
+        ))?
         .as_array()
-        .ok_or(ZarrError::InvalidMetadata(err_str.to_string()))?
+        .ok_or(ZarrError::InvalidMetadata(
+            "could not extract array from metadata".to_string(),
+        ))?
         .iter()
         .map(|v| v.as_u64().unwrap() as usize)
         .collect();
@@ -272,18 +276,25 @@ fn extract_usize_array_from_json(map: &Value, key: &str, err_str: &str) -> ZarrR
 fn extract_arr_and_check(
     map: &Value,
     key: &str,
-    err_str: &str,
     curr: &Option<Vec<usize>>,
 ) -> ZarrResult<Vec<usize>> {
-    let arr = extract_usize_array_from_json(map, key, err_str)?;
+    let arr = extract_usize_array_from_json(map, key)?;
 
     if let Some(curr) = curr {
         if curr != &arr {
-            return Err(ZarrError::InvalidMetadata(err_str.to_string()));
+            return Err(ZarrError::InvalidMetadata(
+                format!(
+                    "inconsistent {} in metadata, got {:?} but have {:?}",
+                    key, arr, curr
+                )
+                .to_string(),
+            ));
         }
     }
     if arr.len() > 3 {
-        return Err(ZarrError::InvalidMetadata(err_str.to_string()));
+        return Err(ZarrError::InvalidMetadata(
+            "too many dimensions in metadata array".to_string(),
+        ));
     }
 
     Ok(arr)
@@ -326,14 +337,14 @@ impl ZarrStoreMetadata {
     fn add_column_v2(&mut self, col_name: String, meta_map: Value) -> ZarrResult<()> {
         // parse chunks
         let error_string = "error parsing metadata chunks";
-        let chunks = extract_arr_and_check(&meta_map, "chunks", error_string, &self.chunks)?;
+        let chunks = extract_arr_and_check(&meta_map, "chunks", &self.chunks)?;
         if self.chunks.is_none() {
             self.chunks = Some(chunks.clone());
         }
 
         // parse shape
         let error_string = "error parsing metadata shape";
-        let shape = extract_arr_and_check(&meta_map, "shape", error_string, &self.shape)?;
+        let shape = extract_arr_and_check(&meta_map, "shape", &self.shape)?;
 
         if chunks.len() != shape.len() {
             return Err(ZarrError::InvalidMetadata(
@@ -462,7 +473,7 @@ fn extract_codec(config: &Value, last_type: &CodecType) -> ZarrResult<ZarrCodec>
             Ok((CodecType::BytesToBytes, ZarrCodec::Gzip(l)))
         }
         "transpose" => {
-            let o = extract_usize_array_from_json(config, "order", error_string)?;
+            let o = extract_usize_array_from_json(config, "order")?;
             Ok((CodecType::ArrayToArray, ZarrCodec::Transpose(o)))
         }
         _ => Err(ZarrError::InvalidMetadata(error_string.to_string())),
@@ -488,7 +499,7 @@ fn extract_sharding_options(
     pos: usize,
 ) -> ZarrResult<ShardingOptions> {
     let error_string = "error parsing sharding params from metadata";
-    let chunk_shape = extract_usize_array_from_json(config, "chunk_shape", error_string)?;
+    let chunk_shape = extract_usize_array_from_json(config, "chunk_shape")?;
 
     for (outer_n, inner_n) in outer_chunk_shape.iter().zip(chunk_shape.iter()) {
         if outer_n % inner_n != 0 {
@@ -566,14 +577,12 @@ impl ZarrStoreMetadata {
         }
 
         // parse shape
-        let error_string = "error parsing metadata shape";
-        let shape = extract_arr_and_check(&meta_map, "shape", error_string, &self.shape)?;
+        let shape = extract_arr_and_check(&meta_map, "shape", &self.shape)?;
         if self.shape.is_none() {
             self.shape = Some(shape.clone());
         }
 
         // parse chunks
-        let error_string = "error parsing metadata chunks";
         let chunk_grid = meta_map
             .get("chunk_grid")
             .ok_or(ZarrError::InvalidMetadata(
@@ -585,7 +594,7 @@ impl ZarrStoreMetadata {
                 "only regular chunks are supported".to_string(),
             ));
         }
-        let chunks = extract_arr_and_check(config, "chunk_shape", error_string, &self.chunks)?;
+        let chunks = extract_arr_and_check(config, "chunk_shape", &self.chunks)?;
         if self.chunks.is_none() {
             self.chunks = Some(chunks.clone());
         }
