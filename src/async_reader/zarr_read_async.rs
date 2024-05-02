@@ -17,8 +17,9 @@
 
 use async_trait::async_trait;
 use futures_util::{pin_mut, StreamExt};
-use object_store::{path::Path, ObjectStore};
+use object_store::{path::Path, GetResultPayload, ObjectStore};
 use std::collections::HashMap;
+use std::fs::{read, read_to_string};
 use std::sync::Arc;
 
 use crate::reader::metadata::ChunkSeparator;
@@ -72,9 +73,14 @@ impl<'a> ZarrReadAsync<'a> for ZarrPath {
                 if s == ".zarray" || s == "zarr.json" {
                     if let Some(mut dir_name) = p.prefix_match(&self.location) {
                         let array_name = dir_name.next().unwrap().as_ref().to_string();
-                        let meta_bytes = self.store.get(&p).await?.bytes().await?;
-                        let meta_str = std::str::from_utf8(&meta_bytes)?;
-                        meta.add_column(array_name, meta_str)?;
+                        let get_res = self.store.get(&p).await?;
+                        let meta_str = match get_res.payload {
+                            GetResultPayload::File(_, p) => read_to_string(p)?,
+                            GetResultPayload::Stream(_) => {
+                                std::str::from_utf8(&get_res.bytes().await?)?.to_string()
+                            }
+                        };
+                        meta.add_column(array_name, &meta_str)?;
                     }
                 }
             }
@@ -114,8 +120,12 @@ impl<'a> ZarrReadAsync<'a> for ZarrPath {
                     partial_path
                 }
             };
-            let data = self.store.get(&p).await?.bytes().await?;
-            chunk.add_array(var.to_string(), data.to_vec());
+            let get_res = self.store.get(&p).await?;
+            let data = match get_res.payload {
+                GetResultPayload::File(_, p) => read(p)?,
+                GetResultPayload::Stream(_) => get_res.bytes().await?.to_vec(),
+            };
+            chunk.add_array(var.to_string(), data);
         }
 
         Ok(chunk)
