@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use std::fs::{read, read_to_string};
 use std::sync::Arc;
 
-use crate::reader::metadata::ChunkSeparator;
+use crate::reader::metadata::{ChunkPattern, ChunkSeparator};
 use crate::reader::{ZarrError, ZarrResult};
 use crate::reader::{ZarrInMemoryChunk, ZarrStoreMetadata};
 
@@ -40,7 +40,7 @@ pub trait ZarrReadAsync<'a> {
         position: &'a [usize],
         cols: &'a [String],
         real_dims: Vec<usize>,
-        separators: HashMap<String, ChunkSeparator>,
+        patterns: HashMap<String, ChunkPattern>,
     ) -> ZarrResult<ZarrInMemoryChunk>;
 }
 
@@ -99,26 +99,49 @@ impl<'a> ZarrReadAsync<'a> for ZarrPath {
         position: &'a [usize],
         cols: &'a [String],
         real_dims: Vec<usize>,
-        separators: HashMap<String, ChunkSeparator>,
+        patterns: HashMap<String, ChunkPattern>,
     ) -> ZarrResult<ZarrInMemoryChunk> {
         let mut chunk = ZarrInMemoryChunk::new(real_dims);
         for var in cols {
             let s: Vec<String> = position.iter().map(|i| i.to_string()).collect();
-            let separator = separators
+            let pattern = patterns
                 .get(var.as_str())
                 .ok_or(ZarrError::InvalidMetadata(
                     "Could not find separator for column".to_string(),
                 ))?;
 
-            let p = match separator {
-                ChunkSeparator::Period => self.location.child(var.to_string()).child(s.join(".")),
-                ChunkSeparator::Slash => {
-                    let mut partial_path = self.location.child(var.to_string()).child("c");
-                    for idx in s {
-                        partial_path = partial_path.child(idx);
+            let p = match pattern {
+                ChunkPattern {
+                    separator: sep,
+                    c_prefix: false,
+                } => match sep {
+                    ChunkSeparator::Period => {
+                        self.location.child(var.to_string()).child(s.join("."))
                     }
-                    partial_path
-                }
+                    ChunkSeparator::Slash => {
+                        let mut path = self.location.child(var.to_string());
+                        for idx in s {
+                            path = path.child(idx);
+                        }
+                        path
+                    }
+                },
+                ChunkPattern {
+                    separator: sep,
+                    c_prefix: true,
+                } => match sep {
+                    ChunkSeparator::Period => self
+                        .location
+                        .child(var.to_string())
+                        .child("c.".to_string() + &s.join(".")),
+                    ChunkSeparator::Slash => {
+                        let mut path = self.location.child(var.to_string()).child("c");
+                        for idx in s {
+                            path = path.child(idx);
+                        }
+                        path
+                    }
+                },
             };
             let get_res = self.store.get(&p).await?;
             let data = match get_res.payload {
@@ -165,7 +188,10 @@ mod zarr_read_async_tests {
             &ZarrArrayMetadata::new(
                 2,
                 ZarrDataType::UInt(1),
-                ChunkSeparator::Period,
+                ChunkPattern {
+                    separator: ChunkSeparator::Period,
+                    c_prefix: false
+                },
                 None,
                 vec![ZarrCodec::Bytes(Endianness::Little)],
             )
@@ -175,7 +201,10 @@ mod zarr_read_async_tests {
             &ZarrArrayMetadata::new(
                 2,
                 ZarrDataType::Float(8),
-                ChunkSeparator::Period,
+                ChunkPattern {
+                    separator: ChunkSeparator::Period,
+                    c_prefix: false
+                },
                 None,
                 vec![ZarrCodec::Bytes(Endianness::Little)],
             )
@@ -197,7 +226,7 @@ mod zarr_read_async_tests {
                 &pos,
                 meta.get_columns(),
                 meta.get_real_dims(&pos),
-                meta.get_separators(),
+                meta.get_chunk_patterns(),
             )
             .await
             .unwrap();
@@ -214,7 +243,12 @@ mod zarr_read_async_tests {
         let col_proj = ZarrProjection::skip(vec!["float_data".to_string()]);
         let cols = col_proj.apply_selection(meta.get_columns()).unwrap();
         let chunk = store
-            .get_zarr_chunk(&pos, &cols, meta.get_real_dims(&pos), meta.get_separators())
+            .get_zarr_chunk(
+                &pos,
+                &cols,
+                meta.get_real_dims(&pos),
+                meta.get_chunk_patterns(),
+            )
             .await
             .unwrap();
         assert_eq!(
@@ -226,7 +260,12 @@ mod zarr_read_async_tests {
         let col_proj = ZarrProjection::keep(vec!["float_data".to_string()]);
         let cols = col_proj.apply_selection(meta.get_columns()).unwrap();
         let chunk = store
-            .get_zarr_chunk(&pos, &cols, meta.get_real_dims(&pos), meta.get_separators())
+            .get_zarr_chunk(
+                &pos,
+                &cols,
+                meta.get_real_dims(&pos),
+                meta.get_chunk_patterns(),
+            )
             .await
             .unwrap();
         assert_eq!(

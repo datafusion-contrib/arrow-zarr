@@ -160,7 +160,7 @@ where
                 pos,
                 &cols,
                 self.meta.get_real_dims(pos),
-                self.meta.get_separators(),
+                self.meta.get_chunk_patterns(),
             )
             .await;
 
