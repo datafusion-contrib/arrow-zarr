@@ -120,6 +120,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_zarr() -> Result<(), Box<dyn std::error::Error>> {
+        let mut state = SessionState::new_with_config_rt(
+            SessionConfig::default(),
+            Arc::new(RuntimeEnv::default()),
+        );
+
+        state
+            .table_factories_mut()
+            .insert("ZARR".into(), Arc::new(super::ZarrListingTableFactory {}));
+
+        let test_data = "data.zarr";
+
+        let sql = format!(
+            "CREATE EXTERNAL TABLE zarr_table STORED AS ZARR LOCATION '{}'",
+            test_data,
+        );
+
+        let session = SessionContext::new_with_state(state);
+        session.sql(&sql).await?;
+
+        let sql = "SELECT * FROM zarr_table LIMIT 10";
+        let df = session.sql(sql).await?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_predicates() -> Result<(), Box<dyn std::error::Error>> {
         let mut state = SessionState::new_with_config_rt(
             SessionConfig::default(),
