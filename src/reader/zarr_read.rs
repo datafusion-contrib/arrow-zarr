@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use std::fs::{read, read_to_string};
 use std::path::PathBuf;
 
-use crate::reader::metadata::ChunkSeparator;
+use crate::reader::metadata::{ChunkPattern, ChunkSeparator};
 use crate::reader::ZarrStoreMetadata;
 use crate::reader::{ZarrError, ZarrResult};
 
@@ -254,7 +254,7 @@ pub trait ZarrRead {
         position: &[usize],
         cols: &[String],
         real_dims: Vec<usize>,
-        separators: HashMap<String, ChunkSeparator>,
+        patterns: HashMap<String, ChunkPattern>,
     ) -> ZarrResult<ZarrInMemoryChunk>;
 }
 
@@ -302,20 +302,32 @@ impl ZarrRead for PathBuf {
         position: &[usize],
         cols: &[String],
         real_dims: Vec<usize>,
-        separators: HashMap<String, ChunkSeparator>,
+        patterns: HashMap<String, ChunkPattern>,
     ) -> ZarrResult<ZarrInMemoryChunk> {
         let mut chunk = ZarrInMemoryChunk::new(real_dims);
         for var in cols {
             let s: Vec<String> = position.iter().map(|i| i.to_string()).collect();
-            let separator = separators
+            let pattern = patterns
                 .get(var.as_str())
                 .ok_or(ZarrError::InvalidMetadata(
                     "Could not find separator for column".to_string(),
                 ))?;
 
-            let chunk_file = match separator {
-                ChunkSeparator::Period => s.join("."),
-                ChunkSeparator::Slash => "c/".to_string() + &s.join("/"),
+            let chunk_file = match pattern {
+                ChunkPattern {
+                    separator: sep,
+                    c_prefix: false,
+                } => match sep {
+                    ChunkSeparator::Period => s.join("."),
+                    ChunkSeparator::Slash => s.join("/"),
+                },
+                ChunkPattern {
+                    separator: sep,
+                    c_prefix: true,
+                } => match sep {
+                    ChunkSeparator::Period => "c.".to_string() + &s.join("."),
+                    ChunkSeparator::Slash => "c/".to_string() + &s.join("/"),
+                },
             };
 
             let path = self.join(var).join(chunk_file);
@@ -358,7 +370,10 @@ mod zarr_read_tests {
             &ZarrArrayMetadata::new(
                 2,
                 ZarrDataType::UInt(1),
-                ChunkSeparator::Period,
+                ChunkPattern {
+                    separator: ChunkSeparator::Period,
+                    c_prefix: false
+                },
                 None,
                 vec![ZarrCodec::Bytes(Endianness::Little)],
             )
@@ -368,7 +383,10 @@ mod zarr_read_tests {
             &ZarrArrayMetadata::new(
                 2,
                 ZarrDataType::Float(8),
-                ChunkSeparator::Period,
+                ChunkPattern {
+                    separator: ChunkSeparator::Period,
+                    c_prefix: false
+                },
                 None,
                 vec![ZarrCodec::Bytes(Endianness::Little)],
             )
@@ -389,7 +407,7 @@ mod zarr_read_tests {
                 &pos,
                 meta.get_columns(),
                 meta.get_real_dims(&pos),
-                meta.get_separators(),
+                meta.get_chunk_patterns(),
             )
             .unwrap();
         assert_eq!(
@@ -405,7 +423,12 @@ mod zarr_read_tests {
         let col_proj = ZarrProjection::skip(vec!["float_data".to_string()]);
         let cols = col_proj.apply_selection(meta.get_columns()).unwrap();
         let chunk = p
-            .get_zarr_chunk(&pos, &cols, meta.get_real_dims(&pos), meta.get_separators())
+            .get_zarr_chunk(
+                &pos,
+                &cols,
+                meta.get_real_dims(&pos),
+                meta.get_chunk_patterns(),
+            )
             .unwrap();
         assert_eq!(
             chunk.data.keys().collect::<Vec<&String>>(),
@@ -416,7 +439,12 @@ mod zarr_read_tests {
         let col_proj = ZarrProjection::keep(vec!["float_data".to_string()]);
         let cols = col_proj.apply_selection(meta.get_columns()).unwrap();
         let chunk = p
-            .get_zarr_chunk(&pos, &cols, meta.get_real_dims(&pos), meta.get_separators())
+            .get_zarr_chunk(
+                &pos,
+                &cols,
+                meta.get_real_dims(&pos),
+                meta.get_chunk_patterns(),
+            )
             .unwrap();
         assert_eq!(
             chunk.data.keys().collect::<Vec<&String>>(),

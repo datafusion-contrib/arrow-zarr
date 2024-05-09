@@ -146,13 +146,20 @@ impl FromStr for ChunkSeparator {
     }
 }
 
+// Struct for the chunk file pattern
+#[derive(Debug, PartialEq, Clone)]
+pub struct ChunkPattern {
+    pub(crate) separator: ChunkSeparator,
+    pub(crate) c_prefix: bool,
+}
+
 /// The metadata for a single zarr array, which holds various parameters
 /// for the data stored in the array.
 #[derive(Debug, PartialEq, Clone)]
 pub struct ZarrArrayMetadata {
     zarr_format: u8,
     data_type: ZarrDataType,
-    chunk_separator: ChunkSeparator,
+    chunk_pattern: ChunkPattern,
     sharding_options: Option<ShardingOptions>,
     codecs: Vec<ZarrCodec>,
 }
@@ -165,14 +172,14 @@ impl ZarrArrayMetadata {
     pub(crate) fn new(
         zarr_format: u8,
         data_type: ZarrDataType,
-        chunk_separator: ChunkSeparator,
+        chunk_pattern: ChunkPattern,
         sharding_options: Option<ShardingOptions>,
         codecs: Vec<ZarrCodec>,
     ) -> Self {
         Self {
             zarr_format,
             data_type,
-            chunk_separator,
+            chunk_pattern,
             sharding_options,
             codecs,
         }
@@ -186,8 +193,8 @@ impl ZarrArrayMetadata {
         self.sharding_options.clone()
     }
 
-    pub(crate) fn get_separator(&self) -> ChunkSeparator {
-        self.chunk_separator.clone()
+    pub(crate) fn get_chunk_pattern(&self) -> ChunkPattern {
+        self.chunk_pattern.clone()
     }
 }
 
@@ -246,6 +253,22 @@ fn extract_string_from_json(map: &Value, key: &str, err_str: &str) -> ZarrResult
         .as_str()
         .ok_or(ZarrError::InvalidMetadata(err_str.to_string()))?;
     Ok(res.to_string())
+}
+
+fn extract_optional_string_from_json(
+    map: &Value,
+    key: &str,
+    err_str: &str,
+) -> ZarrResult<Option<String>> {
+    let res = map.get(key);
+    if let Some(val) = res {
+        let val = val
+            .as_str()
+            .ok_or(ZarrError::InvalidMetadata(err_str.to_string()))?;
+        return Ok(Some(val.to_string()));
+    }
+
+    Ok(None)
 }
 
 fn extract_u64_from_json(map: &Value, key: &str, err_str: &str) -> ZarrResult<u64> {
@@ -361,6 +384,12 @@ impl ZarrStoreMetadata {
         let dtype = extract_string_from_json(&meta_map, "dtype", error_string)?;
         let data_type = extract_type_v2(&dtype)?;
 
+        // parse dimenstion separator
+        let error_string = "error parsing metadata dimension separator";
+        let maybe_sep =
+            extract_optional_string_from_json(&meta_map, "dimension_separator", error_string)?;
+        let dim_separator = maybe_sep.unwrap_or(".".to_string());
+
         // parse endianness
         let endianness = match dtype.chars().next().unwrap() {
             '<' | '|' => Endianness::Little,
@@ -407,7 +436,10 @@ impl ZarrStoreMetadata {
         let array_meta = ZarrArrayMetadata {
             zarr_format: 2,
             data_type,
-            chunk_separator: ChunkSeparator::Period,
+            chunk_pattern: ChunkPattern {
+                separator: ChunkSeparator::from_str(&dim_separator)?,
+                c_prefix: false,
+            },
             sharding_options: None,
             codecs,
         };
@@ -623,6 +655,11 @@ impl ZarrStoreMetadata {
         let (_, config) = extract_config(chunk_key_encoding)?;
         let chunk_key_encoding = extract_string_from_json(config, "separator", error_string)?;
         let chunk_key_encoding = ChunkSeparator::from_str(&chunk_key_encoding)?;
+        let c_prefix = chunk_key_encoding == ChunkSeparator::Slash;
+        let chunk_key_encoding = ChunkPattern {
+            separator: chunk_key_encoding,
+            c_prefix,
+        };
 
         // codecs
         let codec_configs = meta_map
@@ -766,12 +803,12 @@ impl ZarrStoreMetadata {
         self.chunks.as_ref().unwrap()
     }
 
-    pub(crate) fn get_separators(&self) -> HashMap<String, ChunkSeparator> {
+    pub(crate) fn get_chunk_patterns(&self) -> HashMap<String, ChunkPattern> {
         let mut m = HashMap::new();
         for col in &self.columns {
             m.insert(
                 col.to_string(),
-                self.get_array_meta(col).unwrap().get_separator(),
+                self.get_array_meta(col).unwrap().get_chunk_pattern(),
             );
         }
 
@@ -857,7 +894,10 @@ mod zarr_metadata_v3_tests {
             ZarrArrayMetadata {
                 zarr_format: 2,
                 data_type: ZarrDataType::Int(4),
-                chunk_separator: ChunkSeparator::Period,
+                chunk_pattern: ChunkPattern {
+                    separator: ChunkSeparator::Period,
+                    c_prefix: false,
+                },
                 sharding_options: None,
                 codecs: vec![
                     ZarrCodec::Bytes(Endianness::Little),
@@ -876,7 +916,10 @@ mod zarr_metadata_v3_tests {
             ZarrArrayMetadata {
                 zarr_format: 2,
                 data_type: ZarrDataType::TimeStamp(8, "ms".to_string()),
-                chunk_separator: ChunkSeparator::Period,
+                chunk_pattern: ChunkPattern {
+                    separator: ChunkSeparator::Period,
+                    c_prefix: false,
+                },
                 sharding_options: None,
                 codecs: vec![
                     ZarrCodec::Bytes(Endianness::Little),
@@ -895,7 +938,10 @@ mod zarr_metadata_v3_tests {
             ZarrArrayMetadata {
                 zarr_format: 2,
                 data_type: ZarrDataType::Bool,
-                chunk_separator: ChunkSeparator::Period,
+                chunk_pattern: ChunkPattern {
+                    separator: ChunkSeparator::Period,
+                    c_prefix: false,
+                },
                 sharding_options: None,
                 codecs: vec![
                     ZarrCodec::Transpose(vec![1, 0]),
@@ -909,7 +955,10 @@ mod zarr_metadata_v3_tests {
             ZarrArrayMetadata {
                 zarr_format: 2,
                 data_type: ZarrDataType::FixedLengthString(112),
-                chunk_separator: ChunkSeparator::Period,
+                chunk_pattern: ChunkPattern {
+                    separator: ChunkSeparator::Period,
+                    c_prefix: false,
+                },
                 sharding_options: None,
                 codecs: vec![
                     ZarrCodec::Bytes(Endianness::Big),
@@ -1077,7 +1126,10 @@ mod zarr_metadata_v3_tests {
             ZarrArrayMetadata {
                 zarr_format: 3,
                 data_type: ZarrDataType::Int(4),
-                chunk_separator: ChunkSeparator::Slash,
+                chunk_pattern: ChunkPattern {
+                    separator: ChunkSeparator::Slash,
+                    c_prefix: true,
+                },
                 sharding_options: None,
                 codecs: vec![
                     ZarrCodec::Bytes(Endianness::Little),
@@ -1143,7 +1195,10 @@ mod zarr_metadata_v3_tests {
             ZarrArrayMetadata {
                 zarr_format: 3,
                 data_type: ZarrDataType::Int(4),
-                chunk_separator: ChunkSeparator::Period,
+                chunk_pattern: ChunkPattern {
+                    separator: ChunkSeparator::Period,
+                    c_prefix: false,
+                },
                 sharding_options: Some(ShardingOptions::new(
                     vec![4, 4],
                     vec![2, 2],

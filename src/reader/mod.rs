@@ -133,7 +133,7 @@ impl<T: ZarrRead> ZarrIterator for ZarrStore<T> {
             pos,
             &cols,
             self.meta.get_real_dims(pos),
-            self.meta.get_separators(),
+            self.meta.get_chunk_patterns(),
         );
         self.curr_chunk += 1;
         Some(chnk)

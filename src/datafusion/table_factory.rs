@@ -27,7 +27,7 @@ use datafusion::{
 
 use super::table_provider::{ListingZarrTableConfig, ListingZarrTableOptions, ZarrTableProvider};
 
-struct ZarrListingTableFactory {}
+pub struct ZarrListingTableFactory {}
 
 #[async_trait]
 impl TableProviderFactory for ZarrListingTableFactory {
