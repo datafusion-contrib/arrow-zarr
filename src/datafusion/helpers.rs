@@ -16,18 +16,30 @@
 // under the License.
 
 use crate::reader::{ZarrArrowPredicate, ZarrChunkFilter, ZarrProjection};
-use arrow::array::BooleanArray;
+use arrow::array::{ArrayRef, BooleanArray, StringBuilder};
+use arrow::compute::{and, cast, prep_null_mask_filter};
+use arrow::datatypes::{DataType, Field};
 use arrow::error::ArrowError;
 use arrow::record_batch::RecordBatch;
-use arrow_schema::Schema;
+use arrow_array::cast::AsArray;
+use arrow_array::Array;
+use arrow_schema::{Fields, Schema};
+use datafusion_common::scalar::ScalarValue;
 use datafusion_common::cast::as_boolean_array;
 use datafusion_common::tree_node::{RewriteRecursion, TreeNode, TreeNodeRewriter, VisitRecursion};
 use datafusion_common::Result as DataFusionResult;
-use datafusion_common::{internal_err, DataFusionError};
+use datafusion_common::{internal_err, DFField, DFSchema, DataFusionError};
+use datafusion::datasource::listing::{ListingTableUrl, PartitionedFile};
 use datafusion_expr::{Expr, ScalarFunctionDefinition, Volatility};
+use datafusion_physical_expr::create_physical_expr;
+use datafusion_physical_expr::execution_props::ExecutionProps;
 use datafusion_physical_expr::expressions::Column;
 use datafusion_physical_expr::utils::reassign_predicate_columns;
 use datafusion_physical_expr::{split_conjunction, PhysicalExpr};
+use futures::stream::FuturesUnordered;
+use futures::stream::{self, BoxStream, StreamExt};
+use object_store::{ObjectMeta, ObjectStore, path::Path};
+use object_store::path::DELIMITER;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
@@ -241,5 +253,318 @@ pub(crate) fn build_row_filter(
         let chunk_filter = ZarrChunkFilter::new(filters);
 
         Ok(Some(chunk_filter))
+    }
+}
+
+// Below is all the logic related to hive still partitioning, mostly copied and
+// slightly modified from datafusion.
+const CONCURRENCY_LIMIT: usize = 100;
+const MAX_PARTITION_DEPTH: usize = 64;
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct Partition {
+    /// The path to the partition, including the table prefix
+    path: Path,
+    /// How many path segments below the table prefix `path` contains
+    /// or equivalently the number of partition values in `path`
+    depth: usize,
+}
+
+impl Partition {
+    /// List the direct children of this partition updating `self.files` with
+    /// any child files, and returning a list of child "directories"
+    async fn list(mut self, store: &dyn ObjectStore) -> DataFusionResult<(Self, Vec<Path>)> {
+        let prefix = Some(&self.path).filter(|p| !p.as_ref().is_empty());
+        let result = store.list_with_delimiter(prefix).await?;
+        Ok((self, result.common_prefixes))
+    }
+}
+
+async fn list_partitions(
+    store: &dyn ObjectStore,
+    table_path: &ListingTableUrl,
+    max_depth: usize,
+) -> DataFusionResult<Vec<Partition>> {
+    let partition = Partition {
+        path: table_path.prefix().clone(),
+        depth: 0,
+    };
+
+    let mut final_partitions = Vec::with_capacity(MAX_PARTITION_DEPTH);
+    let mut pending = vec![];
+    let mut futures = FuturesUnordered::new();
+    futures.push(partition.list(store));
+
+    while let Some((partition, paths)) = futures.next().await.transpose()? {
+        // If pending contains a future it implies prior to this iteration
+        // `futures.len == CONCURRENCY_LIMIT`. We can therefore add a single
+        // future from `pending` to the working set
+        if let Some(next) = pending.pop() {
+            futures.push(next)
+        }
+
+        let depth = partition.depth;
+        if depth == max_depth {
+            final_partitions.push(partition);
+        }
+        for path in paths {
+            let child = Partition {
+                path,
+                depth: depth + 1,
+            };
+            // if we have reached the max depth, we don't need to list all the
+            // directories under the last partition, those will all be zarr arrays,
+            // and the last partition itself will be a store to be read atomically.
+            if depth < max_depth {
+                match futures.len() < CONCURRENCY_LIMIT {
+                    true => futures.push(child.list(store)),
+                    false => pending.push(child.list(store)),
+                }
+            }
+        }
+    }
+    Ok(final_partitions)
+}
+
+fn parse_partitions_for_path(
+    table_path: &ListingTableUrl,
+    file_path: &Path,
+    table_partition_cols: Vec<&str>,
+) -> Option<Vec<String>> {
+    //let subpath = table_path.strip_prefix(file_path)?;
+    let mut stripped = file_path.as_ref().strip_prefix(table_path.prefix().as_ref())?;
+    if !stripped.is_empty() && !table_path.prefix().as_ref().is_empty() {
+        stripped = stripped.strip_prefix(DELIMITER)?;
+    }
+    let subpath = stripped.split_terminator(DELIMITER).map(|s| s.to_string());
+
+    let mut part_values = vec![];
+    for (part, pn) in subpath.zip(table_partition_cols) {
+        match part.split_once('=') {
+            Some((name, val)) if name == pn => part_values.push(val.to_string()),
+            _ => {return None;}
+        }
+    }
+    Some(part_values)
+}
+
+async fn prune_partitions(
+    table_path: &ListingTableUrl,
+    partitions: Vec<Partition>,
+    filters: &[Expr],
+    partition_cols: &[(String, DataType)],
+) -> DataFusionResult<Vec<Partition>> {
+    if filters.is_empty() {
+        return Ok(partitions);
+    }
+
+    let mut builders: Vec<_> = (0..partition_cols.len())
+        .map(|_| StringBuilder::with_capacity(partitions.len(), partitions.len() * 10))
+        .collect();
+
+    for partition in &partitions {
+        let cols = partition_cols.iter().map(|x| x.0.as_str()).collect();
+        let parsed = parse_partitions_for_path(table_path, &partition.path, cols)
+            .unwrap_or_default();
+
+        let mut builders = builders.iter_mut();
+        for (p, b) in parsed.iter().zip(&mut builders) {
+            b.append_value(p);
+        }
+        builders.for_each(|b| b.append_null());
+    }
+
+    let arrays = partition_cols
+        .iter()
+        .zip(builders)
+        .map(|((_, d), mut builder)| {
+            let array = builder.finish();
+            cast(&array, d)
+        })
+        .collect::<Result<_, _>>()?;
+
+    let fields: Fields = partition_cols
+        .iter()
+        .map(|(n, d)| Field::new(n, d.clone(), true))
+        .collect();
+    let schema = Arc::new(Schema::new(fields));
+
+    let df_schema = DFSchema::new_with_metadata(
+        partition_cols
+            .iter()
+            .map(|(n, d)| DFField::new_unqualified(n, d.clone(), true))
+            .collect(),
+        Default::default(),
+    )?;
+
+    let batch = RecordBatch::try_new(schema.clone(), arrays)?;
+
+    // TODO: Plumb this down
+    let props = ExecutionProps::new();
+
+    // Applies `filter` to `batch` returning `None` on error
+    let do_filter = |filter| -> Option<ArrayRef> {
+        let expr = create_physical_expr(filter, &df_schema, &props).ok()?;
+        expr.evaluate(&batch)
+            .ok()?
+            .into_array(partitions.len())
+            .ok()
+    };
+
+    // Compute the conjunction of the filters, ignoring errors
+    let mask = filters
+        .iter()
+        .fold(None, |acc, filter| match (acc, do_filter(filter)) {
+            (Some(a), Some(b)) => Some(and(&a, b.as_boolean()).unwrap_or(a)),
+            (None, Some(r)) => Some(r.as_boolean().clone()),
+            (r, None) => r,
+        });
+
+    let mask = match mask {
+        Some(mask) => mask,
+        None => return Ok(partitions),
+    };
+
+    // Don't retain partitions that evaluated to null
+    let prepared = match mask.null_count() {
+        0 => mask,
+        _ => prep_null_mask_filter(&mask),
+    };
+
+    let filtered = partitions
+        .into_iter()
+        .zip(prepared.values())
+        .filter_map(|(p, f)| f.then_some(p))
+        .collect();
+
+    Ok(filtered)
+}
+
+pub async fn pruned_partition_list<'a>(
+    store: &'a dyn ObjectStore,
+    table_path: &'a ListingTableUrl,
+    filters: &'a [Expr],
+    partition_cols: &'a [(String, DataType)],
+) -> DataFusionResult<BoxStream<'a, DataFusionResult<PartitionedFile>>> {
+    // if no partition col => simply return the table path
+    if partition_cols.is_empty() {
+        let object_meta: ObjectMeta = store.head(table_path.prefix()).await?;
+        return Ok(Box::pin(stream::iter(vec![Ok(object_meta.into())])));
+    }
+
+    let partitions = list_partitions(store, table_path, partition_cols.len()).await?;
+    let pruned =
+        prune_partitions(table_path, partitions, filters, partition_cols).await?;
+
+    let stream = futures::stream::iter(pruned)
+        .map(move |partition: Partition| async move {
+            let cols = partition_cols.iter().map(|x| x.0.as_str()).collect();
+            let parsed = parse_partitions_for_path(table_path, &partition.path, cols);
+
+            let partition_values = parsed
+                .into_iter()
+                .flatten()
+                .zip(partition_cols)
+                .map(|(parsed, (_, datatype))| {
+                    ScalarValue::try_from_string(parsed.to_string(), datatype)
+                })
+                .collect::<DataFusionResult<Vec<_>>>()?;
+
+            let object_meta = store.head(&partition.path).await?;
+            let pf = PartitionedFile {
+                object_meta,
+                partition_values: partition_values.clone(),
+                range: None,
+                extensions: None,
+            };
+
+            Ok(pf)
+        })
+        .buffer_unordered(CONCURRENCY_LIMIT)
+        .boxed();
+
+    Ok(stream)  
+}
+
+// copied from datafusion
+pub fn split_files(
+    mut partitioned_files: Vec<PartitionedFile>,
+    n: usize,
+) -> Vec<Vec<PartitionedFile>> {
+    if partitioned_files.is_empty() {
+        return vec![];
+    }
+
+    // ObjectStore::list does not guarantee any consistent order and for some
+    // implementations such as LocalFileSystem, it may be inconsistent. Thus
+    // Sort files by path to ensure consistent plans when run more than once.
+    partitioned_files.sort_by(|a, b| a.path().cmp(b.path()));
+
+    // effectively this is div with rounding up instead of truncating
+    let chunk_size = (partitioned_files.len() + n - 1) / n;
+    partitioned_files
+        .chunks(chunk_size)
+        .map(|c| c.to_vec())
+        .collect()
+}
+
+#[cfg(test)]
+mod helpers_tests {
+    use crate::tests::get_test_v2_data_path;
+    use itertools::Itertools;
+    use object_store::local::LocalFileSystem;
+    use datafusion_expr::{and, col, lit};
+    use super::*;
+
+    #[tokio::test]
+    async fn test_listing_and_pruning_partitions() {
+        let table_path = get_test_v2_data_path("lat_lon_w_groups_example.zarr".to_string())
+                        .to_str()
+                        .unwrap()
+                        .to_string();
+
+        let store = LocalFileSystem::new();
+        let url = ListingTableUrl::parse(table_path).unwrap();
+        let partitions = list_partitions(&store, &url, 2).await.unwrap();
+
+        let expr1 = col("var").eq(lit(1_i32));
+        let expr2 = col("other_var").eq(lit::<String>("b".to_string()));
+        let partition_cols = [("var".to_string(), DataType::Int32), ("other_var".to_string(), DataType::Utf8)];
+
+        let prefix = "home/max/Documents/repos/arrow-zarr/test-data/data/zarr/v2_data/lat_lon_w_groups_example.zarr";
+        let part_1a = Partition{
+            path: Path::parse(prefix).unwrap().child("var=1").child("other_var=a"),
+            depth: 2,
+        };
+        let part_1b = Partition{
+            path: Path::parse(prefix).unwrap().child("var=1").child("other_var=b"),
+            depth: 2,
+        };
+        let part_2b = Partition{
+            path: Path::parse(prefix).unwrap().child("var=2").child("other_var=b"),
+            depth: 2,
+        };
+
+        let filters = [expr1.clone()];
+        let pruned = prune_partitions(&url, partitions.clone(), &filters, &partition_cols).await.unwrap();
+        assert_eq!(
+            pruned.into_iter().sorted().collect::<Vec<_>>(),
+            vec![part_1a.clone(), part_1b.clone()].into_iter().sorted().collect::<Vec<_>>(),
+        );
+
+        let filters = [expr2.clone()];
+        let pruned = prune_partitions(&url, partitions.clone(), &filters, &partition_cols).await.unwrap();
+        assert_eq!(
+            pruned.into_iter().sorted().collect::<Vec<_>>(),
+            vec![part_1b.clone(), part_2b.clone()].into_iter().sorted().collect::<Vec<_>>(),
+        );
+
+        let expr = and(expr1, expr2);
+        let filters = [expr];
+        let pruned = prune_partitions(&url, partitions.clone(), &filters, &partition_cols).await.unwrap();
+        assert_eq!(
+            pruned.into_iter().sorted().collect::<Vec<_>>(),
+            vec![part_1b].into_iter().sorted().collect::<Vec<_>>(),
+        );
     }
 }

@@ -44,14 +44,14 @@ impl TableProviderFactory for ZarrListingTableFactory {
 
         let table_path = ListingTableUrl::parse(&cmd.location)?;
 
-        let options = ListingZarrTableOptions {};
+        let options = ListingZarrTableOptions::new();
         let schema = options
             .infer_schema(state, &table_path)
             .await
             .map_err(|e| DataFusionError::Execution(format!("infer error: {:?}", e)))?;
 
-        let table_provider =
-            ZarrTableProvider::new(ListingZarrTableConfig::new(table_path), schema);
+        let config = ListingZarrTableConfig::new(table_path, schema, Some(options));
+        let table_provider = ZarrTableProvider::try_new(config)?;
 
         Ok(Arc::new(table_provider))
     }
