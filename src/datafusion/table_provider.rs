@@ -36,7 +36,7 @@ use futures::StreamExt;
 
 use crate::{
     async_reader::{ZarrPath, ZarrReadAsync},
-    reader::ZarrResult,
+    reader::{ZarrError, ZarrResult},
 };
 
 use super::helpers::{expr_applicable_for_cols, pruned_partition_list, split_files};
@@ -45,6 +45,12 @@ use super::scanner::ZarrScan;
 pub struct ListingZarrTableOptions {
     pub table_partition_cols: Vec<(String, DataType)>,
     pub target_partitions: usize,
+}
+
+impl Default for ListingZarrTableOptions {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ListingZarrTableOptions {
@@ -71,11 +77,44 @@ impl ListingZarrTableOptions {
         table_path: &ListingTableUrl,
     ) -> ZarrResult<Schema> {
         let store = state.runtime_env().object_store(table_path)?;
+        let prefix = table_path.prefix();
 
-        let zarr_path = ZarrPath::new(store, table_path.prefix().clone());
-        let schema = zarr_path.get_zarr_metadata().await?.arrow_schema()?;
+        let n_partitions = self.table_partition_cols.len();
+        let mut files = table_path.list_all_files(state, &store, "zgroup").await?;
+        let mut schema_to_return: Option<Schema> = None;
+        while let Some(file) = files.next().await {
+            let mut p = prefix.clone();
+            let file = file?.location;
+            for (cnt, part) in file.prefix_match(prefix).unwrap().enumerate() {
+                if cnt == n_partitions {
+                    if let Some(ext) = file.extension() {
+                        if ext == "zgroup" {
+                            let schema = ZarrPath::new(store.clone(), p.clone())
+                                            .get_zarr_metadata()
+                                            .await?
+                                            .arrow_schema()?;
+                            if let Some(sch) = &schema_to_return {
+                                if sch != &schema {
+                                    return Err(ZarrError::InvalidMetadata
+                                        ("mismatch between different partition schemas".into())
+                                    )
+                                }
+                            } else {
+                                schema_to_return = Some(schema);
+                            }
+                        }
+                    }
+                }
+                p = p.child(part);
+            }
+        }
 
-        Ok(schema)
+        if let Some(schema_to_return) = schema_to_return {
+            return Ok(schema_to_return);
+        }
+        Err(ZarrError::InvalidMetadata
+            ("could not infer schema for zarr table path".into())
+        )
     }
 }
 
@@ -97,6 +136,8 @@ impl ListingZarrTableConfig {
 }
 
 pub struct ZarrTableProvider {
+    // the distinction between the file schema and the table schema is
+    // that the latter could include partitioned columns.
     file_schema: Schema,
     table_schema: Schema,
     table_path: ListingTableUrl,
@@ -164,22 +205,21 @@ impl TableProvider for ZarrTableProvider {
         &self,
         filters: &[&Expr],
     ) -> datafusion::error::Result<Vec<TableProviderFilterPushDown>> {
-        // TODO handle predicates on partition columns as Exact.
         Ok(filters
             .iter()
             .map(|filter| {
                 if expr_applicable_for_cols(
                     &self
-                        .table_schema
-                        .fields
+                        .options
+                        .table_partition_cols
                         .iter()
-                        .map(|field| field.name().to_string())
+                        .map(|x| x.0.clone())
                         .collect::<Vec<_>>(),
                     filter,
                 ) {
-                    TableProviderFilterPushDown::Inexact
+                    TableProviderFilterPushDown::Exact
                 } else {
-                    TableProviderFilterPushDown::Unsupported
+                    TableProviderFilterPushDown::Inexact
                 }
             })
             .collect())
@@ -194,8 +234,7 @@ impl TableProvider for ZarrTableProvider {
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
         let object_store_url = self.table_path.object_store();
 
-        let pf = PartitionedFile::new(self.table_path.prefix().clone(), 0);
-        let file_groups = vec![vec![pf]];
+        let file_groups = self.list_stores_for_scan(state, filters).await?;
 
         let filters = if let Some(expr) = conjunction(filters.to_vec()) {
             let table_df_schema = self.table_schema.clone().to_dfschema()?;
@@ -205,6 +244,13 @@ impl TableProvider for ZarrTableProvider {
             None
         };
 
+        let table_partition_cols = self
+            .options
+            .table_partition_cols
+            .iter()
+            .map(|col| Ok(self.table_schema.field_with_name(&col.0)?.clone()))
+            .collect::<datafusion::error::Result<Vec<_>>>()?;
+
         let file_scan_config = FileScanConfig {
             object_store_url,
             file_schema: Arc::new(self.file_schema.clone()),
@@ -212,12 +258,11 @@ impl TableProvider for ZarrTableProvider {
             statistics: Statistics::new_unknown(&self.table_schema),
             projection: projection.cloned(),
             limit,
-            table_partition_cols: vec![],
+            table_partition_cols,
             output_ordering: vec![],
         };
 
         let scanner = ZarrScan::new(file_scan_config, filters);
-
         Ok(Arc::new(scanner))
     }
 }

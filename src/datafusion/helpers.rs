@@ -38,7 +38,7 @@ use datafusion_physical_expr::utils::reassign_predicate_columns;
 use datafusion_physical_expr::{split_conjunction, PhysicalExpr};
 use futures::stream::FuturesUnordered;
 use futures::stream::{self, BoxStream, StreamExt};
-use object_store::{ObjectMeta, ObjectStore, path::Path};
+use object_store::{ObjectStore, path::Path};
 use object_store::path::DELIMITER;
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -129,6 +129,7 @@ struct ZarrFilterCandidateBuilder<'a> {
     expr: Arc<dyn PhysicalExpr>,
     file_schema: &'a Schema,
     required_column_indices: BTreeSet<usize>,
+    projected_columns: bool,
 }
 
 impl<'a> ZarrFilterCandidateBuilder<'a> {
@@ -137,11 +138,18 @@ impl<'a> ZarrFilterCandidateBuilder<'a> {
             expr,
             file_schema,
             required_column_indices: BTreeSet::default(),
+            projected_columns: false,
         }
     }
 
     pub fn build(mut self) -> DataFusionResult<Option<ZarrFilterCandidate>> {
         let expr = self.expr.clone().rewrite(&mut self)?;
+
+        // if we are dealing with a projected column, which here means it's
+        // a partitioned column, we don't produce a filter for it.
+        if self.projected_columns {
+            return Ok(None);
+        }
 
         Ok(Some(ZarrFilterCandidate {
             expr,
@@ -157,6 +165,14 @@ impl<'a> TreeNodeRewriter for ZarrFilterCandidateBuilder<'a> {
         if let Some(column) = node.as_any().downcast_ref::<Column>() {
             if let Ok(idx) = self.file_schema.index_of(column.name()) {
                 self.required_column_indices.insert(idx);
+            } else {
+                // set the flag is we detect that the column is not in the file schema. for the
+                // zarr implementation, this would mean that the column is actually a partitioned
+                // column, and we shouldn't be pushing down a filter for it.
+                // TODO handle cases where a filter contains a column that doesn't exist (not even
+                // as a partition).
+                self.projected_columns = true;
+                return Ok(RewriteRecursion::Stop);
             }
         }
 
@@ -273,7 +289,7 @@ struct Partition {
 impl Partition {
     /// List the direct children of this partition updating `self.files` with
     /// any child files, and returning a list of child "directories"
-    async fn list(mut self, store: &dyn ObjectStore) -> DataFusionResult<(Self, Vec<Path>)> {
+    async fn list(self, store: &dyn ObjectStore) -> DataFusionResult<(Self, Vec<Path>)> {
         let prefix = Some(&self.path).filter(|p| !p.as_ref().is_empty());
         let result = store.list_with_delimiter(prefix).await?;
         Ok((self, result.common_prefixes))
@@ -448,8 +464,8 @@ pub async fn pruned_partition_list<'a>(
 ) -> DataFusionResult<BoxStream<'a, DataFusionResult<PartitionedFile>>> {
     // if no partition col => simply return the table path
     if partition_cols.is_empty() {
-        let object_meta: ObjectMeta = store.head(table_path.prefix()).await?;
-        return Ok(Box::pin(stream::iter(vec![Ok(object_meta.into())])));
+        let pf = PartitionedFile::new(table_path.prefix().clone(), 0);
+        return Ok(Box::pin(stream::iter(vec![Ok(pf)])));
     }
 
     let partitions = list_partitions(store, table_path, partition_cols.len()).await?;
@@ -470,20 +486,15 @@ pub async fn pruned_partition_list<'a>(
                 })
                 .collect::<DataFusionResult<Vec<_>>>()?;
 
-            let object_meta = store.head(&partition.path).await?;
-            let pf = PartitionedFile {
-                object_meta,
-                partition_values: partition_values.clone(),
-                range: None,
-                extensions: None,
-            };
+            let mut pf = PartitionedFile::new(partition.path, 0);
+            pf.partition_values = partition_values.clone();
 
             Ok(pf)
         })
         .buffer_unordered(CONCURRENCY_LIMIT)
         .boxed();
 
-    Ok(stream)  
+    Ok(stream)
 }
 
 // copied from datafusion

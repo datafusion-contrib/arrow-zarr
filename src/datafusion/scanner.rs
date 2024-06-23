@@ -102,8 +102,19 @@ impl ExecutionPlan for ZarrScan {
             .runtime_env()
             .object_store(&self.base_config.object_store_url)?;
 
+        // This is just replicating the `file_column_projection_indices` method on
+        // `FileScanConfig`, which is only pub within the datafusion crate. We need
+        // to remove column indices that correspond to partitions, since we can't
+        // pass those to the zarr reader.
+        let projection = self.base_config.projection.as_ref().map(|p| {
+            p.iter()
+                .filter(|col_idx| **col_idx < self.base_config.file_schema.fields().len())
+                .copied()
+                .collect()
+        });
+
         let config =
-            ZarrConfig::new(object_store).with_projection(self.base_config.projection.clone());
+            ZarrConfig::new(object_store).with_projection(projection);
         let opener = ZarrFileOpener::new(config, self.filters.clone());
         let stream = FileStream::new(&self.base_config, partition, opener, &self.metrics)?;
 
