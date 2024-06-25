@@ -90,14 +90,14 @@ impl ListingZarrTableOptions {
                     if let Some(ext) = file.extension() {
                         if ext == "zgroup" {
                             let schema = ZarrPath::new(store.clone(), p.clone())
-                                            .get_zarr_metadata()
-                                            .await?
-                                            .arrow_schema()?;
+                                .get_zarr_metadata()
+                                .await?
+                                .arrow_schema()?;
                             if let Some(sch) = &schema_to_return {
                                 if sch != &schema {
-                                    return Err(ZarrError::InvalidMetadata
-                                        ("mismatch between different partition schemas".into())
-                                    )
+                                    return Err(ZarrError::InvalidMetadata(
+                                        "mismatch between different partition schemas".into(),
+                                    ));
                                 }
                             } else {
                                 schema_to_return = Some(schema);
@@ -112,9 +112,9 @@ impl ListingZarrTableOptions {
         if let Some(schema_to_return) = schema_to_return {
             return Ok(schema_to_return);
         }
-        Err(ZarrError::InvalidMetadata
-            ("could not infer schema for zarr table path".into())
-        )
+        Err(ZarrError::InvalidMetadata(
+            "could not infer schema for zarr table path".into(),
+        ))
     }
 }
 
@@ -129,9 +129,13 @@ impl ListingZarrTableConfig {
     pub fn new(
         table_path: ListingTableUrl,
         file_schema: Schema,
-        options: Option<ListingZarrTableOptions>
+        options: Option<ListingZarrTableOptions>,
     ) -> Self {
-        Self { table_path, file_schema, options }
+        Self {
+            table_path,
+            file_schema,
+            options,
+        }
     }
 }
 
@@ -147,9 +151,9 @@ pub struct ZarrTableProvider {
 impl ZarrTableProvider {
     pub fn try_new(config: ListingZarrTableConfig) -> DataFusionResult<Self> {
         // TODO does options need to be an Option?
-        let options = config.options.ok_or_else(|| {
-            DataFusionError::Internal("No ListingOptions provided".into())
-        })?;
+        let options = config
+            .options
+            .ok_or_else(|| DataFusionError::Internal("No ListingOptions provided".into()))?;
 
         let mut builder = SchemaBuilder::from(config.file_schema.clone());
         for (part_col_name, part_col_type) in &options.table_partition_cols {
@@ -172,11 +176,12 @@ impl ZarrTableProvider {
     ) -> datafusion::error::Result<Vec<Vec<PartitionedFile>>> {
         let store = ctx.runtime_env().object_store(&self.table_path)?;
         let mut partition_stream = pruned_partition_list(
-                store.as_ref(),
-                &self.table_path,
-                filters,
-                &self.options.table_partition_cols,
-        ).await?;
+            store.as_ref(),
+            &self.table_path,
+            filters,
+            &self.options.table_partition_cols,
+        )
+        .await?;
 
         let mut partition_list = vec![];
         while let Some(partition) = partition_stream.next().await {

@@ -24,12 +24,12 @@ use arrow::record_batch::RecordBatch;
 use arrow_array::cast::AsArray;
 use arrow_array::Array;
 use arrow_schema::{Fields, Schema};
-use datafusion_common::scalar::ScalarValue;
+use datafusion::datasource::listing::{ListingTableUrl, PartitionedFile};
 use datafusion_common::cast::as_boolean_array;
+use datafusion_common::scalar::ScalarValue;
 use datafusion_common::tree_node::{RewriteRecursion, TreeNode, TreeNodeRewriter, VisitRecursion};
 use datafusion_common::Result as DataFusionResult;
 use datafusion_common::{internal_err, DFField, DFSchema, DataFusionError};
-use datafusion::datasource::listing::{ListingTableUrl, PartitionedFile};
 use datafusion_expr::{Expr, ScalarFunctionDefinition, Volatility};
 use datafusion_physical_expr::create_physical_expr;
 use datafusion_physical_expr::execution_props::ExecutionProps;
@@ -38,8 +38,8 @@ use datafusion_physical_expr::utils::reassign_predicate_columns;
 use datafusion_physical_expr::{split_conjunction, PhysicalExpr};
 use futures::stream::FuturesUnordered;
 use futures::stream::{self, BoxStream, StreamExt};
-use object_store::{ObjectStore, path::Path};
 use object_store::path::DELIMITER;
+use object_store::{path::Path, ObjectStore};
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
@@ -347,8 +347,9 @@ fn parse_partitions_for_path(
     file_path: &Path,
     table_partition_cols: Vec<&str>,
 ) -> Option<Vec<String>> {
-    //let subpath = table_path.strip_prefix(file_path)?;
-    let mut stripped = file_path.as_ref().strip_prefix(table_path.prefix().as_ref())?;
+    let mut stripped = file_path
+        .as_ref()
+        .strip_prefix(table_path.prefix().as_ref())?;
     if !stripped.is_empty() && !table_path.prefix().as_ref().is_empty() {
         stripped = stripped.strip_prefix(DELIMITER)?;
     }
@@ -358,7 +359,9 @@ fn parse_partitions_for_path(
     for (part, pn) in subpath.zip(table_partition_cols) {
         match part.split_once('=') {
             Some((name, val)) if name == pn => part_values.push(val.to_string()),
-            _ => {return None;}
+            _ => {
+                return None;
+            }
         }
     }
     Some(part_values)
@@ -380,8 +383,8 @@ async fn prune_partitions(
 
     for partition in &partitions {
         let cols = partition_cols.iter().map(|x| x.0.as_str()).collect();
-        let parsed = parse_partitions_for_path(table_path, &partition.path, cols)
-            .unwrap_or_default();
+        let parsed =
+            parse_partitions_for_path(table_path, &partition.path, cols).unwrap_or_default();
 
         let mut builders = builders.iter_mut();
         for (p, b) in parsed.iter().zip(&mut builders) {
@@ -469,8 +472,7 @@ pub async fn pruned_partition_list<'a>(
     }
 
     let partitions = list_partitions(store, table_path, partition_cols.len()).await?;
-    let pruned =
-        prune_partitions(table_path, partitions, filters, partition_cols).await?;
+    let pruned = prune_partitions(table_path, partitions, filters, partition_cols).await?;
 
     let stream = futures::stream::iter(pruned)
         .map(move |partition: Partition| async move {
@@ -521,18 +523,18 @@ pub fn split_files(
 
 #[cfg(test)]
 mod helpers_tests {
+    use super::*;
     use crate::tests::get_test_v2_data_path;
+    use datafusion_expr::{and, col, lit};
     use itertools::Itertools;
     use object_store::local::LocalFileSystem;
-    use datafusion_expr::{and, col, lit};
-    use super::*;
 
     #[tokio::test]
     async fn test_listing_and_pruning_partitions() {
         let table_path = get_test_v2_data_path("lat_lon_w_groups_example.zarr".to_string())
-                        .to_str()
-                        .unwrap()
-                        .to_string();
+            .to_str()
+            .unwrap()
+            .to_string();
 
         let store = LocalFileSystem::new();
         let url = ListingTableUrl::parse(table_path).unwrap();
@@ -540,39 +542,63 @@ mod helpers_tests {
 
         let expr1 = col("var").eq(lit(1_i32));
         let expr2 = col("other_var").eq(lit::<String>("b".to_string()));
-        let partition_cols = [("var".to_string(), DataType::Int32), ("other_var".to_string(), DataType::Utf8)];
+        let partition_cols = [
+            ("var".to_string(), DataType::Int32),
+            ("other_var".to_string(), DataType::Utf8),
+        ];
 
         let prefix = "home/max/Documents/repos/arrow-zarr/test-data/data/zarr/v2_data/lat_lon_w_groups_example.zarr";
-        let part_1a = Partition{
-            path: Path::parse(prefix).unwrap().child("var=1").child("other_var=a"),
+        let part_1a = Partition {
+            path: Path::parse(prefix)
+                .unwrap()
+                .child("var=1")
+                .child("other_var=a"),
             depth: 2,
         };
-        let part_1b = Partition{
-            path: Path::parse(prefix).unwrap().child("var=1").child("other_var=b"),
+        let part_1b = Partition {
+            path: Path::parse(prefix)
+                .unwrap()
+                .child("var=1")
+                .child("other_var=b"),
             depth: 2,
         };
-        let part_2b = Partition{
-            path: Path::parse(prefix).unwrap().child("var=2").child("other_var=b"),
+        let part_2b = Partition {
+            path: Path::parse(prefix)
+                .unwrap()
+                .child("var=2")
+                .child("other_var=b"),
             depth: 2,
         };
 
         let filters = [expr1.clone()];
-        let pruned = prune_partitions(&url, partitions.clone(), &filters, &partition_cols).await.unwrap();
+        let pruned = prune_partitions(&url, partitions.clone(), &filters, &partition_cols)
+            .await
+            .unwrap();
         assert_eq!(
             pruned.into_iter().sorted().collect::<Vec<_>>(),
-            vec![part_1a.clone(), part_1b.clone()].into_iter().sorted().collect::<Vec<_>>(),
+            vec![part_1a.clone(), part_1b.clone()]
+                .into_iter()
+                .sorted()
+                .collect::<Vec<_>>(),
         );
 
         let filters = [expr2.clone()];
-        let pruned = prune_partitions(&url, partitions.clone(), &filters, &partition_cols).await.unwrap();
+        let pruned = prune_partitions(&url, partitions.clone(), &filters, &partition_cols)
+            .await
+            .unwrap();
         assert_eq!(
             pruned.into_iter().sorted().collect::<Vec<_>>(),
-            vec![part_1b.clone(), part_2b.clone()].into_iter().sorted().collect::<Vec<_>>(),
+            vec![part_1b.clone(), part_2b.clone()]
+                .into_iter()
+                .sorted()
+                .collect::<Vec<_>>(),
         );
 
         let expr = and(expr1, expr2);
         let filters = [expr];
-        let pruned = prune_partitions(&url, partitions.clone(), &filters, &partition_cols).await.unwrap();
+        let pruned = prune_partitions(&url, partitions.clone(), &filters, &partition_cols)
+            .await
+            .unwrap();
         assert_eq!(
             pruned.into_iter().sorted().collect::<Vec<_>>(),
             vec![part_1b].into_iter().sorted().collect::<Vec<_>>(),

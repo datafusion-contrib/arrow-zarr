@@ -113,8 +113,7 @@ impl ExecutionPlan for ZarrScan {
                 .collect()
         });
 
-        let config =
-            ZarrConfig::new(object_store).with_projection(projection);
+        let config = ZarrConfig::new(object_store).with_projection(projection);
         let opener = ZarrFileOpener::new(config, self.filters.clone());
         let stream = FileStream::new(&self.base_config, partition, opener, &self.metrics)?;
 

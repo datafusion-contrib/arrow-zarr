@@ -121,8 +121,8 @@ impl TableProviderFactory for ZarrListingTableFactory {
 mod tests {
     use crate::tests::get_test_v2_data_path;
     use arrow::record_batch::RecordBatch;
-    use arrow_array::{cast::AsArray, StringArray};
     use arrow_array::types::*;
+    use arrow_array::{cast::AsArray, StringArray};
     use arrow_buffer::ScalarBuffer;
 
     use datafusion::execution::{
@@ -144,8 +144,7 @@ mod tests {
             .clone()
     }
 
-    fn extract_str_col(col_name: &str, rec_batch: &RecordBatch) -> StringArray
-    {
+    fn extract_str_col(col_name: &str, rec_batch: &RecordBatch) -> StringArray {
         rec_batch
             .column_by_name(col_name)
             .unwrap()
@@ -353,9 +352,14 @@ mod tests {
             assert!(lat_values
                 .iter()
                 .zip(lon_values.iter())
-                .all(|(lat, lon)| *lat >= 38.0 && *lat <= 39.0 && *lon >= -108.9 && *lon <= -107.9));
+                .all(|(lat, lon)| *lat >= 38.0
+                    && *lat <= 39.0
+                    && *lon >= -108.9
+                    && *lon <= -107.9));
             assert!(var_values.iter().all(|var| var == &1));
-            assert!(other_var_values.iter().all(|other_var| other_var.unwrap() == "b"));
+            assert!(other_var_values
+                .iter()
+                .all(|other_var| other_var.unwrap() == "b"));
         }
 
         // select a different partition for each partitioned variable
@@ -373,9 +377,14 @@ mod tests {
             assert!(lat_values
                 .iter()
                 .zip(lon_values.iter())
-                .all(|(lat, lon)| *lat >= 39.0 && *lat <= 40.0 && *lon >= -110.0 && *lon <= -108.9));
+                .all(|(lat, lon)| *lat >= 39.0
+                    && *lat <= 40.0
+                    && *lon >= -110.0
+                    && *lon <= -108.9));
             assert!(var_values.iter().all(|var| var == &2));
-            assert!(other_var_values.iter().all(|other_var| other_var.unwrap() == "a"));
+            assert!(other_var_values
+                .iter()
+                .all(|other_var| other_var.unwrap() == "a"));
         }
 
         // select the same partition but without selection the partitioned variables
@@ -391,7 +400,10 @@ mod tests {
             assert!(lat_values
                 .iter()
                 .zip(lon_values.iter())
-                .all(|(lat, lon)| *lat >= 39.0 && *lat <= 40.0 && *lon >= -110.0 && *lon <= -108.9));
+                .all(|(lat, lon)| *lat >= 39.0
+                    && *lat <= 40.0
+                    && *lon >= -110.0
+                    && *lon <= -108.9));
         }
 
         // select a partition for only one of the partitioned variables
@@ -404,13 +416,11 @@ mod tests {
             let lat_values = extract_col::<Float64Type>("lat", &batch);
             let var_values = extract_col::<Int32Type>("var", &batch);
             let other_var_values = extract_str_col("other_var", &batch);
-            assert!(lat_values
-                .iter()
-                .all(|lat| *lat >= 38.0 && *lat <= 39.0));
+            assert!(lat_values.iter().all(|lat| *lat >= 38.0 && *lat <= 39.0));
             assert!(var_values.iter().all(|var| var == &1));
-            assert!(other_var_values.iter().all(
-                |other_var| other_var.unwrap() == "a" || other_var.unwrap() == "b"
-            ));
+            assert!(other_var_values
+                .iter()
+                .all(|other_var| other_var.unwrap() == "a" || other_var.unwrap() == "b"));
         }
 
         Ok(())
