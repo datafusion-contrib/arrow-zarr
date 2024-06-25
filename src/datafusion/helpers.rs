@@ -489,7 +489,7 @@ pub async fn pruned_partition_list<'a>(
                 .collect::<DataFusionResult<Vec<_>>>()?;
 
             let mut pf = PartitionedFile::new(partition.path, 0);
-            pf.partition_values = partition_values.clone();
+            pf.partition_values.clone_from(&partition_values);
 
             Ok(pf)
         })
