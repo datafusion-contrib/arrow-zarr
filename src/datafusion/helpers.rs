@@ -548,7 +548,6 @@ mod helpers_tests {
             ("other_var".to_string(), DataType::Utf8),
         ];
 
-
         let part_1a = Partition {
             path: Path::parse(&table_path)
                 .unwrap()
