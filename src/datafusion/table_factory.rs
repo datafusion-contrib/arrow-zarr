@@ -110,7 +110,7 @@ impl TableProviderFactory for ZarrListingTableFactory {
             Some(s) => s,
         };
 
-        let config = ListingZarrTableConfig::new(table_path, schema, Some(options));
+        let config = ListingZarrTableConfig::new(table_path, schema, options);
         let table_provider = ZarrTableProvider::try_new(config)?;
 
         Ok(Arc::new(table_provider))

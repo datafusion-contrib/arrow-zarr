@@ -21,7 +21,7 @@ use arrow::datatypes::DataType;
 use arrow_schema::{Field, Schema, SchemaBuilder, SchemaRef};
 use async_trait::async_trait;
 use datafusion::{
-    common::{DataFusionError, Result as DataFusionResult, Statistics, ToDFSchema},
+    common::{Result as DataFusionResult, Statistics, ToDFSchema},
     datasource::{
         listing::{ListingTableUrl, PartitionedFile},
         physical_plan::FileScanConfig,
@@ -121,7 +121,7 @@ impl ListingZarrTableOptions {
 pub struct ListingZarrTableConfig {
     table_path: ListingTableUrl,
     pub file_schema: Schema,
-    pub options: Option<ListingZarrTableOptions>,
+    pub options: ListingZarrTableOptions,
 }
 
 impl ListingZarrTableConfig {
@@ -129,7 +129,7 @@ impl ListingZarrTableConfig {
     pub fn new(
         table_path: ListingTableUrl,
         file_schema: Schema,
-        options: Option<ListingZarrTableOptions>,
+        options: ListingZarrTableOptions,
     ) -> Self {
         Self {
             table_path,
@@ -150,13 +150,8 @@ pub struct ZarrTableProvider {
 
 impl ZarrTableProvider {
     pub fn try_new(config: ListingZarrTableConfig) -> DataFusionResult<Self> {
-        // TODO does options need to be an Option?
-        let options = config
-            .options
-            .ok_or_else(|| DataFusionError::Internal("No ListingOptions provided".into()))?;
-
         let mut builder = SchemaBuilder::from(config.file_schema.clone());
-        for (part_col_name, part_col_type) in &options.table_partition_cols {
+        for (part_col_name, part_col_type) in &config.options.table_partition_cols {
             builder.push(Field::new(part_col_name, part_col_type.clone(), false));
         }
         let table_schema = builder.finish();
@@ -165,7 +160,7 @@ impl ZarrTableProvider {
             file_schema: config.file_schema,
             table_schema,
             table_path: config.table_path,
-            options,
+            options: config.options,
         })
     }
 

@@ -332,9 +332,10 @@ async fn list_partitions(
             // directories under the last partition, those will all be zarr arrays,
             // and the last partition itself will be a store to be read atomically.
             if depth < max_depth {
-                match futures.len() < CONCURRENCY_LIMIT {
-                    true => futures.push(child.list(store)),
-                    false => pending.push(child.list(store)),
+                if futures.len() < CONCURRENCY_LIMIT {
+                    futures.push(child.list(store));
+                } else {
+                    pending.push(child.list(store))
                 }
             }
         }
@@ -537,7 +538,7 @@ mod helpers_tests {
             .to_string();
 
         let store = LocalFileSystem::new();
-        let url = ListingTableUrl::parse(table_path).unwrap();
+        let url = ListingTableUrl::parse(&table_path).unwrap();
         let partitions = list_partitions(&store, &url, 2).await.unwrap();
 
         let expr1 = col("var").eq(lit(1_i32));
@@ -547,23 +548,23 @@ mod helpers_tests {
             ("other_var".to_string(), DataType::Utf8),
         ];
 
-        let prefix = "home/max/Documents/repos/arrow-zarr/test-data/data/zarr/v2_data/lat_lon_w_groups_example.zarr";
+
         let part_1a = Partition {
-            path: Path::parse(prefix)
+            path: Path::parse(&table_path)
                 .unwrap()
                 .child("var=1")
                 .child("other_var=a"),
             depth: 2,
         };
         let part_1b = Partition {
-            path: Path::parse(prefix)
+            path: Path::parse(&table_path)
                 .unwrap()
                 .child("var=1")
                 .child("other_var=b"),
             depth: 2,
         };
         let part_2b = Partition {
-            path: Path::parse(prefix)
+            path: Path::parse(table_path)
                 .unwrap()
                 .child("var=2")
                 .child("other_var=b"),
