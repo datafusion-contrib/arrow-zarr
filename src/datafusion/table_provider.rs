@@ -17,10 +17,11 @@
 
 use std::sync::Arc;
 
-use arrow_schema::{Schema, SchemaRef};
+use arrow::datatypes::DataType;
+use arrow_schema::{Field, Schema, SchemaBuilder, SchemaRef};
 use async_trait::async_trait;
 use datafusion::{
-    common::{Statistics, ToDFSchema},
+    common::{Result as DataFusionResult, Statistics, ToDFSchema},
     datasource::{
         listing::{ListingTableUrl, PartitionedFile},
         physical_plan::FileScanConfig,
@@ -31,55 +32,158 @@ use datafusion::{
     physical_plan::ExecutionPlan,
 };
 use datafusion_physical_expr::create_physical_expr;
+use futures::StreamExt;
 
 use crate::{
     async_reader::{ZarrPath, ZarrReadAsync},
-    reader::ZarrResult,
+    reader::{ZarrError, ZarrResult},
 };
 
-use super::helpers::expr_applicable_for_cols;
+use super::helpers::{expr_applicable_for_cols, pruned_partition_list, split_files};
 use super::scanner::ZarrScan;
 
-pub struct ListingZarrTableOptions {}
+pub struct ListingZarrTableOptions {
+    pub table_partition_cols: Vec<(String, DataType)>,
+    pub target_partitions: usize,
+}
+
+impl Default for ListingZarrTableOptions {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl ListingZarrTableOptions {
+    pub fn new() -> Self {
+        Self {
+            table_partition_cols: vec![],
+            target_partitions: 1,
+        }
+    }
+
+    pub fn with_partition_cols(mut self, table_partition_cols: Vec<(String, DataType)>) -> Self {
+        self.table_partition_cols = table_partition_cols;
+        self
+    }
+
+    pub fn with_target_partitions(mut self, target_partitions: usize) -> Self {
+        self.target_partitions = target_partitions;
+        self
+    }
+
     pub async fn infer_schema(
         &self,
         state: &SessionState,
         table_path: &ListingTableUrl,
     ) -> ZarrResult<Schema> {
         let store = state.runtime_env().object_store(table_path)?;
+        let prefix = table_path.prefix();
 
-        let zarr_path = ZarrPath::new(store, table_path.prefix().clone());
-        let schema = zarr_path.get_zarr_metadata().await?.arrow_schema()?;
+        let n_partitions = self.table_partition_cols.len();
+        let mut files = table_path.list_all_files(state, &store, "zgroup").await?;
+        let mut schema_to_return: Option<Schema> = None;
+        while let Some(file) = files.next().await {
+            let mut p = prefix.clone();
+            let file = file?.location;
+            for (cnt, part) in file.prefix_match(prefix).unwrap().enumerate() {
+                if cnt == n_partitions {
+                    if let Some(ext) = file.extension() {
+                        if ext == "zgroup" {
+                            let schema = ZarrPath::new(store.clone(), p.clone())
+                                .get_zarr_metadata()
+                                .await?
+                                .arrow_schema()?;
+                            if let Some(sch) = &schema_to_return {
+                                if sch != &schema {
+                                    return Err(ZarrError::InvalidMetadata(
+                                        "mismatch between different partition schemas".into(),
+                                    ));
+                                }
+                            } else {
+                                schema_to_return = Some(schema);
+                            }
+                        }
+                    }
+                }
+                p = p.child(part);
+            }
+        }
 
-        Ok(schema)
+        if let Some(schema_to_return) = schema_to_return {
+            return Ok(schema_to_return);
+        }
+        Err(ZarrError::InvalidMetadata(
+            "could not infer schema for zarr table path".into(),
+        ))
     }
 }
 
 pub struct ListingZarrTableConfig {
-    /// The inner listing table configuration
     table_path: ListingTableUrl,
+    pub file_schema: Schema,
+    pub options: ListingZarrTableOptions,
 }
 
 impl ListingZarrTableConfig {
     /// Create a new ListingZarrTableConfig
-    pub fn new(table_path: ListingTableUrl) -> Self {
-        Self { table_path }
+    pub fn new(
+        table_path: ListingTableUrl,
+        file_schema: Schema,
+        options: ListingZarrTableOptions,
+    ) -> Self {
+        Self {
+            table_path,
+            file_schema,
+            options,
+        }
     }
 }
 
 pub struct ZarrTableProvider {
+    // the distinction between the file schema and the table schema is
+    // that the latter could include partitioned columns.
+    file_schema: Schema,
     table_schema: Schema,
-    config: ListingZarrTableConfig,
+    table_path: ListingTableUrl,
+    options: ListingZarrTableOptions,
 }
 
 impl ZarrTableProvider {
-    pub fn new(config: ListingZarrTableConfig, table_schema: Schema) -> Self {
-        Self {
-            table_schema,
-            config,
+    pub fn try_new(config: ListingZarrTableConfig) -> DataFusionResult<Self> {
+        let mut builder = SchemaBuilder::from(config.file_schema.clone());
+        for (part_col_name, part_col_type) in &config.options.table_partition_cols {
+            builder.push(Field::new(part_col_name, part_col_type.clone(), false));
         }
+        let table_schema = builder.finish();
+
+        Ok(Self {
+            file_schema: config.file_schema,
+            table_schema,
+            table_path: config.table_path,
+            options: config.options,
+        })
+    }
+
+    async fn list_stores_for_scan<'a>(
+        &'a self,
+        ctx: &'a SessionState,
+        filters: &'a [Expr],
+    ) -> datafusion::error::Result<Vec<Vec<PartitionedFile>>> {
+        let store = ctx.runtime_env().object_store(&self.table_path)?;
+        let mut partition_stream = pruned_partition_list(
+            store.as_ref(),
+            &self.table_path,
+            filters,
+            &self.options.table_partition_cols,
+        )
+        .await?;
+
+        let mut partition_list = vec![];
+        while let Some(partition) = partition_stream.next().await {
+            partition_list.push(partition?);
+        }
+
+        Ok(split_files(partition_list, self.options.target_partitions))
     }
 }
 
@@ -101,22 +205,21 @@ impl TableProvider for ZarrTableProvider {
         &self,
         filters: &[&Expr],
     ) -> datafusion::error::Result<Vec<TableProviderFilterPushDown>> {
-        // TODO handle predicates on partition columns as Exact.
         Ok(filters
             .iter()
             .map(|filter| {
                 if expr_applicable_for_cols(
                     &self
-                        .table_schema
-                        .fields
+                        .options
+                        .table_partition_cols
                         .iter()
-                        .map(|field| field.name().to_string())
+                        .map(|x| x.0.clone())
                         .collect::<Vec<_>>(),
                     filter,
                 ) {
-                    TableProviderFilterPushDown::Inexact
+                    TableProviderFilterPushDown::Exact
                 } else {
-                    TableProviderFilterPushDown::Unsupported
+                    TableProviderFilterPushDown::Inexact
                 }
             })
             .collect())
@@ -129,10 +232,9 @@ impl TableProvider for ZarrTableProvider {
         filters: &[Expr],
         limit: Option<usize>,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
-        let object_store_url = self.config.table_path.object_store();
+        let object_store_url = self.table_path.object_store();
 
-        let pf = PartitionedFile::new(self.config.table_path.prefix().clone(), 0);
-        let file_groups = vec![vec![pf]];
+        let file_groups = self.list_stores_for_scan(state, filters).await?;
 
         let filters = if let Some(expr) = conjunction(filters.to_vec()) {
             let table_df_schema = self.table_schema.clone().to_dfschema()?;
@@ -142,19 +244,25 @@ impl TableProvider for ZarrTableProvider {
             None
         };
 
+        let table_partition_cols = self
+            .options
+            .table_partition_cols
+            .iter()
+            .map(|col| Ok(self.table_schema.field_with_name(&col.0)?.clone()))
+            .collect::<datafusion::error::Result<Vec<_>>>()?;
+
         let file_scan_config = FileScanConfig {
             object_store_url,
-            file_schema: Arc::new(self.table_schema.clone()), // TODO differentiate between file and table schema
+            file_schema: Arc::new(self.file_schema.clone()),
             file_groups,
             statistics: Statistics::new_unknown(&self.table_schema),
             projection: projection.cloned(),
             limit,
-            table_partition_cols: vec![],
+            table_partition_cols,
             output_ordering: vec![],
         };
 
         let scanner = ZarrScan::new(file_scan_config, filters);
-
         Ok(Arc::new(scanner))
     }
 }

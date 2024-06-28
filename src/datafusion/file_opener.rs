@@ -52,17 +52,17 @@ impl FileOpener for ZarrFileOpener {
             let zarr_path = ZarrPath::new(config.object_store, file_meta.object_meta.location);
             let rng = file_meta.range.map(|r| (r.start as usize, r.end as usize));
             let projection = ZarrProjection::from(config.projection.as_ref());
-
             let mut batch_reader_builder =
                 ZarrRecordBatchStreamBuilder::new(zarr_path.clone()).with_projection(projection);
             if let Some(filters) = filters_to_pushdown {
-                let schema = zarr_path
+                let file_schema = zarr_path
                     .get_zarr_metadata()
                     .await
                     .map_err(|e| DataFusionError::External(Box::new(e)))?
                     .arrow_schema()
                     .map_err(|e| DataFusionError::External(Box::new(e)))?;
-                let filters = build_row_filter(&filters, &schema)?;
+                let filters = build_row_filter(&filters, &file_schema)?;
+
                 if let Some(filters) = filters {
                     batch_reader_builder = batch_reader_builder.with_filter(filters);
                 }
@@ -71,9 +71,7 @@ impl FileOpener for ZarrFileOpener {
                 .build_partial_reader(rng)
                 .await
                 .map_err(|e| DataFusionError::External(Box::new(e)))?;
-
             let stream = batch_reader.map_err(|e| ArrowError::from_external_error(Box::new(e)));
-
             Ok(stream.boxed())
         }))
     }
