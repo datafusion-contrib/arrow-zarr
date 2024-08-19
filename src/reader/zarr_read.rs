@@ -274,6 +274,14 @@ impl ZarrRead for PathBuf {
                 p = dir_entry.path().join("zarr.json");
             }
 
+            // check if there's a file with attributes (only for v2)
+            let mut attrs: Option<String> = None;
+            let attrs_path = dir_entry.path().join(".zattrs");
+            if attrs_path.exists() {
+                let attrs_str = read_to_string(attrs_path)?;
+                attrs = Some(attrs_str.to_string());
+            }
+
             if p.exists() {
                 let meta_str = read_to_string(p)?;
                 meta.add_column(
@@ -285,6 +293,7 @@ impl ZarrRead for PathBuf {
                         .unwrap()
                         .to_string(),
                     &meta_str,
+                    attrs.as_deref(),
                 )?;
             }
         }
@@ -346,22 +355,18 @@ impl ZarrRead for PathBuf {
 #[cfg(test)]
 mod zarr_read_tests {
     use std::collections::HashSet;
-    use std::path::PathBuf;
 
     use super::*;
-    use crate::reader::codecs::{Endianness, ZarrCodec, ZarrDataType};
+    use crate::reader::codecs::{
+        BloscOptions, CompressorName, Endianness, ShuffleOptions, ZarrCodec, ZarrDataType,
+    };
     use crate::reader::metadata::{ChunkSeparator, ZarrArrayMetadata};
-
-    fn get_test_data_path(zarr_store: String) -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("test-data/data/zarr/v2_data")
-            .join(zarr_store)
-    }
+    use crate::tests::{get_test_v2_data_path, get_test_v3_data_path};
 
     // read the store metadata, given a path to a zarr store.
     #[test]
-    fn read_metadata() {
-        let p = get_test_data_path("raw_bytes_example.zarr".to_string());
+    fn read_v2_metadata() {
+        let p = get_test_v2_data_path("raw_bytes_example.zarr".to_string());
         let meta = p.get_zarr_metadata().unwrap();
 
         assert_eq!(meta.get_columns(), &vec!["byte_data", "float_data"]);
@@ -393,11 +398,109 @@ mod zarr_read_tests {
         );
     }
 
+    // read the store metadata, which includes one dim represenations of some variables,
+    // given a path to a zarr store.
+    #[test]
+    fn read_v2_metadata_w_one_dim_repr() {
+        let p = get_test_v2_data_path("lat_lon_example_w_1d_repr.zarr".to_string());
+        let meta = p.get_zarr_metadata().unwrap();
+
+        // check the one dim repr for the lat
+        assert_eq!(meta.get_one_dim_repr_meta("lat").unwrap().0, 0);
+        assert_eq!(meta.get_one_dim_repr_meta("lat").unwrap().1, "one_d_lat");
+        assert_eq!(
+            meta.get_one_dim_repr_meta("lat").unwrap().2,
+            ZarrArrayMetadata::new(
+                2,
+                ZarrDataType::Float(8),
+                ChunkPattern {
+                    separator: ChunkSeparator::Period,
+                    c_prefix: false
+                },
+                None,
+                vec![
+                    ZarrCodec::Bytes(Endianness::Little),
+                    ZarrCodec::BloscCompressor(BloscOptions::new(
+                        CompressorName::Lz4,
+                        5,
+                        ShuffleOptions::ByteShuffle(8),
+                        0,
+                    )),
+                ],
+            )
+        );
+
+        // check the one dim repr for the lon
+        assert_eq!(meta.get_one_dim_repr_meta("lon").unwrap().0, 1);
+        assert_eq!(meta.get_one_dim_repr_meta("lon").unwrap().1, "one_d_lon");
+        assert_eq!(
+            meta.get_one_dim_repr_meta("lon").unwrap().2,
+            ZarrArrayMetadata::new(
+                2,
+                ZarrDataType::Float(8),
+                ChunkPattern {
+                    separator: ChunkSeparator::Period,
+                    c_prefix: false
+                },
+                None,
+                vec![
+                    ZarrCodec::Bytes(Endianness::Little),
+                    ZarrCodec::BloscCompressor(BloscOptions::new(
+                        CompressorName::Lz4,
+                        5,
+                        ShuffleOptions::ByteShuffle(8),
+                        0,
+                    )),
+                ],
+            )
+        );
+    }
+
+    #[test]
+    fn read_v3_metadata_w_one_dim_repr() {
+        let p = get_test_v3_data_path("with_one_d_repr.zarr".to_string());
+        let meta = p.get_zarr_metadata().unwrap();
+
+        // check the one dim repr for the lat
+        assert_eq!(meta.get_one_dim_repr_meta("lat").unwrap().0, 0);
+        assert_eq!(meta.get_one_dim_repr_meta("lat").unwrap().1, "one_d_lat");
+        assert_eq!(
+            meta.get_one_dim_repr_meta("lat").unwrap().2,
+            ZarrArrayMetadata::new(
+                3,
+                ZarrDataType::Float(8),
+                ChunkPattern {
+                    separator: ChunkSeparator::Period,
+                    c_prefix: false
+                },
+                None,
+                vec![ZarrCodec::Bytes(Endianness::Little)],
+            )
+        );
+
+        // check the one dim repr for the lon
+        assert_eq!(meta.get_one_dim_repr_meta("lon").unwrap().0, 1);
+        assert_eq!(meta.get_one_dim_repr_meta("lon").unwrap().1, "one_d_lon");
+        assert_eq!(
+            meta.get_one_dim_repr_meta("lon").unwrap().2,
+            ZarrArrayMetadata::new(
+                3,
+                ZarrDataType::Float(8),
+                ChunkPattern {
+                    separator: ChunkSeparator::Period,
+                    c_prefix: false
+                },
+                None,
+                vec![ZarrCodec::Bytes(Endianness::Little)],
+            )
+        );
+    }
+
     // read the raw data contained into a zarr store. one of the variables contains
     // byte data, which we explicitly check here.
     #[test]
-    fn read_raw_chunks() {
-        let p = get_test_data_path("raw_bytes_example.zarr".to_string());
+    fn read_v2_raw_chunks() {
+        let p = get_test_v2_data_path("raw_bytes_example.zarr".to_string());
         let meta = p.get_zarr_metadata().unwrap();
 
         // test read from an array where the data is just raw bytes

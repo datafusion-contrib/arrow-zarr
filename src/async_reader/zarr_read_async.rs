@@ -64,26 +64,39 @@ impl ZarrPath {
 impl<'a> ZarrReadAsync<'a> for ZarrPath {
     async fn get_zarr_metadata(&self) -> ZarrResult<ZarrStoreMetadata> {
         let mut meta = ZarrStoreMetadata::new();
-        let stream = self.store.list(Some(&self.location));
 
+        let stream = self.store.list(Some(&self.location));
         pin_mut!(stream);
+
+        let mut meta_strs: Vec<(String, String)> = Vec::new();
+        let mut attrs_map: HashMap<String, String> = HashMap::new();
         while let Some(p) = stream.next().await {
             let p = p?.location;
             if let Some(s) = p.filename() {
-                if s == ".zarray" || s == "zarr.json" {
+                // parse the file with the array metadata or the attributes (only for zarr v2 for the latter)
+                if s == ".zarray" || s == "zarr.json" || s == ".zattrs" {
                     if let Some(mut dir_name) = p.prefix_match(&self.location) {
                         let array_name = dir_name.next().unwrap().as_ref().to_string();
                         let get_res = self.store.get(&p).await?;
-                        let meta_str = match get_res.payload {
+                        let data_str = match get_res.payload {
                             GetResultPayload::File(_, p) => read_to_string(p)?,
                             GetResultPayload::Stream(_) => {
                                 std::str::from_utf8(&get_res.bytes().await?)?.to_string()
                             }
                         };
-                        meta.add_column(array_name, &meta_str)?;
+                        match s {
+                            ".zarray" | "zarr.json" => meta_strs.push((array_name, data_str)),
+                            ".zattrs" => _ = attrs_map.insert(array_name, data_str),
+                            _ => {}
+                        };
                     }
                 }
             }
+        }
+
+        for (array_name, meta_str) in meta_strs {
+            let attrs = attrs_map.get(&array_name).map(|x| x.as_str());
+            meta.add_column(array_name, &meta_str, attrs)?;
         }
 
         if meta.get_num_columns() == 0 {
@@ -157,26 +170,21 @@ impl<'a> ZarrReadAsync<'a> for ZarrPath {
 
 #[cfg(test)]
 mod zarr_read_async_tests {
-    use object_store::{local::LocalFileSystem, path::Path};
+    use object_store::path::Path;
     use std::collections::HashSet;
-    use std::path::PathBuf;
     use std::sync::Arc;
 
     use super::*;
-    use crate::reader::codecs::{Endianness, ZarrCodec, ZarrDataType};
+    use crate::reader::codecs::{
+        BloscOptions, CompressorName, Endianness, ShuffleOptions, ZarrCodec, ZarrDataType,
+    };
     use crate::reader::metadata::{ChunkSeparator, ZarrArrayMetadata};
     use crate::reader::ZarrProjection;
-
-    fn get_test_data_file_system() -> LocalFileSystem {
-        LocalFileSystem::new_with_prefix(
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test-data/data/zarr/v2_data"),
-        )
-        .unwrap()
-    }
+    use crate::tests::{get_test_v2_data_file_system, get_test_v3_data_file_system};
 
     #[tokio::test]
-    async fn read_metadata() {
-        let file_sys = get_test_data_file_system();
+    async fn read_v2_metadata() {
+        let file_sys = get_test_v2_data_file_system();
         let p = Path::parse("raw_bytes_example.zarr").unwrap();
 
         let store = ZarrPath::new(Arc::new(file_sys), p);
@@ -211,9 +219,113 @@ mod zarr_read_async_tests {
         );
     }
 
+    // read the store metadata, which includes one dim represenations of some variables,
+    // given a path to a zarr store.
     #[tokio::test]
-    async fn read_raw_chunks() {
-        let file_sys = get_test_data_file_system();
+    async fn read_v2_metadata_w_one_dim_repr() {
+        let file_sys = get_test_v2_data_file_system();
+        let p = Path::parse("lat_lon_example_w_1d_repr.zarr").unwrap();
+
+        let store = ZarrPath::new(Arc::new(file_sys), p);
+        let meta = store.get_zarr_metadata().await.unwrap();
+
+        // check the one dim repr for the lat
+        assert_eq!(meta.get_one_dim_repr_meta("lat").unwrap().0, 0);
+        assert_eq!(meta.get_one_dim_repr_meta("lat").unwrap().1, "one_d_lat");
+        assert_eq!(
+            meta.get_one_dim_repr_meta("lat").unwrap().2,
+            ZarrArrayMetadata::new(
+                2,
+                ZarrDataType::Float(8),
+                ChunkPattern {
+                    separator: ChunkSeparator::Period,
+                    c_prefix: false
+                },
+                None,
+                vec![
+                    ZarrCodec::Bytes(Endianness::Little),
+                    ZarrCodec::BloscCompressor(BloscOptions::new(
+                        CompressorName::Lz4,
+                        5,
+                        ShuffleOptions::ByteShuffle(8),
+                        0,
+                    )),
+                ],
+            )
+        );
+
+        // check the one dim repr for the lon
+        assert_eq!(meta.get_one_dim_repr_meta("lon").unwrap().0, 1);
+        assert_eq!(meta.get_one_dim_repr_meta("lon").unwrap().1, "one_d_lon");
+        assert_eq!(
+            meta.get_one_dim_repr_meta("lon").unwrap().2,
+            ZarrArrayMetadata::new(
+                2,
+                ZarrDataType::Float(8),
+                ChunkPattern {
+                    separator: ChunkSeparator::Period,
+                    c_prefix: false
+                },
+                None,
+                vec![
+                    ZarrCodec::Bytes(Endianness::Little),
+                    ZarrCodec::BloscCompressor(BloscOptions::new(
+                        CompressorName::Lz4,
+                        5,
+                        ShuffleOptions::ByteShuffle(8),
+                        0,
+                    )),
+                ],
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn read_v3_metadata_w_one_dim_repr() {
+        let file_sys = get_test_v3_data_file_system();
+        let p = Path::parse("with_one_d_repr.zarr").unwrap();
+
+        let store = ZarrPath::new(Arc::new(file_sys), p);
+        let meta = store.get_zarr_metadata().await.unwrap();
+
+        // check the one dim repr for the lat
+        assert_eq!(meta.get_one_dim_repr_meta("lat").unwrap().0, 0);
+        assert_eq!(meta.get_one_dim_repr_meta("lat").unwrap().1, "one_d_lat");
+        assert_eq!(
+            meta.get_one_dim_repr_meta("lat").unwrap().2,
+            ZarrArrayMetadata::new(
+                3,
+                ZarrDataType::Float(8),
+                ChunkPattern {
+                    separator: ChunkSeparator::Period,
+                    c_prefix: false
+                },
+                None,
+                vec![ZarrCodec::Bytes(Endianness::Little)],
+            )
+        );
+
+        // check the one dim repr for the lon
+        assert_eq!(meta.get_one_dim_repr_meta("lon").unwrap().0, 1);
+        assert_eq!(meta.get_one_dim_repr_meta("lon").unwrap().1, "one_d_lon");
+        assert_eq!(
+            meta.get_one_dim_repr_meta("lon").unwrap().2,
+            ZarrArrayMetadata::new(
+                3,
+                ZarrDataType::Float(8),
+                ChunkPattern {
+                    separator: ChunkSeparator::Period,
+                    c_prefix: false
+                },
+                None,
+                vec![ZarrCodec::Bytes(Endianness::Little)],
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn read_v2_raw_chunks() {
+        let file_sys = get_test_v2_data_file_system();
         let p = Path::parse("raw_bytes_example.zarr").unwrap();
 
         let store = ZarrPath::new(Arc::new(file_sys), p);
