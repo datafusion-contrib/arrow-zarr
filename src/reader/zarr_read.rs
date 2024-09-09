@@ -24,6 +24,8 @@ use crate::reader::metadata::{ChunkPattern, ChunkSeparator};
 use crate::reader::ZarrStoreMetadata;
 use crate::reader::{ZarrError, ZarrResult};
 
+use super::metadata::ZarrArrayMetadata;
+
 /// An in-memory representation of the data contained in one chunk
 /// of one zarr array (a single variable).
 #[derive(Debug, Clone)]
@@ -255,6 +257,7 @@ pub trait ZarrRead {
         cols: &[String],
         real_dims: Vec<usize>,
         patterns: HashMap<String, ChunkPattern>,
+        one_dim_repr: &HashMap<String, (usize, String, ZarrArrayMetadata)>,
     ) -> ZarrResult<ZarrInMemoryChunk>;
 }
 
@@ -312,15 +315,35 @@ impl ZarrRead for PathBuf {
         cols: &[String],
         real_dims: Vec<usize>,
         patterns: HashMap<String, ChunkPattern>,
+        one_dim_repr: &HashMap<String, (usize, String, ZarrArrayMetadata)>,
     ) -> ZarrResult<ZarrInMemoryChunk> {
         let mut chunk = ZarrInMemoryChunk::new(real_dims);
         for var in cols {
-            let s: Vec<String> = position.iter().map(|i| i.to_string()).collect();
-            let pattern = patterns
-                .get(var.as_str())
-                .ok_or(ZarrError::InvalidMetadata(
-                    "Could not find separator for column".to_string(),
-                ))?;
+            // this is admittedly a bit hard to follow without context. here we check to see if
+            // "var" has a one dimentional representation that we should use instead of the larger
+            // dimensional data. if there is, the file name will be different, and the "index" of
+            // the file will be one dimensional, e.g. if the real variable is [x, y], and the one
+            // dimensional representation is along the second dimension, then we would look for
+            // var.y (or var/y) instead of var.x.y.
+            let real_var_name = var;
+            let (s, var, pattern) = if let Some((pos, repr_name, meta)) = one_dim_repr.get(var) {
+                (
+                    vec![position[*pos].to_string()],
+                    repr_name,
+                    meta.get_chunk_pattern(),
+                )
+            } else {
+                (
+                    position.iter().map(|i| i.to_string()).collect(),
+                    var,
+                    patterns
+                        .get(var.as_str())
+                        .ok_or(ZarrError::InvalidMetadata(
+                            "Could not find separator for column".to_string(),
+                        ))?
+                        .clone(),
+                )
+            };
 
             let chunk_file = match pattern {
                 ChunkPattern {
@@ -345,7 +368,7 @@ impl ZarrRead for PathBuf {
                 return Err(ZarrError::MissingChunk(position.to_vec()));
             }
             let data = read(path)?;
-            chunk.add_array(var.to_string(), data);
+            chunk.add_array(real_var_name.to_string(), data);
         }
 
         Ok(chunk)
@@ -406,10 +429,13 @@ mod zarr_read_tests {
         let meta = p.get_zarr_metadata().unwrap();
 
         // check the one dim repr for the lat
-        assert_eq!(meta.get_one_dim_repr_meta("lat").unwrap().0, 0);
-        assert_eq!(meta.get_one_dim_repr_meta("lat").unwrap().1, "one_d_lat");
+        assert_eq!(meta.get_one_dim_repr_meta().get("lat").unwrap().0, 1);
         assert_eq!(
-            meta.get_one_dim_repr_meta("lat").unwrap().2,
+            meta.get_one_dim_repr_meta().get("lat").unwrap().1,
+            "one_d_lat"
+        );
+        assert_eq!(
+            meta.get_one_dim_repr_meta().get("lat").unwrap().2,
             ZarrArrayMetadata::new(
                 2,
                 ZarrDataType::Float(8),
@@ -431,10 +457,13 @@ mod zarr_read_tests {
         );
 
         // check the one dim repr for the lon
-        assert_eq!(meta.get_one_dim_repr_meta("lon").unwrap().0, 1);
-        assert_eq!(meta.get_one_dim_repr_meta("lon").unwrap().1, "one_d_lon");
+        assert_eq!(meta.get_one_dim_repr_meta().get("lon").unwrap().0, 0);
         assert_eq!(
-            meta.get_one_dim_repr_meta("lon").unwrap().2,
+            meta.get_one_dim_repr_meta().get("lon").unwrap().1,
+            "one_d_lon"
+        );
+        assert_eq!(
+            meta.get_one_dim_repr_meta().get("lon").unwrap().2,
             ZarrArrayMetadata::new(
                 2,
                 ZarrDataType::Float(8),
@@ -462,10 +491,13 @@ mod zarr_read_tests {
         let meta = p.get_zarr_metadata().unwrap();
 
         // check the one dim repr for the lat
-        assert_eq!(meta.get_one_dim_repr_meta("lat").unwrap().0, 0);
-        assert_eq!(meta.get_one_dim_repr_meta("lat").unwrap().1, "one_d_lat");
+        assert_eq!(meta.get_one_dim_repr_meta().get("lat").unwrap().0, 0);
         assert_eq!(
-            meta.get_one_dim_repr_meta("lat").unwrap().2,
+            meta.get_one_dim_repr_meta().get("lat").unwrap().1,
+            "one_d_lat"
+        );
+        assert_eq!(
+            meta.get_one_dim_repr_meta().get("lat").unwrap().2,
             ZarrArrayMetadata::new(
                 3,
                 ZarrDataType::Float(8),
@@ -479,10 +511,13 @@ mod zarr_read_tests {
         );
 
         // check the one dim repr for the lon
-        assert_eq!(meta.get_one_dim_repr_meta("lon").unwrap().0, 1);
-        assert_eq!(meta.get_one_dim_repr_meta("lon").unwrap().1, "one_d_lon");
+        assert_eq!(meta.get_one_dim_repr_meta().get("lon").unwrap().0, 1);
         assert_eq!(
-            meta.get_one_dim_repr_meta("lon").unwrap().2,
+            meta.get_one_dim_repr_meta().get("lon").unwrap().1,
+            "one_d_lon"
+        );
+        assert_eq!(
+            meta.get_one_dim_repr_meta().get("lon").unwrap().2,
             ZarrArrayMetadata::new(
                 3,
                 ZarrDataType::Float(8),
@@ -511,6 +546,7 @@ mod zarr_read_tests {
                 meta.get_columns(),
                 meta.get_real_dims(&pos),
                 meta.get_chunk_patterns(),
+                &HashMap::new(),
             )
             .unwrap();
         assert_eq!(
@@ -531,6 +567,7 @@ mod zarr_read_tests {
                 &cols,
                 meta.get_real_dims(&pos),
                 meta.get_chunk_patterns(),
+                &HashMap::new(),
             )
             .unwrap();
         assert_eq!(
@@ -547,6 +584,7 @@ mod zarr_read_tests {
                 &cols,
                 meta.get_real_dims(&pos),
                 meta.get_chunk_patterns(),
+                &HashMap::new(),
             )
             .unwrap();
         assert_eq!(

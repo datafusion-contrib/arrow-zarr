@@ -286,6 +286,43 @@ fn decode_transpose<T: Clone>(
         .collect::<Vec<T>>())
 }
 
+// function to project 1D data to a larger dimensionality. this is useful for when a 1D
+// representation of some 2D or 3D data is present (when the full data is just the 1D
+// data projected along one or 2 extra dimentions).
+fn project_one_d_repr<T: Clone>(
+    input: Vec<T>,
+    real_chunk_dims: &[usize],
+    dim_position: usize,
+) -> ZarrResult<Vec<T>> {
+    let err = "invalid parameters while processing one dimenesional representation";
+    let l = input.len();
+    let n_dims = real_chunk_dims.len();
+    if dim_position >= n_dims || l != real_chunk_dims[dim_position] {
+        return Err(throw_invalid_meta(err));
+    }
+
+    match (n_dims, dim_position) {
+        (2, 0) => Ok(input
+            .into_iter()
+            .flat_map(|v| std::iter::repeat(v).take(real_chunk_dims[1]))
+            .collect()),
+        (2, 1) => Ok(vec![&input[..]; real_chunk_dims[0]].concat()),
+        (3, 0) => Ok(input
+            .into_iter()
+            .flat_map(|v| std::iter::repeat(v).take(real_chunk_dims[1] * real_chunk_dims[2]))
+            .collect()),
+        (3, 1) => {
+            let v: Vec<_> = input
+                .into_iter()
+                .flat_map(|v| std::iter::repeat(v).take(real_chunk_dims[2]))
+                .collect();
+            Ok(vec![&v[..]; real_chunk_dims[0]].concat())
+        }
+        (3, 2) => Ok(vec![&input[..]; real_chunk_dims[0] * real_chunk_dims[1]].concat()),
+        _ => Err(throw_invalid_meta(err)),
+    }
+}
+
 // function to only keep the data at the specified indices from a vector.
 // it function only works if the indices to keep are ordered.
 fn keep_indices<T: Clone + Default>(v: &mut Vec<T>, indices: &[usize]) {
@@ -592,7 +629,7 @@ macro_rules! create_decode_function {
                     let inner_data = $func_name(
                         bytes[*o..o + n].to_vec(),
                         &sharding_params.chunk_shape,
-                        &get_inner_chunk_real_dims(&sharding_params, &real_dims, pos), // TODO: fix this to real dims
+                        &get_inner_chunk_real_dims(&sharding_params, &real_dims, pos),
                         &sharding_params.codecs,
                         None,
                     )?;
@@ -715,10 +752,14 @@ pub(crate) fn apply_codecs(
     data_type: &ZarrDataType,
     codecs: &Vec<ZarrCodec>,
     sharding_params: Option<ShardingOptions>,
+    one_d_repr_params: Option<(usize, &Vec<usize>)>,
 ) -> ZarrResult<(ArrayRef, FieldRef)> {
     macro_rules! return_array {
         ($func_name: tt, $data_t: expr, $array_t: ty) => {
-            let data = $func_name(raw_data, &chunk_dims, &real_dims, &codecs, sharding_params)?;
+            let mut data = $func_name(raw_data, &chunk_dims, &real_dims, &codecs, sharding_params)?;
+            if let Some((pos, proj_dims)) = one_d_repr_params {
+                data = project_one_d_repr(data, &proj_dims[..], pos)?;
+            }
             let field = Field::new(col_name, $data_t, false);
             let arr: $array_t = data.into();
             return Ok((Arc::new(arr), Arc::new(field)))
@@ -864,6 +905,7 @@ mod zarr_codecs_tests {
             &data_type,
             &codecs,
             sharding_params,
+            None,
         )
         .unwrap();
 
@@ -914,6 +956,7 @@ mod zarr_codecs_tests {
             &data_type,
             &codecs,
             sharding_params,
+            None,
         )
         .unwrap();
 
@@ -965,6 +1008,7 @@ mod zarr_codecs_tests {
             &data_type,
             &codecs,
             sharding_params,
+            None,
         )
         .unwrap();
 
@@ -1023,5 +1067,37 @@ mod zarr_codecs_tests {
         }
 
         Ok(())
+    }
+
+    #[test]
+    fn test_project_one_d_repr() {
+        // (1, n) 1D projected to 2D
+        let v = project_one_d_repr(vec![1, 2, 3], &[4, 3], 1).unwrap();
+        assert_eq!(v, vec![1, 2, 3, 1, 2, 3, 1, 2, 3, 1, 2, 3]);
+
+        //(n, 1) 1D projected to 2D
+        let v = project_one_d_repr(vec![1, 2, 3, 4], &[4, 3], 0).unwrap();
+        assert_eq!(v, vec![1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4]);
+
+        // // (1, 1, n) 1D projected t0 3D
+        let v = project_one_d_repr(vec![1, 2, 3], &[2, 4, 3], 2).unwrap();
+        assert_eq!(
+            v,
+            vec![1, 2, 3, 1, 2, 3, 1, 2, 3, 1, 2, 3, 1, 2, 3, 1, 2, 3, 1, 2, 3, 1, 2, 3]
+        );
+
+        // // (1, n, 1) 1D projected t0 3D
+        let v = project_one_d_repr(vec![1, 2, 3, 4], &[2, 4, 3], 1).unwrap();
+        assert_eq!(
+            v,
+            vec![1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4, 1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4]
+        );
+
+        // // (n, 1, 1) 1D projected t0 3D
+        let v = project_one_d_repr(vec![1, 2], &[2, 4, 3], 0).unwrap();
+        assert_eq!(
+            v,
+            vec![1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2]
+        );
     }
 }

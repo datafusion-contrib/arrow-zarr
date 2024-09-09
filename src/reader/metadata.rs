@@ -413,7 +413,7 @@ impl ZarrStoreMetadata {
         }
 
         // the index of the last chunk in each dimension
-        if self.last_chunk_idx.is_none() {
+        if self.last_chunk_idx.is_none() && one_dim_repr.is_none() {
             self.last_chunk_idx = Some(
                 chunks
                     .iter()
@@ -849,14 +849,8 @@ impl ZarrStoreMetadata {
 
     pub(crate) fn get_one_dim_repr_meta(
         &self,
-        column: &str,
-    ) -> ZarrResult<&(usize, String, ZarrArrayMetadata)> {
-        self.one_dim_representations
-            .get(column)
-            .ok_or(ZarrError::InvalidMetadata(format!(
-                "Cannot find variable {} in one dimensional representations",
-                column
-            )))
+    ) -> &HashMap<String, (usize, String, ZarrArrayMetadata)> {
+        &self.one_dim_representations
     }
 
     // return the real dimensions of a chhunk, given its position, taking into

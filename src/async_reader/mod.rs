@@ -161,6 +161,7 @@ where
                 &cols,
                 self.meta.get_real_dims(pos),
                 self.meta.get_chunk_patterns(),
+                self.meta.get_one_dim_repr_meta(),
             )
             .await;
 
@@ -757,39 +758,8 @@ mod zarr_async_reader_tests {
         assert!(matched);
     }
 
-    #[tokio::test]
-    async fn projection_tests() {
-        let zp = get_v2_test_data_path("compression_example.zarr".to_string());
-        let proj = ZarrProjection::keep(vec!["bool_data".to_string(), "int_data".to_string()]);
-        let stream_builder = ZarrRecordBatchStreamBuilder::new(zp).with_projection(proj);
-
-        let stream = stream_builder.build().await.unwrap();
-        let records: Vec<_> = stream.try_collect().await.unwrap();
-
-        let target_types = HashMap::from([
-            ("bool_data".to_string(), DataType::Boolean),
-            ("int_data".to_string(), DataType::Int64),
-        ]);
-
-        // center chunk
-        let rec = &records[4];
-        validate_names_and_types(&target_types, rec);
-        validate_bool_column(
-            "bool_data",
-            rec,
-            &[false, true, false, false, true, false, false, true, false],
-        );
-        validate_primitive_column::<Int64Type, i64>(
-            "int_data",
-            rec,
-            &[-4, -3, -2, 4, 5, 6, 12, 13, 14],
-        );
-    }
-
-    #[tokio::test]
-    async fn filters_tests() {
-        // set the filters to select part of the raster, based on lat and
-        // lon coordinates.
+    // create a test filter
+    fn create_filter() -> ZarrChunkFilter {
         let mut filters: Vec<Box<dyn ZarrArrowPredicate>> = Vec::new();
         let f = ZarrArrowPredicateFn::new(
             ZarrProjection::keep(vec!["lat".to_string()]),
@@ -822,9 +792,42 @@ mod zarr_async_reader_tests {
         );
         filters.push(Box::new(f));
 
+        ZarrChunkFilter::new(filters)
+    }
+
+    #[tokio::test]
+    async fn projection_tests() {
+        let zp = get_v2_test_data_path("compression_example.zarr".to_string());
+        let proj = ZarrProjection::keep(vec!["bool_data".to_string(), "int_data".to_string()]);
+        let stream_builder = ZarrRecordBatchStreamBuilder::new(zp).with_projection(proj);
+
+        let stream = stream_builder.build().await.unwrap();
+        let records: Vec<_> = stream.try_collect().await.unwrap();
+
+        let target_types = HashMap::from([
+            ("bool_data".to_string(), DataType::Boolean),
+            ("int_data".to_string(), DataType::Int64),
+        ]);
+
+        // center chunk
+        let rec = &records[4];
+        validate_names_and_types(&target_types, rec);
+        validate_bool_column(
+            "bool_data",
+            rec,
+            &[false, true, false, false, true, false, false, true, false],
+        );
+        validate_primitive_column::<Int64Type, i64>(
+            "int_data",
+            rec,
+            &[-4, -3, -2, 4, 5, 6, 12, 13, 14],
+        );
+    }
+
+    #[tokio::test]
+    async fn filters_tests() {
         let zp = get_v2_test_data_path("lat_lon_example.zarr".to_string());
-        let stream_builder =
-            ZarrRecordBatchStreamBuilder::new(zp).with_filter(ZarrChunkFilter::new(filters));
+        let stream_builder = ZarrRecordBatchStreamBuilder::new(zp).with_filter(create_filter());
         let stream = stream_builder.build().await.unwrap();
         let records: Vec<_> = stream.try_collect().await.unwrap();
 
@@ -865,6 +868,26 @@ mod zarr_async_reader_tests {
                 1029.0, 1030.0, 1038.0, 1039.0, 1040.0, 1041.0,
             ],
         );
+    }
+
+    #[tokio::test]
+    async fn one_dim_repr_tests() {
+        let zp = get_v2_test_data_path("lat_lon_example_w_1d_repr.zarr".to_string());
+        let stream_builder = ZarrRecordBatchStreamBuilder::new(zp).with_filter(create_filter());
+
+        let stream = stream_builder.build().await.unwrap();
+        let records_from_one_d_repr: Vec<_> = stream.try_collect().await.unwrap();
+
+        let zp = get_v2_test_data_path("lat_lon_example.zarr".to_string());
+        let stream_builder = ZarrRecordBatchStreamBuilder::new(zp).with_filter(create_filter());
+
+        let stream = stream_builder.build().await.unwrap();
+        let records: Vec<_> = stream.try_collect().await.unwrap();
+
+        assert_eq!(records_from_one_d_repr.len(), records.len());
+        for (rec, rec_from_one_d_repr) in records.iter().zip(records_from_one_d_repr.iter()) {
+            assert_eq!(rec, rec_from_one_d_repr);
+        }
     }
 
     #[tokio::test]
