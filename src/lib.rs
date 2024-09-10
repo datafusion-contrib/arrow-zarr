@@ -26,7 +26,6 @@ mod tests {
     use object_store::local::LocalFileSystem;
     use std::path::PathBuf;
 
-    #[cfg(feature = "datafusion")]
     pub(crate) fn get_test_v2_data_path(zarr_store: String) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("test-data/data/zarr/v2_data")
