@@ -92,9 +92,11 @@ use async_trait::async_trait;
 use futures::stream::{BoxStream, Stream};
 use futures::{ready, FutureExt};
 use futures_util::future::BoxFuture;
+use itertools::Itertools;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
+use crate::async_reader::io_uring_utils::WorkerPool;
 use crate::reader::ZarrChunkFilter;
 use crate::reader::{unwrap_or_return, ZarrIterator, ZarrRecordBatchReader};
 use crate::reader::{ZarrError, ZarrResult};
@@ -102,7 +104,11 @@ use crate::reader::{ZarrInMemoryChunk, ZarrProjection, ZarrStoreMetadata};
 
 pub use crate::async_reader::zarr_read_async::{ZarrPath, ZarrReadAsync};
 
+pub mod io_uring_utils;
 pub mod zarr_read_async;
+
+const _IO_URING_SIZE: u32 = 64;
+const _IO_URING_N_WORKERS: usize = 1;
 
 /// A zarr store that holds an async reader for all the zarr data.
 pub struct ZarrStoreAsync<T: for<'a> ZarrReadAsync<'a>> {
@@ -111,6 +117,9 @@ pub struct ZarrStoreAsync<T: for<'a> ZarrReadAsync<'a>> {
     zarr_reader: T,
     projection: ZarrProjection,
     curr_chunk: usize,
+    io_uring_worker_pool: WorkerPool,
+    n_pre_read_chunks_left: Option<usize>,
+    pre_read_chunks: Vec<Option<ZarrResult<ZarrInMemoryChunk>>>,
 }
 
 impl<T: for<'a> ZarrReadAsync<'a>> ZarrStoreAsync<T> {
@@ -126,7 +135,21 @@ impl<T: for<'a> ZarrReadAsync<'a>> ZarrStoreAsync<T> {
             zarr_reader,
             projection,
             curr_chunk: 0,
+            io_uring_worker_pool: WorkerPool::new(_IO_URING_SIZE, _IO_URING_N_WORKERS)?,
+            n_pre_read_chunks_left: None,
+            pre_read_chunks: Vec::new(),
         })
+    }
+
+    // Not used for now, but could enable it later. This would basically
+    // be to read multiple chunks at once, cache them, and then return
+    // one at a time as an iterator.
+    fn _with_pre_reads(mut self, n_pre_reads: usize) -> Self {
+        self.n_pre_read_chunks_left = Some(0);
+        for _ in 0..n_pre_reads {
+            self.pre_read_chunks.push(None);
+        }
+        self
     }
 }
 
@@ -150,19 +173,65 @@ where
             return None;
         }
 
-        let pos = &self.chunk_positions[self.curr_chunk];
         let cols = self.projection.apply_selection(self.meta.get_columns());
         let cols = unwrap_or_return!(cols);
 
-        let chnk = self
-            .zarr_reader
-            .get_zarr_chunk(
-                pos,
-                &cols,
-                self.meta.get_real_dims(pos),
-                self.meta.get_chunk_patterns(),
-            )
-            .await;
+        if let Some(n) = self.n_pre_read_chunks_left {
+            if n == 0 {
+                let final_idx = std::cmp::min(
+                    self.curr_chunk + self.pre_read_chunks.len(),
+                    self.chunk_positions.len(),
+                );
+                let positions = self.chunk_positions[self.curr_chunk..final_idx].to_vec();
+                let real_dims = positions
+                    .iter()
+                    .map(|pos| self.meta.get_real_dims(pos))
+                    .collect_vec();
+                let chunks = self
+                    .zarr_reader
+                    .get_zarr_chunks(
+                        positions,
+                        &cols,
+                        real_dims,
+                        self.meta.get_chunk_patterns(),
+                        &mut self.io_uring_worker_pool,
+                    )
+                    .await;
+                if let Ok(chunks) = chunks {
+                    self.pre_read_chunks = chunks.into_iter().map(|c| Some(Ok(c))).collect();
+                    self.n_pre_read_chunks_left = Some(final_idx - self.curr_chunk);
+                } else {
+                    return Some(Err(ZarrError::Read(
+                        "could not read batch of chunks".to_string(),
+                    )));
+                }
+            }
+        }
+
+        let chnk = match self.n_pre_read_chunks_left {
+            Some(n) => {
+                if n == 0 {
+                    panic!("unexpected condition in async reader with pre reads");
+                }
+                let pre_read_idx = self.pre_read_chunks.len() - n;
+                self.n_pre_read_chunks_left = Some(n - 1);
+                self.pre_read_chunks[pre_read_idx]
+                    .take()
+                    .expect("unexpected condition in async reader with pre reads")
+            }
+            None => {
+                let pos = &self.chunk_positions[self.curr_chunk];
+                self.zarr_reader
+                    .get_zarr_chunk(
+                        pos,
+                        &cols,
+                        self.meta.get_real_dims(pos),
+                        self.meta.get_chunk_patterns(),
+                        &mut self.io_uring_worker_pool,
+                    )
+                    .await
+            }
+        };
 
         self.curr_chunk += 1;
         Some(chnk)

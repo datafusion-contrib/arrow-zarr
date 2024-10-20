@@ -247,13 +247,9 @@ pub(crate) fn build_row_filter(
     let candidates: Vec<ZarrFilterCandidate> = predicates
         .into_iter()
         .flat_map(|expr| {
-            if let Ok(candidate) =
-                ZarrFilterCandidateBuilder::new(expr.clone(), file_schema).build()
-            {
-                candidate
-            } else {
-                None
-            }
+            ZarrFilterCandidateBuilder::new(expr.clone(), file_schema)
+                .build()
+                .unwrap_or_default()
         })
         .collect();
 
