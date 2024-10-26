@@ -18,8 +18,11 @@
 use arrow_schema::ArrowError;
 #[cfg(feature = "datafusion")]
 use datafusion::error::DataFusionError;
+use io_uring::squeue::PushError;
 use object_store::Error as ObjStoreError;
+use rayon::ThreadPoolBuildError;
 use std::error::Error;
+use std::ffi::NulError;
 use std::io;
 use std::result::Result;
 use std::str::Utf8Error;
@@ -31,11 +34,15 @@ pub enum ZarrError {
     InvalidPredicate(String),
     MissingChunk(Vec<usize>),
     MissingArray(String),
+    Read(String),
     InvalidChunkRange(usize, usize, usize),
     Io(Box<dyn Error + Send + Sync>),
     Arrow(Box<dyn Error + Send + Sync>),
     DataFusion(Box<dyn Error + Send + Sync>),
     ObjectStore(Box<dyn Error + Send + Sync>),
+    IoUring(Box<dyn Error + Send + Sync>),
+    Rayon(Box<dyn Error + Send + Sync>),
+    Ffi(Box<dyn Error + Send + Sync>),
 }
 
 impl std::fmt::Display for ZarrError {
@@ -49,6 +56,7 @@ impl std::fmt::Display for ZarrError {
                 write!(fmt, "Missing zarr chunk file: {s}")
             }
             ZarrError::MissingArray(arr_name) => write!(fmt, "Missing zarr chunk file: {arr_name}"),
+            ZarrError::Read(msg) => write!(fmt, "error while reading files: {msg}"),
             ZarrError::InvalidChunkRange(start, end, l) => {
                 write!(
                     fmt,
@@ -59,6 +67,9 @@ impl std::fmt::Display for ZarrError {
             ZarrError::Arrow(e) => write!(fmt, "Arrow error: {e}"),
             ZarrError::ObjectStore(e) => write!(fmt, "ObjectStore error: {e}"),
             ZarrError::DataFusion(e) => write!(fmt, "DataFusion error: {e}"),
+            ZarrError::IoUring(e) => write!(fmt, "IoUring error: {e}"),
+            ZarrError::Rayon(e) => write!(fmt, "Rayon error: {e}"),
+            ZarrError::Ffi(e) => write!(fmt, "Ffi error: {e}"),
         }
     }
 }
@@ -83,9 +94,27 @@ impl From<ObjStoreError> for ZarrError {
     }
 }
 
+impl From<PushError> for ZarrError {
+    fn from(e: PushError) -> ZarrError {
+        ZarrError::IoUring(Box::new(e))
+    }
+}
+
 impl From<Utf8Error> for ZarrError {
     fn from(e: Utf8Error) -> ZarrError {
         ZarrError::InvalidMetadata(e.to_string())
+    }
+}
+
+impl From<ThreadPoolBuildError> for ZarrError {
+    fn from(e: ThreadPoolBuildError) -> ZarrError {
+        ZarrError::Rayon(Box::new(e))
+    }
+}
+
+impl From<NulError> for ZarrError {
+    fn from(e: NulError) -> ZarrError {
+        ZarrError::Ffi(Box::new(e))
     }
 }
 

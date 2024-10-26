@@ -19,12 +19,14 @@ use async_trait::async_trait;
 use futures_util::{pin_mut, StreamExt};
 use object_store::{path::Path, GetResultPayload, ObjectStore};
 use std::collections::HashMap;
-use std::fs::{read, read_to_string};
+use std::fs::read_to_string;
 use std::sync::Arc;
 
+use crate::async_reader::io_uring_utils::WorkerPool;
 use crate::reader::metadata::{ChunkPattern, ChunkSeparator};
 use crate::reader::{ZarrError, ZarrResult};
 use crate::reader::{ZarrInMemoryChunk, ZarrStoreMetadata};
+use itertools::{enumerate, Itertools};
 
 /// A trait that exposes methods to get data from a zarr store asynchronously.
 #[async_trait]
@@ -41,7 +43,18 @@ pub trait ZarrReadAsync<'a> {
         cols: &'a [String],
         real_dims: Vec<usize>,
         patterns: HashMap<String, ChunkPattern>,
+        io_uring_worker_pool: &mut WorkerPool,
     ) -> ZarrResult<ZarrInMemoryChunk>;
+
+    /// Method to retrive the data in multiple zarr chunks asynchronously.
+    async fn get_zarr_chunks(
+        &self,
+        positions: Vec<Vec<usize>>,
+        cols: &'a [String],
+        real_dims: Vec<Vec<usize>>,
+        patterns: HashMap<String, ChunkPattern>,
+        io_uring_worker_pool: &mut WorkerPool,
+    ) -> ZarrResult<Vec<ZarrInMemoryChunk>>;
 }
 
 /// A wrapper around a pointer to an [`ObjectStore`] an a path that points
@@ -55,6 +68,41 @@ pub struct ZarrPath {
 impl ZarrPath {
     pub fn new(store: Arc<dyn ObjectStore>, location: Path) -> Self {
         Self { store, location }
+    }
+
+    fn get_chunk_path(&self, var: &str, pos: &[usize], pattern: &ChunkPattern) -> Path {
+        let s: Vec<String> = pos.iter().map(|i| i.to_string()).collect();
+        match pattern {
+            ChunkPattern {
+                separator: sep,
+                c_prefix: false,
+            } => match sep {
+                ChunkSeparator::Period => self.location.child(var.to_string()).child(s.join(".")),
+                ChunkSeparator::Slash => {
+                    let mut path = self.location.child(var.to_string());
+                    for idx in s {
+                        path = path.child(idx);
+                    }
+                    path
+                }
+            },
+            ChunkPattern {
+                separator: sep,
+                c_prefix: true,
+            } => match sep {
+                ChunkSeparator::Period => self
+                    .location
+                    .child(var.to_string())
+                    .child("c.".to_string() + &s.join(".")),
+                ChunkSeparator::Slash => {
+                    let mut path = self.location.child(var.to_string()).child("c");
+                    for idx in s {
+                        path = path.child(idx);
+                    }
+                    path
+                }
+            },
+        }
     }
 }
 
@@ -100,58 +148,104 @@ impl<'a> ZarrReadAsync<'a> for ZarrPath {
         cols: &'a [String],
         real_dims: Vec<usize>,
         patterns: HashMap<String, ChunkPattern>,
+        io_uring_worker_pool: &mut WorkerPool,
     ) -> ZarrResult<ZarrInMemoryChunk> {
+        let mut io_uring_flag = false;
         let mut chunk = ZarrInMemoryChunk::new(real_dims);
         for var in cols {
-            let s: Vec<String> = position.iter().map(|i| i.to_string()).collect();
             let pattern = patterns
                 .get(var.as_str())
                 .ok_or(ZarrError::InvalidMetadata(
                     "Could not find separator for column".to_string(),
                 ))?;
 
-            let p = match pattern {
-                ChunkPattern {
-                    separator: sep,
-                    c_prefix: false,
-                } => match sep {
-                    ChunkSeparator::Period => {
-                        self.location.child(var.to_string()).child(s.join("."))
-                    }
-                    ChunkSeparator::Slash => {
-                        let mut path = self.location.child(var.to_string());
-                        for idx in s {
-                            path = path.child(idx);
-                        }
-                        path
-                    }
-                },
-                ChunkPattern {
-                    separator: sep,
-                    c_prefix: true,
-                } => match sep {
-                    ChunkSeparator::Period => self
-                        .location
-                        .child(var.to_string())
-                        .child("c.".to_string() + &s.join(".")),
-                    ChunkSeparator::Slash => {
-                        let mut path = self.location.child(var.to_string()).child("c");
-                        for idx in s {
-                            path = path.child(idx);
-                        }
-                        path
-                    }
-                },
-            };
+            let p = self.get_chunk_path(var, position, pattern);
             let get_res = self.store.get(&p).await?;
-            let data = match get_res.payload {
-                GetResultPayload::File(_, p) => read(p)?,
-                GetResultPayload::Stream(_) => get_res.bytes().await?.to_vec(),
+            match get_res.payload {
+                GetResultPayload::File(_, p) => {
+                    io_uring_flag = true;
+                    let filename_str = p.to_str().ok_or(ZarrError::Read(
+                        "can't convert path to filename str".to_string(),
+                    ))?;
+                    io_uring_worker_pool.add_file(filename_str.to_string())?;
+                }
+                GetResultPayload::Stream(_) => {
+                    let data = get_res.bytes().await?.to_vec();
+                    chunk.add_array(var.to_string(), data);
+                }
             };
-            chunk.add_array(var.to_string(), data);
+        }
+
+        if io_uring_flag {
+            io_uring_worker_pool.run()?;
+            let data_buffers = io_uring_worker_pool.get_data();
+            for (var, data) in cols.iter().zip(data_buffers.into_iter()) {
+                chunk.add_array(var.to_string(), data);
+            }
         }
 
         Ok(chunk)
+    }
+
+    async fn get_zarr_chunks(
+        &self,
+        positions: Vec<Vec<usize>>,
+        cols: &'a [String],
+        real_dims: Vec<Vec<usize>>,
+        patterns: HashMap<String, ChunkPattern>,
+        io_uring_worker_pool: &mut WorkerPool,
+    ) -> ZarrResult<Vec<ZarrInMemoryChunk>> {
+        if positions.len() != real_dims.len() {
+            return Err(ZarrError::Read(
+                "arguments length mismatch in get_zarr_chunks".to_string(),
+            ));
+        }
+
+        let mut io_uring_flag = false;
+        let mut chunks = real_dims
+            .into_iter()
+            .map(ZarrInMemoryChunk::new)
+            .collect_vec();
+        for var in cols {
+            let pattern = patterns
+                .get(var.as_str())
+                .ok_or(ZarrError::InvalidMetadata(
+                    "Could not find separator for column".to_string(),
+                ))?;
+            let paths = positions
+                .iter()
+                .map(|pos| self.get_chunk_path(var, pos, pattern))
+                .collect_vec();
+            for (p, chunk) in paths.iter().zip(chunks.iter_mut()) {
+                let get_res = self.store.get(p).await?;
+                match get_res.payload {
+                    GetResultPayload::File(_, p) => {
+                        io_uring_flag = true;
+                        let filename_str = p.to_str().ok_or(ZarrError::Read(
+                            "can't convert path to filename str".to_string(),
+                        ))?;
+                        io_uring_worker_pool.add_file(filename_str.to_string())?;
+                    }
+                    GetResultPayload::Stream(_) => {
+                        let data = get_res.bytes().await?.to_vec();
+                        chunk.add_array(var.to_string(), data);
+                    }
+                };
+            }
+        }
+
+        if io_uring_flag {
+            io_uring_worker_pool.run()?;
+            let data_buffers = io_uring_worker_pool.get_data();
+            let data_buffers = data_buffers.chunks(positions.len());
+            for (var, chunks_for_that_var) in cols.iter().zip(data_buffers.into_iter()) {
+                for (idx, data) in enumerate(chunks_for_that_var.iter()) {
+                    chunks[idx].add_array(var.to_string(), data.to_vec());
+                }
+            }
+        }
+
+        Ok(chunks)
     }
 }
 
@@ -215,6 +309,7 @@ mod zarr_read_async_tests {
     async fn read_raw_chunks() {
         let file_sys = get_test_data_file_system();
         let p = Path::parse("raw_bytes_example.zarr").unwrap();
+        let mut io_uring_worker_pool = WorkerPool::new(32, 2).unwrap();
 
         let store = ZarrPath::new(Arc::new(file_sys), p);
         let meta = store.get_zarr_metadata().await.unwrap();
@@ -227,6 +322,7 @@ mod zarr_read_async_tests {
                 meta.get_columns(),
                 meta.get_real_dims(&pos),
                 meta.get_chunk_patterns(),
+                &mut io_uring_worker_pool,
             )
             .await
             .unwrap();
@@ -248,6 +344,7 @@ mod zarr_read_async_tests {
                 &cols,
                 meta.get_real_dims(&pos),
                 meta.get_chunk_patterns(),
+                &mut io_uring_worker_pool,
             )
             .await
             .unwrap();
@@ -265,6 +362,7 @@ mod zarr_read_async_tests {
                 &cols,
                 meta.get_real_dims(&pos),
                 meta.get_chunk_patterns(),
+                &mut io_uring_worker_pool,
             )
             .await
             .unwrap();

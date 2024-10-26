@@ -15,10 +15,11 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use arrow_zarr::async_reader::{ZarrPath, ZarrRecordBatchStreamBuilderNonBlocking};
+use arrow_zarr::async_reader::{ZarrPath, ZarrRecordBatchStreamBuilder};
 use futures::TryStreamExt;
 use object_store::{local::LocalFileSystem, path::Path};
 use std::path::PathBuf;
+use std::process::Command;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -32,14 +33,24 @@ fn get_v2_test_data_path(zarr_store: String) -> ZarrPath {
     )
 }
 
+fn clear_data_path_cache() {
+    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test-data/data/zarr/v2_data");
+
+    let _ = Command::new("vmtouch")
+        .arg("-e")
+        .arg(p)
+        .output()
+        .expect("vmtouch failed to start");
+}
+
 #[tokio::main]
 async fn main() {
+    clear_data_path_cache();
     let zp = get_v2_test_data_path("lat_lon_example.zarr".to_string());
-    let stream_builder = ZarrRecordBatchStreamBuilderNonBlocking::new(zp);
-
+    let stream_builder = ZarrRecordBatchStreamBuilder::new(zp);
     let stream = stream_builder.build().await.unwrap();
+
     let now = Instant::now();
     let _: Vec<_> = stream.try_collect().await.unwrap();
-
     println!("{:?}", now.elapsed());
 }
