@@ -153,6 +153,33 @@ pub struct ChunkPattern {
     pub(crate) c_prefix: bool,
 }
 
+// Struct for params to broadcast a chunk to higher dimensions
+#[derive(Debug, PartialEq, Clone)]
+pub struct BroadcastParams {
+    pub(crate) shape: Vec<usize>,
+    pub(crate) chunks: Vec<usize>,
+    pub(crate) axis: usize,
+}
+
+impl BroadcastParams {
+    fn new(shape: Vec<usize>, chunks: Vec<usize>, axis: usize) -> ZarrResult<Self> {
+        let err = "invalid broadcast params".to_string();
+        if shape.len() != chunks.len() {
+            return Err(ZarrError::InvalidMetadata(err));
+        }
+
+        if axis >= shape.len() {
+            return Err(ZarrError::InvalidMetadata(err));
+        }
+
+        Ok(Self {
+            shape,
+            chunks,
+            axis,
+        })
+    }
+}
+
 /// The metadata for a single zarr array, which holds various parameters
 /// for the data stored in the array.
 #[derive(Debug, PartialEq, Clone)]
@@ -162,6 +189,7 @@ pub struct ZarrArrayMetadata {
     chunk_pattern: ChunkPattern,
     sharding_options: Option<ShardingOptions>,
     codecs: Vec<ZarrCodec>,
+    one_d_array_params: Option<(usize, usize)>,
 }
 
 impl ZarrArrayMetadata {
@@ -182,7 +210,13 @@ impl ZarrArrayMetadata {
             chunk_pattern,
             sharding_options,
             codecs,
+            one_d_array_params: None,
         }
+    }
+
+    pub(crate) fn make_broadcastable(mut self, params: (usize, usize)) -> Self {
+        self.one_d_array_params = Some(params);
+        self
     }
 
     pub(crate) fn get_codecs(&self) -> &Vec<ZarrCodec> {
@@ -195,6 +229,10 @@ impl ZarrArrayMetadata {
 
     pub(crate) fn get_chunk_pattern(&self) -> ChunkPattern {
         self.chunk_pattern.clone()
+    }
+
+    pub(crate) fn get_ond_d_array_params(&self) -> Option<(usize, usize)> {
+        self.one_d_array_params
     }
 }
 
@@ -343,29 +381,82 @@ fn extract_compressor_params_v2(
     Ok(comp)
 }
 
+fn extract_broadcast_params(
+    params_map: &serde_json::Value,
+    chnk_size: &Option<Vec<usize>>,
+    shape: &Option<Vec<usize>>,
+) -> ZarrResult<Option<BroadcastParams>> {
+    let error_string = "error parsing array broadcasting params";
+    let params = params_map.get("broadcast_params");
+    if let Some(params) = params {
+        let target_shape = extract_arr_and_check(params, "target_shape", error_string, shape)?;
+        let target_chunks =
+            extract_arr_and_check(params, "target_chunks", error_string, chnk_size)?;
+        let axis = extract_u64_from_json(params, "axis", error_string)? as usize;
+        let params = BroadcastParams::new(target_shape, target_chunks, axis)?;
+        return Ok(Some(params));
+    }
+
+    Ok(None)
+}
+
 // Method to populate zarr metadata from zarr arrays metadata, using
 // version 2 of the zarr format.
 impl ZarrStoreMetadata {
-    fn add_column_v2(&mut self, col_name: String, meta_map: Value) -> ZarrResult<()> {
-        // parse chunks
-        let error_string = "error parsing metadata chunks";
-        let chunks = extract_arr_and_check(&meta_map, "chunks", error_string, &self.chunks)?;
-        if self.chunks.is_none() {
-            self.chunks = Some(chunks.clone());
+    fn add_column_v2(
+        &mut self,
+        col_name: String,
+        meta_map: Value,
+        attrs_map: Option<Value>,
+    ) -> ZarrResult<()> {
+        // parse shape and chunks. depending on if array broadcasting params
+        // are provided or not, the checks are a bit different, since only
+        // the final, broadcasted array really matters.
+        let chnk_error = "error parsing metadata chunks";
+        let shp_error = "error parsing metadata shape";
+        let mut broadcast_params = None;
+        let chunks;
+        let shape;
+        let mut one_d_array_params = None;
+        if let Some(attrs_map) = attrs_map {
+            broadcast_params = extract_broadcast_params(&attrs_map, &self.chunks, &self.shape)?;
         }
 
-        // parse shape
-        let error_string = "error parsing metadata shape";
-        let shape = extract_arr_and_check(&meta_map, "shape", error_string, &self.shape)?;
+        if let Some(broadcast_params) = broadcast_params {
+            chunks = broadcast_params.chunks;
+            if self.chunks.is_none() {
+                self.chunks = Some(chunks.clone());
+            }
 
+            shape = broadcast_params.shape;
+            if self.shape.is_none() {
+                self.shape = Some(shape.clone());
+            }
+
+            let one_d_chunks = extract_arr_and_check(&meta_map, "chunks", chnk_error, &None)?;
+            if one_d_chunks.len() > 1 {
+                return Err(ZarrError::InvalidMetadata(
+                    "broadcast params only apply to 1D arrays".to_string(),
+                ));
+            }
+            one_d_array_params = Some((one_d_chunks[0], broadcast_params.axis));
+        } else {
+            chunks = extract_arr_and_check(&meta_map, "chunks", chnk_error, &self.chunks)?;
+            if self.chunks.is_none() {
+                self.chunks = Some(chunks.clone());
+            }
+
+            shape = extract_arr_and_check(&meta_map, "shape", shp_error, &self.shape)?;
+            if self.shape.is_none() {
+                self.shape = Some(shape.clone());
+            }
+        }
+
+        // check that shape and chunks are compatible
         if chunks.len() != shape.len() {
             return Err(ZarrError::InvalidMetadata(
                 "chunk and shape dimensions must match".to_string(),
             ));
-        }
-
-        if self.shape.is_none() {
-            self.shape = Some(shape.clone());
         }
 
         // the index of the last chunk in each dimension
@@ -433,16 +524,19 @@ impl ZarrStoreMetadata {
         }
 
         // finally create the zarr array metadata and insert it in params
-        let array_meta = ZarrArrayMetadata {
-            zarr_format: 2,
+        let mut array_meta = ZarrArrayMetadata::new(
+            2,
             data_type,
-            chunk_pattern: ChunkPattern {
+            ChunkPattern {
                 separator: ChunkSeparator::from_str(&dim_separator)?,
                 c_prefix: false,
             },
-            sharding_options: None,
+            None,
             codecs,
-        };
+        );
+        if let Some(one_d_array_params) = one_d_array_params {
+            array_meta = array_meta.make_broadcastable(one_d_array_params);
+        }
 
         self.columns.push(col_name.to_string());
         self.array_params.insert(col_name, array_meta);
@@ -597,15 +691,13 @@ impl ZarrStoreMetadata {
             ));
         }
 
-        // parse shape
-        let error_string = "error parsing metadata shape";
-        let shape = extract_arr_and_check(&meta_map, "shape", error_string, &self.shape)?;
-        if self.shape.is_none() {
-            self.shape = Some(shape.clone());
+        let attrbs = meta_map.get("attributes");
+        let mut broadcast_params = None;
+        if let Some(attrbs) = attrbs {
+            broadcast_params = extract_broadcast_params(attrbs, &self.chunks, &self.shape)?;
         }
 
-        // parse chunks
-        let error_string = "error parsing metadata chunks";
+        // parse the chunk grid
         let chunk_grid = meta_map
             .get("chunk_grid")
             .ok_or(ZarrError::InvalidMetadata(
@@ -617,9 +709,40 @@ impl ZarrStoreMetadata {
                 "only regular chunks are supported".to_string(),
             ));
         }
-        let chunks = extract_arr_and_check(config, "chunk_shape", error_string, &self.chunks)?;
-        if self.chunks.is_none() {
-            self.chunks = Some(chunks.clone());
+
+        let shp_error = "error parsing metadata shape";
+        let chnk_error = "error parsing metadata chunks";
+        let shape;
+        let chunks;
+        let mut one_d_array_params = None;
+        if let Some(broadcast_params) = broadcast_params {
+            chunks = broadcast_params.chunks;
+            if self.chunks.is_none() {
+                self.chunks = Some(chunks.clone());
+            }
+
+            shape = broadcast_params.shape;
+            if self.shape.is_none() {
+                self.shape = Some(shape.clone());
+            }
+
+            let one_d_chunks = extract_arr_and_check(config, "chunk_shape", chnk_error, &None)?;
+            if one_d_chunks.len() > 1 {
+                return Err(ZarrError::InvalidMetadata(
+                    "broadcast params only apply to 1D arrays".to_string(),
+                ));
+            }
+            one_d_array_params = Some((one_d_chunks[0], broadcast_params.axis));
+        } else {
+            chunks = extract_arr_and_check(config, "chunk_shape", chnk_error, &self.chunks)?;
+            if self.chunks.is_none() {
+                self.chunks = Some(chunks.clone());
+            }
+
+            shape = extract_arr_and_check(&meta_map, "shape", shp_error, &self.shape)?;
+            if self.shape.is_none() {
+                self.shape = Some(shape.clone());
+            }
         }
 
         if chunks.len() != shape.len() {
@@ -697,8 +820,11 @@ impl ZarrStoreMetadata {
         }
 
         // finally create the zarr array metadata and insert it in params
-        let array_meta =
+        let mut array_meta =
             ZarrArrayMetadata::new(3, data_type, chunk_key_encoding, sharding_options, codecs);
+        if let Some(one_d_array_params) = one_d_array_params {
+            array_meta = array_meta.make_broadcastable(one_d_array_params);
+        }
 
         self.columns.push(col_name.to_string());
         self.array_params.insert(col_name, array_meta);
@@ -710,7 +836,12 @@ impl ZarrStoreMetadata {
 // Method to populate zarr metadata from zarr arrays metadata, works with either
 // zarr_format version 2 or 3.
 impl ZarrStoreMetadata {
-    pub(crate) fn add_column(&mut self, col_name: String, metadata_str: &str) -> ZarrResult<()> {
+    pub(crate) fn add_column(
+        &mut self,
+        col_name: String,
+        metadata_str: &str,
+        attrbs_map: Option<&str>,
+    ) -> ZarrResult<()> {
         let meta_map: Value = serde_json::from_str(metadata_str).or(Err(
             ZarrError::InvalidMetadata("could not parse metadata string".to_string()),
         ))?;
@@ -719,9 +850,21 @@ impl ZarrStoreMetadata {
 
         match version {
             2 => {
-                self.add_column_v2(col_name, meta_map)?;
+                let attrbs_map: Option<serde_json::Value> = if let Some(attrbs_map) = attrbs_map {
+                    serde_json::from_str(attrbs_map).or(Err(ZarrError::InvalidMetadata(
+                        "could not parse atributes string".to_string(),
+                    )))?
+                } else {
+                    None
+                };
+                self.add_column_v2(col_name, meta_map, attrbs_map)?;
             }
             3 => {
+                if attrbs_map.is_some() {
+                    return Err(ZarrError::InvalidMetadata(
+                        "zarr v3 does not support a separate attribute map".to_string(),
+                    ));
+                }
                 self.add_column_v3(col_name, meta_map)?;
             }
             _ => {
@@ -839,7 +982,8 @@ mod zarr_metadata_v3_tests {
                 "shuffle": 1
             }
         }"#;
-        meta.add_column("var1".to_string(), metadata_str).unwrap();
+        meta.add_column("var1".to_string(), metadata_str, None)
+            .unwrap();
 
         let metadata_str = r#"
         {
@@ -855,7 +999,8 @@ mod zarr_metadata_v3_tests {
                 "shuffle": 2
             }
         }"#;
-        meta.add_column("var2".to_string(), metadata_str).unwrap();
+        meta.add_column("var2".to_string(), metadata_str, None)
+            .unwrap();
 
         let metadata_str = r#"
         {
@@ -866,7 +1011,8 @@ mod zarr_metadata_v3_tests {
             "order": "F",
             "compressor": null
         }"#;
-        meta.add_column("var3".to_string(), metadata_str).unwrap();
+        meta.add_column("var3".to_string(), metadata_str, None)
+            .unwrap();
 
         let metadata_str = r#"
         {
@@ -882,7 +1028,8 @@ mod zarr_metadata_v3_tests {
                 "shuffle": 1
             }
         }"#;
-        meta.add_column("var4".to_string(), metadata_str).unwrap();
+        meta.add_column("var4".to_string(), metadata_str, None)
+            .unwrap();
 
         assert_eq!(meta.chunks, Some(vec![10, 10]));
         assert_eq!(meta.shape, Some(vec![100, 100]));
@@ -891,15 +1038,15 @@ mod zarr_metadata_v3_tests {
 
         assert_eq!(
             meta.array_params["var1"],
-            ZarrArrayMetadata {
-                zarr_format: 2,
-                data_type: ZarrDataType::Int(4),
-                chunk_pattern: ChunkPattern {
+            ZarrArrayMetadata::new(
+                2,
+                ZarrDataType::Int(4),
+                ChunkPattern {
                     separator: ChunkSeparator::Period,
                     c_prefix: false,
                 },
-                sharding_options: None,
-                codecs: vec![
+                None,
+                vec![
                     ZarrCodec::Bytes(Endianness::Little),
                     ZarrCodec::BloscCompressor(BloscOptions::new(
                         CompressorName::Lz4,
@@ -908,20 +1055,20 @@ mod zarr_metadata_v3_tests {
                         0,
                     ))
                 ]
-            }
+            )
         );
 
         assert_eq!(
             meta.array_params["var2"],
-            ZarrArrayMetadata {
-                zarr_format: 2,
-                data_type: ZarrDataType::TimeStamp(8, "ms".to_string()),
-                chunk_pattern: ChunkPattern {
+            ZarrArrayMetadata::new(
+                2,
+                ZarrDataType::TimeStamp(8, "ms".to_string()),
+                ChunkPattern {
                     separator: ChunkSeparator::Period,
                     c_prefix: false,
                 },
-                sharding_options: None,
-                codecs: vec![
+                None,
+                vec![
                     ZarrCodec::Bytes(Endianness::Little),
                     ZarrCodec::BloscCompressor(BloscOptions::new(
                         CompressorName::Zlib,
@@ -930,37 +1077,37 @@ mod zarr_metadata_v3_tests {
                         0,
                     ))
                 ]
-            }
+            )
         );
 
         assert_eq!(
             meta.array_params["var3"],
-            ZarrArrayMetadata {
-                zarr_format: 2,
-                data_type: ZarrDataType::Bool,
-                chunk_pattern: ChunkPattern {
+            ZarrArrayMetadata::new(
+                2,
+                ZarrDataType::Bool,
+                ChunkPattern {
                     separator: ChunkSeparator::Period,
                     c_prefix: false,
                 },
-                sharding_options: None,
-                codecs: vec![
+                None,
+                vec![
                     ZarrCodec::Transpose(vec![1, 0]),
                     ZarrCodec::Bytes(Endianness::Little),
                 ],
-            }
+            )
         );
 
         assert_eq!(
             meta.array_params["var4"],
-            ZarrArrayMetadata {
-                zarr_format: 2,
-                data_type: ZarrDataType::FixedLengthString(112),
-                chunk_pattern: ChunkPattern {
+            ZarrArrayMetadata::new(
+                2,
+                ZarrDataType::FixedLengthString(112),
+                ChunkPattern {
                     separator: ChunkSeparator::Period,
                     c_prefix: false,
                 },
-                sharding_options: None,
-                codecs: vec![
+                None,
+                vec![
                     ZarrCodec::Bytes(Endianness::Big),
                     ZarrCodec::BloscCompressor(BloscOptions::new(
                         CompressorName::Lz4,
@@ -969,7 +1116,7 @@ mod zarr_metadata_v3_tests {
                         0,
                     ))
                 ]
-            }
+            )
         );
 
         // check for an array with chunks that don't perfectly line up with
@@ -989,7 +1136,8 @@ mod zarr_metadata_v3_tests {
                 "shuffle": 1
             }
         }"#;
-        meta.add_column("var".to_string(), metadata_str).unwrap();
+        meta.add_column("var".to_string(), metadata_str, None)
+            .unwrap();
         assert_eq!(meta.last_chunk_idx, Some(vec![8, 8]))
     }
 
@@ -1014,7 +1162,9 @@ mod zarr_metadata_v3_tests {
                 "shuffle": 2
             }
         }"#;
-        assert!(meta.add_column("var".to_string(), metadata_str).is_err());
+        assert!(meta
+            .add_column("var".to_string(), metadata_str, None)
+            .is_err());
 
         // invalid compressor
         let metadata_str = r#"
@@ -1031,7 +1181,9 @@ mod zarr_metadata_v3_tests {
                 "shuffle": 2
             }
         }"#;
-        assert!(meta.add_column("var".to_string(), metadata_str).is_err());
+        assert!(meta
+            .add_column("var".to_string(), metadata_str, None)
+            .is_err());
 
         // mismatch between chunks
         // first let's create one valid array metadata
@@ -1049,7 +1201,8 @@ mod zarr_metadata_v3_tests {
                 "shuffle": 1
             }
         }"#;
-        meta.add_column("var1".to_string(), metadata_str).unwrap();
+        meta.add_column("var1".to_string(), metadata_str, None)
+            .unwrap();
 
         let metadata_str = r#"
         {
@@ -1065,7 +1218,9 @@ mod zarr_metadata_v3_tests {
                 "shuffle": 1
             }
         }"#;
-        assert!(meta.add_column("var2".to_string(), metadata_str).is_err());
+        assert!(meta
+            .add_column("var2".to_string(), metadata_str, None)
+            .is_err());
 
         // mismatch between shapes
         let metadata_str = r#"
@@ -1082,7 +1237,9 @@ mod zarr_metadata_v3_tests {
                 "shuffle": 1
             }
         }"#;
-        assert!(meta.add_column("var2".to_string(), metadata_str).is_err());
+        assert!(meta
+            .add_column("var2".to_string(), metadata_str, None)
+            .is_err());
     }
 
     #[test]
@@ -1109,7 +1266,8 @@ mod zarr_metadata_v3_tests {
             "zarr_format": 3,
             "node_type": "array"
         }"#;
-        meta.add_column("var1".to_string(), metadata_str).unwrap();
+        meta.add_column("var1".to_string(), metadata_str, None)
+            .unwrap();
 
         assert_eq!(meta.chunks, Some(vec![4, 4]));
         assert_eq!(meta.shape, Some(vec![16, 16]));
@@ -1123,15 +1281,15 @@ mod zarr_metadata_v3_tests {
 
         assert_eq!(
             meta.array_params["var1"],
-            ZarrArrayMetadata {
-                zarr_format: 3,
-                data_type: ZarrDataType::Int(4),
-                chunk_pattern: ChunkPattern {
+            ZarrArrayMetadata::new(
+                3,
+                ZarrDataType::Int(4),
+                ChunkPattern {
                     separator: ChunkSeparator::Slash,
                     c_prefix: true,
                 },
-                sharding_options: None,
-                codecs: vec![
+                None,
+                vec![
                     ZarrCodec::Bytes(Endianness::Little),
                     ZarrCodec::BloscCompressor(BloscOptions::new(
                         CompressorName::Zstd,
@@ -1140,7 +1298,7 @@ mod zarr_metadata_v3_tests {
                         0,
                     ))
                 ]
-            }
+            )
         );
 
         meta = ZarrStoreMetadata::new();
@@ -1178,7 +1336,8 @@ mod zarr_metadata_v3_tests {
             "zarr_format": 3,
             "node_type": "array"
         }"#;
-        meta.add_column("var2".to_string(), metadata_str).unwrap();
+        meta.add_column("var2".to_string(), metadata_str, None)
+            .unwrap();
 
         assert_eq!(meta.chunks, Some(vec![8, 8]));
         assert_eq!(meta.shape, Some(vec![16, 16]));
@@ -1192,14 +1351,14 @@ mod zarr_metadata_v3_tests {
 
         assert_eq!(
             meta.array_params["var2"],
-            ZarrArrayMetadata {
-                zarr_format: 3,
-                data_type: ZarrDataType::Int(4),
-                chunk_pattern: ChunkPattern {
+            ZarrArrayMetadata::new(
+                3,
+                ZarrDataType::Int(4),
+                ChunkPattern {
                     separator: ChunkSeparator::Period,
                     c_prefix: false,
                 },
-                sharding_options: Some(ShardingOptions::new(
+                Some(ShardingOptions::new(
                     vec![4, 4],
                     vec![2, 2],
                     vec![
@@ -1215,8 +1374,8 @@ mod zarr_metadata_v3_tests {
                     IndexLocation::End,
                     0
                 )),
-                codecs: vec![],
-            }
+                vec![],
+            )
         );
     }
 
@@ -1243,7 +1402,9 @@ mod zarr_metadata_v3_tests {
             "zarr_format": 3,
             "node_type": "array"
         }"#;
-        assert!(meta.add_column("var1".to_string(), metadata_str).is_err());
+        assert!(meta
+            .add_column("var1".to_string(), metadata_str, None)
+            .is_err());
 
         // mismatch between shape and chunks
         let metadata_str = r#"
@@ -1265,6 +1426,8 @@ mod zarr_metadata_v3_tests {
             "zarr_format": 3,
             "node_type": "array"
         }"#;
-        assert!(meta.add_column("var2".to_string(), metadata_str).is_err());
+        assert!(meta
+            .add_column("var2".to_string(), metadata_str, None)
+            .is_err());
     }
 }

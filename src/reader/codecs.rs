@@ -558,6 +558,40 @@ fn get_inner_chunk_real_dims(
     real_dims
 }
 
+fn broadcast_array<T: Clone>(
+    input: Vec<T>,
+    real_chunk_dims: &[usize],
+    axis: usize,
+) -> ZarrResult<Vec<T>> {
+    let err = "invalid parameters while processing one dimenesional representation";
+    let l = input.len();
+    let n_dims = real_chunk_dims.len();
+    if axis >= n_dims || l != real_chunk_dims[axis] {
+        return Err(throw_invalid_meta(err));
+    }
+
+    match (n_dims, axis) {
+        (2, 0) => Ok(input
+            .into_iter()
+            .flat_map(|v| std::iter::repeat(v).take(real_chunk_dims[1]))
+            .collect()),
+        (2, 1) => Ok(vec![&input[..]; real_chunk_dims[0]].concat()),
+        (3, 0) => Ok(input
+            .into_iter()
+            .flat_map(|v| std::iter::repeat(v).take(real_chunk_dims[1] * real_chunk_dims[2]))
+            .collect()),
+        (3, 1) => {
+            let v: Vec<_> = input
+                .into_iter()
+                .flat_map(|v| std::iter::repeat(v).take(real_chunk_dims[2]))
+                .collect();
+            Ok(vec![&v[..]; real_chunk_dims[0]].concat())
+        }
+        (3, 2) => Ok(vec![&input[..]; real_chunk_dims[0] * real_chunk_dims[1]].concat()),
+        _ => Err(throw_invalid_meta(err)),
+    }
+}
+
 // a macro that instantiates functions to decode different data types
 macro_rules! create_decode_function {
     ($func_name: tt, $type: ty, $byte_size: tt) => {
@@ -715,10 +749,22 @@ pub(crate) fn apply_codecs(
     data_type: &ZarrDataType,
     codecs: &Vec<ZarrCodec>,
     sharding_params: Option<ShardingOptions>,
+    one_d_array_params: Option<(usize, usize)>,
 ) -> ZarrResult<(ArrayRef, FieldRef)> {
     macro_rules! return_array {
         ($func_name: tt, $data_t: expr, $array_t: ty) => {
-            let data = $func_name(raw_data, &chunk_dims, &real_dims, &codecs, sharding_params)?;
+            let data = if let Some(one_d_array_params) = one_d_array_params {
+                let one_d_data = $func_name(
+                    raw_data,
+                    &vec![one_d_array_params.0],
+                    &vec![real_dims[one_d_array_params.1]],
+                    &codecs,
+                    sharding_params,
+                )?;
+                broadcast_array(one_d_data, &real_dims[..], one_d_array_params.1)?
+            } else {
+                $func_name(raw_data, &chunk_dims, &real_dims, &codecs, sharding_params)?
+            };
             let field = Field::new(col_name, $data_t, false);
             let arr: $array_t = data.into();
             return Ok((Arc::new(arr), Arc::new(field)))
@@ -810,15 +856,28 @@ pub(crate) fn apply_codecs(
                 pyunicode = true;
                 str_len_adjustment = PY_UNICODE_SIZE;
             }
-            let data = decode_string_chunk(
-                raw_data,
-                *s / str_len_adjustment,
-                chunk_dims,
-                real_dims,
-                codecs,
-                sharding_params,
-                pyunicode,
-            )?;
+            let data = if let Some(one_d_array_params) = one_d_array_params {
+                let one_d_data = decode_string_chunk(
+                    raw_data,
+                    *s / str_len_adjustment,
+                    &vec![one_d_array_params.0],
+                    &vec![real_dims[one_d_array_params.1]],
+                    codecs,
+                    sharding_params,
+                    pyunicode,
+                )?;
+                broadcast_array(one_d_data, &real_dims[..], one_d_array_params.1)?
+            } else {
+                decode_string_chunk(
+                    raw_data,
+                    *s / str_len_adjustment,
+                    chunk_dims,
+                    real_dims,
+                    codecs,
+                    sharding_params,
+                    pyunicode,
+                )?
+            };
             let field = Field::new(col_name, DataType::Utf8, false);
             let arr: StringArray = data.into();
 
@@ -864,6 +923,7 @@ mod zarr_codecs_tests {
             &data_type,
             &codecs,
             sharding_params,
+            None,
         )
         .unwrap();
 
@@ -914,6 +974,7 @@ mod zarr_codecs_tests {
             &data_type,
             &codecs,
             sharding_params,
+            None,
         )
         .unwrap();
 
@@ -965,6 +1026,7 @@ mod zarr_codecs_tests {
             &data_type,
             &codecs,
             sharding_params,
+            None,
         )
         .unwrap();
 
@@ -1023,5 +1085,37 @@ mod zarr_codecs_tests {
         }
 
         Ok(())
+    }
+
+    #[test]
+    fn test_broadcast_array() {
+        // (1, n) 1D projected to 2D
+        let v = broadcast_array(vec![1, 2, 3], &[4, 3], 1).unwrap();
+        assert_eq!(v, vec![1, 2, 3, 1, 2, 3, 1, 2, 3, 1, 2, 3]);
+
+        //(n, 1) 1D projected to 2D
+        let v = broadcast_array(vec![1, 2, 3, 4], &[4, 3], 0).unwrap();
+        assert_eq!(v, vec![1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4]);
+
+        // (1, 1, n) 1D projected t0 3D
+        let v = broadcast_array(vec![1, 2, 3], &[2, 4, 3], 2).unwrap();
+        assert_eq!(
+            v,
+            vec![1, 2, 3, 1, 2, 3, 1, 2, 3, 1, 2, 3, 1, 2, 3, 1, 2, 3, 1, 2, 3, 1, 2, 3]
+        );
+
+        // // (1, n, 1) 1D projected t0 3D
+        let v = broadcast_array(vec![1, 2, 3, 4], &[2, 4, 3], 1).unwrap();
+        assert_eq!(
+            v,
+            vec![1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4, 1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4]
+        );
+
+        // // (n, 1, 1) 1D projected t0 3D
+        let v = broadcast_array(vec![1, 2], &[2, 4, 3], 0).unwrap();
+        assert_eq!(
+            v,
+            vec![1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2]
+        );
     }
 }

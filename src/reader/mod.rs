@@ -60,7 +60,7 @@
 use arrow_array::*;
 use arrow_schema::{DataType, Field, FieldRef, Schema};
 use itertools::Itertools;
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use codecs::apply_codecs;
 pub use errors::{ZarrError, ZarrResult};
@@ -83,6 +83,7 @@ pub struct ZarrStore<T: ZarrRead> {
     zarr_reader: T,
     projection: ZarrProjection,
     curr_chunk: usize,
+    broadcastable_array_axes: HashMap<String, Option<usize>>,
 }
 
 impl<T: ZarrRead> ZarrStore<T> {
@@ -91,12 +92,22 @@ impl<T: ZarrRead> ZarrStore<T> {
         chunk_positions: Vec<Vec<usize>>,
         projection: ZarrProjection,
     ) -> ZarrResult<Self> {
+        let meta = zarr_reader.get_zarr_metadata()?;
+        let mut bdc_axes: HashMap<String, Option<usize>> = HashMap::new();
+        for col in meta.get_columns() {
+            let mut axis = None;
+            if let Some(params) = meta.get_array_meta(col)?.get_ond_d_array_params() {
+                axis = Some(params.1);
+            }
+            bdc_axes.insert(col.to_string(), axis);
+        }
         Ok(Self {
-            meta: zarr_reader.get_zarr_metadata()?,
+            meta,
             chunk_positions,
             zarr_reader,
             projection,
             curr_chunk: 0,
+            broadcastable_array_axes: bdc_axes,
         })
     }
 }
@@ -134,6 +145,7 @@ impl<T: ZarrRead> ZarrIterator for ZarrStore<T> {
             &cols,
             self.meta.get_real_dims(pos),
             self.meta.get_chunk_patterns(),
+            &self.broadcastable_array_axes,
         );
         self.curr_chunk += 1;
         Some(chnk)
@@ -217,6 +229,7 @@ impl<T: ZarrIterator> ZarrRecordBatchReader<T> {
             meta.get_type(),
             meta.get_codecs(),
             meta.get_sharding_params(),
+            meta.get_ond_d_array_params(),
         )?;
 
         Ok((arr, field))
@@ -389,12 +402,13 @@ impl<T: ZarrRead + Clone> ZarrRecordBatchReaderBuilder<T> {
 
 #[cfg(test)]
 mod zarr_reader_tests {
+    use crate::tests::{get_test_v2_data_path, get_test_v3_data_path};
     use arrow::compute::kernels::cmp::{gt_eq, lt};
     use arrow_array::cast::AsArray;
     use arrow_array::types::*;
     use arrow_schema::{DataType, TimeUnit};
     use itertools::enumerate;
-    use std::{boxed::Box, collections::HashMap, fmt::Debug, path::PathBuf};
+    use std::{boxed::Box, collections::HashMap, fmt::Debug};
 
     use super::*;
     use crate::reader::filters::{ZarrArrowPredicate, ZarrArrowPredicateFn};
@@ -456,18 +470,46 @@ mod zarr_reader_tests {
         assert!(matched);
     }
 
-    //**************************
-    // zarr format v2 tests
-    //**************************
-    fn get_v2_test_data_path(zarr_store: String) -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("test-data/data/zarr/v2_data")
-            .join(zarr_store)
+    // create a test filter
+    fn create_filter() -> ZarrChunkFilter {
+        let mut filters: Vec<Box<dyn ZarrArrowPredicate>> = Vec::new();
+        let f = ZarrArrowPredicateFn::new(
+            ZarrProjection::keep(vec!["lat".to_string()]),
+            move |batch| {
+                gt_eq(
+                    batch.column_by_name("lat").unwrap(),
+                    &Scalar::new(&Float64Array::from(vec![38.6])),
+                )
+            },
+        );
+        filters.push(Box::new(f));
+        let f = ZarrArrowPredicateFn::new(
+            ZarrProjection::keep(vec!["lon".to_string()]),
+            move |batch| {
+                gt_eq(
+                    batch.column_by_name("lon").unwrap(),
+                    &Scalar::new(&Float64Array::from(vec![-109.7])),
+                )
+            },
+        );
+        filters.push(Box::new(f));
+        let f = ZarrArrowPredicateFn::new(
+            ZarrProjection::keep(vec!["lon".to_string()]),
+            move |batch| {
+                lt(
+                    batch.column_by_name("lon").unwrap(),
+                    &Scalar::new(&Float64Array::from(vec![-109.2])),
+                )
+            },
+        );
+        filters.push(Box::new(f));
+
+        ZarrChunkFilter::new(filters)
     }
 
     #[test]
     fn compression_tests() {
-        let p = get_v2_test_data_path("compression_example.zarr".to_string());
+        let p = get_test_v2_data_path("compression_example.zarr".to_string());
         let reader = ZarrRecordBatchReaderBuilder::new(p).build().unwrap();
         let records: Vec<RecordBatch> = reader.map(|x| x.unwrap()).collect();
 
@@ -545,7 +587,7 @@ mod zarr_reader_tests {
 
     #[test]
     fn projection_tests() {
-        let p = get_v2_test_data_path("compression_example.zarr".to_string());
+        let p = get_test_v2_data_path("compression_example.zarr".to_string());
         let proj = ZarrProjection::keep(vec!["bool_data".to_string(), "int_data".to_string()]);
         let builder = ZarrRecordBatchReaderBuilder::new(p).with_projection(proj);
         let reader = builder.build().unwrap();
@@ -573,7 +615,7 @@ mod zarr_reader_tests {
 
     #[test]
     fn multiple_readers_tests() {
-        let p = get_v2_test_data_path("compression_example.zarr".to_string());
+        let p = get_test_v2_data_path("compression_example.zarr".to_string());
         let reader1 = ZarrRecordBatchReaderBuilder::new(p.clone())
             .build_partial_reader(Some((0, 5)))
             .unwrap();
@@ -644,7 +686,7 @@ mod zarr_reader_tests {
 
     #[test]
     fn endianness_and_order_tests() {
-        let p = get_v2_test_data_path("endianness_and_order_example.zarr".to_string());
+        let p = get_test_v2_data_path("endianness_and_order_example.zarr".to_string());
         let reader = ZarrRecordBatchReaderBuilder::new(p).build().unwrap();
         let records: Vec<RecordBatch> = reader.map(|x| x.unwrap()).collect();
 
@@ -670,7 +712,7 @@ mod zarr_reader_tests {
 
     #[test]
     fn string_data_tests() {
-        let p = get_v2_test_data_path("string_example.zarr".to_string());
+        let p = get_test_v2_data_path("string_example.zarr".to_string());
         let reader = ZarrRecordBatchReaderBuilder::new(p).build().unwrap();
         let records: Vec<RecordBatch> = reader.map(|x| x.unwrap()).collect();
 
@@ -698,7 +740,7 @@ mod zarr_reader_tests {
 
     #[test]
     fn ts_data_tests() {
-        let p = get_v2_test_data_path("ts_example.zarr".to_string());
+        let p = get_test_v2_data_path("ts_example.zarr".to_string());
         let reader = ZarrRecordBatchReaderBuilder::new(p).build().unwrap();
         let records: Vec<RecordBatch> = reader.map(|x| x.unwrap()).collect();
 
@@ -782,7 +824,7 @@ mod zarr_reader_tests {
 
     #[test]
     fn one_dim_tests() {
-        let p = get_v2_test_data_path("one_dim_example.zarr".to_string());
+        let p = get_test_v2_data_path("one_dim_example.zarr".to_string());
         let reader = ZarrRecordBatchReaderBuilder::new(p).build().unwrap();
         let records: Vec<RecordBatch> = reader.map(|x| x.unwrap()).collect();
 
@@ -806,7 +848,7 @@ mod zarr_reader_tests {
 
     #[test]
     fn three_dim_tests() {
-        let p = get_v2_test_data_path("three_dim_example.zarr".to_string());
+        let p = get_test_v2_data_path("three_dim_example.zarr".to_string());
         let reader = ZarrRecordBatchReaderBuilder::new(p).build().unwrap();
         let records: Vec<RecordBatch> = reader.map(|x| x.unwrap()).collect();
 
@@ -856,44 +898,14 @@ mod zarr_reader_tests {
 
     #[test]
     fn filters_tests() {
-        let p = get_v2_test_data_path("lat_lon_example.zarr".to_string());
+        let p = get_test_v2_data_path("lat_lon_example.zarr".to_string());
         let mut builder = ZarrRecordBatchReaderBuilder::new(p);
 
         // set the filters to select part of the raster, based on lat and
         // lon coordinates.
-        let mut filters: Vec<Box<dyn ZarrArrowPredicate>> = Vec::new();
-        let f = ZarrArrowPredicateFn::new(
-            ZarrProjection::keep(vec!["lat".to_string()]),
-            move |batch| {
-                gt_eq(
-                    batch.column_by_name("lat").unwrap(),
-                    &Scalar::new(&Float64Array::from(vec![38.6])),
-                )
-            },
-        );
-        filters.push(Box::new(f));
-        let f = ZarrArrowPredicateFn::new(
-            ZarrProjection::keep(vec!["lon".to_string()]),
-            move |batch| {
-                gt_eq(
-                    batch.column_by_name("lon").unwrap(),
-                    &Scalar::new(&Float64Array::from(vec![-109.7])),
-                )
-            },
-        );
-        filters.push(Box::new(f));
-        let f = ZarrArrowPredicateFn::new(
-            ZarrProjection::keep(vec!["lon".to_string()]),
-            move |batch| {
-                lt(
-                    batch.column_by_name("lon").unwrap(),
-                    &Scalar::new(&Float64Array::from(vec![-109.2])),
-                )
-            },
-        );
-        filters.push(Box::new(f));
+        let filter = create_filter();
 
-        builder = builder.with_filter(ZarrChunkFilter::new(filters));
+        builder = builder.with_filter(filter);
         let reader = builder.build().unwrap();
         let records: Vec<RecordBatch> = reader.map(|x| x.unwrap()).collect();
 
@@ -938,7 +950,7 @@ mod zarr_reader_tests {
 
     #[test]
     fn empty_query_tests() {
-        let p = get_v2_test_data_path("lat_lon_example.zarr".to_string());
+        let p = get_test_v2_data_path("lat_lon_example.zarr".to_string());
         let mut builder = ZarrRecordBatchReaderBuilder::new(p);
 
         // set a filter that will filter out all the data, there should be nothing left after
@@ -963,18 +975,46 @@ mod zarr_reader_tests {
         assert_eq!(records.len(), 0);
     }
 
-    //**************************
-    // zarr format v3 tests
-    //**************************
-    fn get_v3_test_data_path(zarr_store: String) -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("test-data/data/zarr/v3_data")
-            .join(zarr_store)
+    #[test]
+    fn array_broadcast_tests() {
+        // reference that doesn't broadcast a 1D array
+        let p = get_test_v2_data_path("lat_lon_example.zarr".to_string());
+        let mut builder = ZarrRecordBatchReaderBuilder::new(p);
+
+        builder = builder.with_filter(create_filter());
+        let reader = builder.build().unwrap();
+        let records: Vec<RecordBatch> = reader.map(|x| x.unwrap()).collect();
+
+        // v2 format with array broadcast
+        let p = get_test_v2_data_path("lat_lon_example_broadcastable.zarr".to_string());
+        let mut builder = ZarrRecordBatchReaderBuilder::new(p);
+
+        builder = builder.with_filter(create_filter());
+        let reader = builder.build().unwrap();
+        let records_from_one_d_repr: Vec<RecordBatch> = reader.map(|x| x.unwrap()).collect();
+
+        assert_eq!(records_from_one_d_repr.len(), records.len());
+        for (rec, rec_from_one_d_repr) in records.iter().zip(records_from_one_d_repr.iter()) {
+            assert_eq!(rec, rec_from_one_d_repr);
+        }
+
+        // v3 format with array broadcast
+        let p = get_test_v3_data_path("with_broadcastable_array.zarr".to_string());
+        let mut builder = ZarrRecordBatchReaderBuilder::new(p);
+
+        builder = builder.with_filter(create_filter());
+        let reader = builder.build().unwrap();
+        let records_from_one_d_repr: Vec<RecordBatch> = reader.map(|x| x.unwrap()).collect();
+
+        assert_eq!(records_from_one_d_repr.len(), records.len());
+        for (rec, rec_from_one_d_repr) in records.iter().zip(records_from_one_d_repr.iter()) {
+            assert_eq!(rec, rec_from_one_d_repr);
+        }
     }
 
     #[test]
     fn no_sharding_tests() {
-        let p = get_v3_test_data_path("no_sharding.zarr".to_string());
+        let p = get_test_v3_data_path("no_sharding.zarr".to_string());
         let builder = ZarrRecordBatchReaderBuilder::new(p);
 
         let reader = builder.build().unwrap();
@@ -993,7 +1033,7 @@ mod zarr_reader_tests {
 
     #[test]
     fn no_sharding_with_edge_tests() {
-        let p = get_v3_test_data_path("no_sharding_with_edge.zarr".to_string());
+        let p = get_test_v3_data_path("no_sharding_with_edge.zarr".to_string());
         let builder = ZarrRecordBatchReaderBuilder::new(p);
 
         let reader = builder.build().unwrap();
@@ -1022,7 +1062,7 @@ mod zarr_reader_tests {
 
     #[test]
     fn with_sharding_tests() {
-        let p = get_v3_test_data_path("with_sharding.zarr".to_string());
+        let p = get_test_v3_data_path("with_sharding.zarr".to_string());
         let builder = ZarrRecordBatchReaderBuilder::new(p);
 
         let reader = builder.build().unwrap();
@@ -1054,7 +1094,7 @@ mod zarr_reader_tests {
 
     #[test]
     fn with_sharding_with_edge_tests() {
-        let p = get_v3_test_data_path("with_sharding_with_edge.zarr".to_string());
+        let p = get_test_v3_data_path("with_sharding_with_edge.zarr".to_string());
         let builder = ZarrRecordBatchReaderBuilder::new(p);
 
         let reader = builder.build().unwrap();
@@ -1073,7 +1113,7 @@ mod zarr_reader_tests {
 
     #[test]
     fn three_dims_no_sharding_with_edge_tests() {
-        let p = get_v3_test_data_path("no_sharding_with_edge_3d.zarr".to_string());
+        let p = get_test_v3_data_path("no_sharding_with_edge_3d.zarr".to_string());
         let builder = ZarrRecordBatchReaderBuilder::new(p);
 
         let reader = builder.build().unwrap();
@@ -1088,7 +1128,7 @@ mod zarr_reader_tests {
 
     #[test]
     fn three_dims_with_sharding_with_edge_tests() {
-        let p = get_v3_test_data_path("with_sharding_with_edge_3d.zarr".to_string());
+        let p = get_test_v3_data_path("with_sharding_with_edge_3d.zarr".to_string());
         let builder = ZarrRecordBatchReaderBuilder::new(p);
 
         let reader = builder.build().unwrap();

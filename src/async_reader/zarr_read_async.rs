@@ -26,7 +26,6 @@ use crate::async_reader::io_uring_utils::WorkerPool;
 use crate::reader::metadata::{ChunkPattern, ChunkSeparator};
 use crate::reader::{ZarrError, ZarrResult};
 use crate::reader::{ZarrInMemoryChunk, ZarrStoreMetadata};
-use itertools::{enumerate, Itertools};
 
 /// A trait that exposes methods to get data from a zarr store asynchronously.
 #[async_trait]
@@ -44,17 +43,8 @@ pub trait ZarrReadAsync<'a> {
         real_dims: Vec<usize>,
         patterns: HashMap<String, ChunkPattern>,
         io_uring_worker_pool: &mut WorkerPool,
+        broadcast_axes: &HashMap<String, Option<usize>>,
     ) -> ZarrResult<ZarrInMemoryChunk>;
-
-    /// Method to retrive the data in multiple zarr chunks asynchronously.
-    async fn get_zarr_chunks(
-        &self,
-        positions: Vec<Vec<usize>>,
-        cols: &'a [String],
-        real_dims: Vec<Vec<usize>>,
-        patterns: HashMap<String, ChunkPattern>,
-        io_uring_worker_pool: &mut WorkerPool,
-    ) -> ZarrResult<Vec<ZarrInMemoryChunk>>;
 }
 
 /// A wrapper around a pointer to an [`ObjectStore`] an a path that points
@@ -113,25 +103,37 @@ impl<'a> ZarrReadAsync<'a> for ZarrPath {
     async fn get_zarr_metadata(&self) -> ZarrResult<ZarrStoreMetadata> {
         let mut meta = ZarrStoreMetadata::new();
         let stream = self.store.list(Some(&self.location));
-
         pin_mut!(stream);
+
+        let mut meta_strs: Vec<(String, String)> = Vec::new();
+        let mut attrs_map: HashMap<String, String> = HashMap::new();
         while let Some(p) = stream.next().await {
             let p = p?.location;
             if let Some(s) = p.filename() {
-                if s == ".zarray" || s == "zarr.json" {
+                if s == ".zarray" || s == "zarr.json" || s == ".zattrs" {
                     if let Some(mut dir_name) = p.prefix_match(&self.location) {
                         let array_name = dir_name.next().unwrap().as_ref().to_string();
                         let get_res = self.store.get(&p).await?;
-                        let meta_str = match get_res.payload {
+                        let data_str = match get_res.payload {
                             GetResultPayload::File(_, p) => read_to_string(p)?,
                             GetResultPayload::Stream(_) => {
                                 std::str::from_utf8(&get_res.bytes().await?)?.to_string()
                             }
                         };
-                        meta.add_column(array_name, &meta_str)?;
+
+                        match s {
+                            ".zarray" | "zarr.json" => meta_strs.push((array_name, data_str)),
+                            ".zattrs" => _ = attrs_map.insert(array_name, data_str),
+                            _ => {}
+                        };
                     }
                 }
             }
+        }
+
+        for (array_name, meta_str) in meta_strs {
+            let attrs = attrs_map.get(&array_name).map(|x| x.as_str());
+            meta.add_column(array_name, &meta_str, attrs)?;
         }
 
         if meta.get_num_columns() == 0 {
@@ -149,17 +151,25 @@ impl<'a> ZarrReadAsync<'a> for ZarrPath {
         real_dims: Vec<usize>,
         patterns: HashMap<String, ChunkPattern>,
         io_uring_worker_pool: &mut WorkerPool,
+        broadcast_axes: &HashMap<String, Option<usize>>,
     ) -> ZarrResult<ZarrInMemoryChunk> {
         let mut io_uring_flag = false;
         let mut chunk = ZarrInMemoryChunk::new(real_dims);
         for var in cols {
+            let axis = broadcast_axes.get(var).ok_or(ZarrError::InvalidMetadata(
+                "missing entry for broadcastable array params".to_string(),
+            ))?;
             let pattern = patterns
                 .get(var.as_str())
                 .ok_or(ZarrError::InvalidMetadata(
                     "Could not find separator for column".to_string(),
                 ))?;
 
-            let p = self.get_chunk_path(var, position, pattern);
+            let p = if let Some(axis) = axis {
+                self.get_chunk_path(var, &[position[*axis]], pattern)
+            } else {
+                self.get_chunk_path(var, position, pattern)
+            };
             let get_res = self.store.get(&p).await?;
             match get_res.payload {
                 GetResultPayload::File(_, p) => {
@@ -185,67 +195,6 @@ impl<'a> ZarrReadAsync<'a> for ZarrPath {
         }
 
         Ok(chunk)
-    }
-
-    async fn get_zarr_chunks(
-        &self,
-        positions: Vec<Vec<usize>>,
-        cols: &'a [String],
-        real_dims: Vec<Vec<usize>>,
-        patterns: HashMap<String, ChunkPattern>,
-        io_uring_worker_pool: &mut WorkerPool,
-    ) -> ZarrResult<Vec<ZarrInMemoryChunk>> {
-        if positions.len() != real_dims.len() {
-            return Err(ZarrError::Read(
-                "arguments length mismatch in get_zarr_chunks".to_string(),
-            ));
-        }
-
-        let mut io_uring_flag = false;
-        let mut chunks = real_dims
-            .into_iter()
-            .map(ZarrInMemoryChunk::new)
-            .collect_vec();
-        for var in cols {
-            let pattern = patterns
-                .get(var.as_str())
-                .ok_or(ZarrError::InvalidMetadata(
-                    "Could not find separator for column".to_string(),
-                ))?;
-            let paths = positions
-                .iter()
-                .map(|pos| self.get_chunk_path(var, pos, pattern))
-                .collect_vec();
-            for (p, chunk) in paths.iter().zip(chunks.iter_mut()) {
-                let get_res = self.store.get(p).await?;
-                match get_res.payload {
-                    GetResultPayload::File(_, p) => {
-                        io_uring_flag = true;
-                        let filename_str = p.to_str().ok_or(ZarrError::Read(
-                            "can't convert path to filename str".to_string(),
-                        ))?;
-                        io_uring_worker_pool.add_file(filename_str.to_string())?;
-                    }
-                    GetResultPayload::Stream(_) => {
-                        let data = get_res.bytes().await?.to_vec();
-                        chunk.add_array(var.to_string(), data);
-                    }
-                };
-            }
-        }
-
-        if io_uring_flag {
-            io_uring_worker_pool.run()?;
-            let data_buffers = io_uring_worker_pool.get_data();
-            let data_buffers = data_buffers.chunks(positions.len());
-            for (var, chunks_for_that_var) in cols.iter().zip(data_buffers.into_iter()) {
-                for (idx, data) in enumerate(chunks_for_that_var.iter()) {
-                    chunks[idx].add_array(var.to_string(), data.to_vec());
-                }
-            }
-        }
-
-        Ok(chunks)
     }
 }
 
@@ -314,6 +263,12 @@ mod zarr_read_async_tests {
         let store = ZarrPath::new(Arc::new(file_sys), p);
         let meta = store.get_zarr_metadata().await.unwrap();
 
+        // no broadcastable arrays
+        let mut bdc_axes: HashMap<String, Option<usize>> = HashMap::new();
+        for col in meta.get_columns() {
+            bdc_axes.insert(col.to_string(), None);
+        }
+
         // test read from an array where the data is just raw bytes
         let pos = vec![1, 2];
         let chunk = store
@@ -323,6 +278,7 @@ mod zarr_read_async_tests {
                 meta.get_real_dims(&pos),
                 meta.get_chunk_patterns(),
                 &mut io_uring_worker_pool,
+                &bdc_axes,
             )
             .await
             .unwrap();
@@ -345,6 +301,7 @@ mod zarr_read_async_tests {
                 meta.get_real_dims(&pos),
                 meta.get_chunk_patterns(),
                 &mut io_uring_worker_pool,
+                &bdc_axes,
             )
             .await
             .unwrap();
@@ -363,6 +320,7 @@ mod zarr_read_async_tests {
                 meta.get_real_dims(&pos),
                 meta.get_chunk_patterns(),
                 &mut io_uring_worker_pool,
+                &bdc_axes,
             )
             .await
             .unwrap();

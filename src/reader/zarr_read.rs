@@ -255,6 +255,7 @@ pub trait ZarrRead {
         cols: &[String],
         real_dims: Vec<usize>,
         patterns: HashMap<String, ChunkPattern>,
+        broadcast_axes: &HashMap<String, Option<usize>>,
     ) -> ZarrResult<ZarrInMemoryChunk>;
 }
 
@@ -274,6 +275,14 @@ impl ZarrRead for PathBuf {
                 p = dir_entry.path().join("zarr.json");
             }
 
+            // check if there's a file with attributes (only for v2)
+            let mut attrs: Option<String> = None;
+            let attrs_path = dir_entry.path().join(".zattrs");
+            if attrs_path.exists() {
+                let attrs_str = read_to_string(attrs_path)?;
+                attrs = Some(attrs_str.to_string());
+            }
+
             if p.exists() {
                 let meta_str = read_to_string(p)?;
                 meta.add_column(
@@ -285,6 +294,7 @@ impl ZarrRead for PathBuf {
                         .unwrap()
                         .to_string(),
                     &meta_str,
+                    attrs.as_deref(),
                 )?;
             }
         }
@@ -303,10 +313,18 @@ impl ZarrRead for PathBuf {
         cols: &[String],
         real_dims: Vec<usize>,
         patterns: HashMap<String, ChunkPattern>,
+        broadcast_axes: &HashMap<String, Option<usize>>,
     ) -> ZarrResult<ZarrInMemoryChunk> {
         let mut chunk = ZarrInMemoryChunk::new(real_dims);
         for var in cols {
-            let s: Vec<String> = position.iter().map(|i| i.to_string()).collect();
+            let axis = broadcast_axes.get(var).ok_or(ZarrError::InvalidMetadata(
+                "missing entry for broadcastable array params".to_string(),
+            ))?;
+            let s: Vec<String> = if let Some(axis) = axis {
+                vec![position[*axis].to_string()]
+            } else {
+                position.iter().map(|i| i.to_string()).collect()
+            };
             let pattern = patterns
                 .get(var.as_str())
                 .ok_or(ZarrError::InvalidMetadata(
@@ -400,6 +418,12 @@ mod zarr_read_tests {
         let p = get_test_data_path("raw_bytes_example.zarr".to_string());
         let meta = p.get_zarr_metadata().unwrap();
 
+        // no broadcastable arrays
+        let mut bdc_axes: HashMap<String, Option<usize>> = HashMap::new();
+        for col in meta.get_columns() {
+            bdc_axes.insert(col.to_string(), None);
+        }
+
         // test read from an array where the data is just raw bytes
         let pos = vec![1, 2];
         let chunk = p
@@ -408,6 +432,7 @@ mod zarr_read_tests {
                 meta.get_columns(),
                 meta.get_real_dims(&pos),
                 meta.get_chunk_patterns(),
+                &bdc_axes,
             )
             .unwrap();
         assert_eq!(
@@ -428,6 +453,7 @@ mod zarr_read_tests {
                 &cols,
                 meta.get_real_dims(&pos),
                 meta.get_chunk_patterns(),
+                &bdc_axes,
             )
             .unwrap();
         assert_eq!(
@@ -444,6 +470,7 @@ mod zarr_read_tests {
                 &cols,
                 meta.get_real_dims(&pos),
                 meta.get_chunk_patterns(),
+                &bdc_axes,
             )
             .unwrap();
         assert_eq!(
