@@ -775,6 +775,28 @@ mod zarr_async_reader_tests {
         assert!(matched);
     }
 
+    fn compare_values<T>(col_name1: &str, col_name2: &str, rec: &RecordBatch)
+    where
+        T: ArrowPrimitiveType,
+    {
+        let mut vals1 = None;
+        let mut vals2 = None;
+        for (idx, col) in enumerate(rec.schema().fields.iter()) {
+            if col.name().as_str() == col_name1 {
+                vals1 = Some(rec.column(idx).as_primitive::<T>().values())
+            } else if col.name().as_str() == col_name2 {
+                vals2 = Some(rec.column(idx).as_primitive::<T>().values())
+            }
+        }
+
+        if let (Some(vals1), Some(vals2)) = (vals1, vals2) {
+            assert_eq!(vals1, vals2);
+            return;
+        }
+
+        panic!("columns not found");
+    }
+
     // create a test filter
     fn create_filter() -> ZarrChunkFilter {
         let mut filters: Vec<Box<dyn ZarrArrowPredicate>> = Vec::new();
@@ -1047,7 +1069,7 @@ mod zarr_async_reader_tests {
             "float_data",
             rec,
             &[
-                32.0, 33.0, 40.0, 41.0, 34.0, 35.0, 42.0, 43.0, 48.0, 49.0, 56.0, 57.0, 50.0, 51.0,
+                32.0, 33.0, 34.0, 35.0, 40.0, 41.0, 42.0, 43.0, 48.0, 49.0, 50.0, 51.0, 56.0, 57.0,
                 58.0, 59.0,
             ],
         );
@@ -1055,7 +1077,7 @@ mod zarr_async_reader_tests {
             "int_data",
             rec,
             &[
-                32, 33, 40, 41, 34, 35, 42, 43, 48, 49, 56, 57, 50, 51, 58, 59,
+                32, 33, 34, 35, 40, 41, 42, 43, 48, 49, 50, 51, 56, 57, 58, 59,
             ],
         );
     }
@@ -1076,10 +1098,10 @@ mod zarr_async_reader_tests {
             "float_data",
             rec,
             &[
-                1020.0, 1021.0, 1031.0, 1032.0, 1141.0, 1142.0, 1152.0, 1153.0, 1022.0, 1033.0,
-                1143.0, 1154.0, 1042.0, 1043.0, 1053.0, 1054.0, 1163.0, 1164.0, 1174.0, 1175.0,
-                1044.0, 1055.0, 1165.0, 1176.0, 1262.0, 1263.0, 1273.0, 1274.0, 1264.0, 1275.0,
-                1284.0, 1285.0, 1295.0, 1296.0, 1286.0, 1297.0,
+                1020.0, 1021.0, 1022.0, 1031.0, 1032.0, 1033.0, 1042.0, 1043.0, 1044.0, 1053.0,
+                1054.0, 1055.0, 1141.0, 1142.0, 1143.0, 1152.0, 1153.0, 1154.0, 1163.0, 1164.0,
+                1165.0, 1174.0, 1175.0, 1176.0, 1262.0, 1263.0, 1264.0, 1273.0, 1274.0, 1275.0,
+                1284.0, 1285.0, 1286.0, 1295.0, 1296.0, 1297.0,
             ],
         );
     }
@@ -1101,5 +1123,29 @@ mod zarr_async_reader_tests {
             rec,
             &[4, 5, 6, 7, 20, 21, 22, 23, 36, 37, 38, 39, 52, 53, 54, 55],
         );
+    }
+
+    #[tokio::test]
+    async fn with_partial_sharding_tests() {
+        let zp = get_v3_test_zarr_path("with_partial_sharding.zarr".to_string());
+        let stream_builder = ZarrRecordBatchStreamBuilder::new(zp);
+
+        let stream = stream_builder.build().await.unwrap();
+        let records: Vec<_> = stream.try_collect().await.unwrap();
+        for rec in records {
+            compare_values::<Float64Type>("float_data_not_sharded", "float_data_sharded", &rec);
+        }
+    }
+
+    #[tokio::test]
+    async fn with_partial_sharding_3d_tests() {
+        let zp = get_v3_test_zarr_path("with_partial_sharding_3D.zarr".to_string());
+        let stream_builder = ZarrRecordBatchStreamBuilder::new(zp);
+
+        let stream = stream_builder.build().await.unwrap();
+        let records: Vec<_> = stream.try_collect().await.unwrap();
+        for rec in records {
+            compare_values::<Float64Type>("float_data_not_sharded", "float_data_sharded", &rec);
+        }
     }
 }
