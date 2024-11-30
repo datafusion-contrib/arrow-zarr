@@ -158,7 +158,7 @@ impl<'a> ZarrFilterCandidateBuilder<'a> {
     }
 }
 
-impl<'a> TreeNodeRewriter for ZarrFilterCandidateBuilder<'a> {
+impl TreeNodeRewriter for ZarrFilterCandidateBuilder<'_> {
     type N = Arc<dyn PhysicalExpr>;
 
     fn pre_visit(&mut self, node: &Arc<dyn PhysicalExpr>) -> DataFusionResult<RewriteRecursion> {
