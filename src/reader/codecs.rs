@@ -602,7 +602,7 @@ fn broadcast_array<T: Clone>(
 // a time, and the "flat" data from the inner shard is read in small
 // chunks and written to the correct position in the array for the entire
 // outer chunk.
-fn fill_data_from_shard<T: Copy>(
+fn fill_data_from_shard<T: Clone>(
     data: &mut [T],
     shard_data: &[T],
     chunk_real_dims: &[usize],
@@ -622,7 +622,7 @@ fn fill_data_from_shard<T: Copy>(
         // from the start of the 1D outer chunk.
         1 => {
             let stride = inner_dims[0];
-            data[pos * stride..(pos + 1) * stride].copy_from_slice(shard_data);
+            data[pos * stride..(pos + 1) * stride].clone_from_slice(shard_data);
         }
         // The 2D case is trickier, we need to keep track of the inner shard
         // position within the outer chunk, as well the where we're reading
@@ -649,7 +649,7 @@ fn fill_data_from_shard<T: Copy>(
                 // within the chunk, times the number of columns per shard.
                 let chunk_offset = (shard_pos[0] * inner_dims[0] + row_idx) * chunk_real_dims[1]
                     + shard_pos[1] * inner_dims[1];
-                data[chunk_offset..chunk_offset + stride].copy_from_slice(shard_row);
+                data[chunk_offset..chunk_offset + stride].clone_from_slice(shard_row);
             }
         }
         // similar to the 2D case, but a but more complicated, for 3D arrays.
@@ -672,7 +672,7 @@ fn fill_data_from_shard<T: Copy>(
                         + (shard_pos[1] * inner_dims[1] + row_idx) * chunk_real_dims[2]
                         + shard_pos[2] * inner_dims[2];
 
-                    data[chunk_offset..chunk_offset + stride].copy_from_slice(shard_row);
+                    data[chunk_offset..chunk_offset + stride].clone_from_slice(shard_row);
                 }
             }
         }
@@ -802,7 +802,7 @@ fn decode_string_chunk(
         bytes = bytes.iter().step_by(PY_UNICODE_SIZE).copied().collect();
     }
 
-    let mut data = Vec::new();
+    let mut data;
     if let Some(sharding_params) = sharding_params.as_ref() {
         let mut index_size: usize = 2 * 8 * sharding_params.n_chunks.iter().product::<usize>();
         index_size += sharding_params
@@ -815,18 +815,35 @@ fn decode_string_chunk(
         };
         let (offsets, nbytes) = extract_sharding_index(&sharding_params.index_codecs, index_bytes)?;
 
+        data = vec![String::default(); bytes.len()];
+        let mut total_length = 0;
         for (pos, (o, n)) in offsets.iter().zip(nbytes.iter()).enumerate() {
+            // the below condition indicates an empty shard
+            if o == &NULL_OFFSET && n == &NULL_NBYTES {
+                continue;
+            }
+            let inner_real_dims = get_inner_chunk_real_dims(sharding_params, real_dims, pos);
             let inner_data = decode_string_chunk(
                 bytes[*o..o + n].to_vec(),
                 str_len,
                 &sharding_params.chunk_shape,
-                &get_inner_chunk_real_dims(sharding_params, real_dims, pos), // TODO: fix this to real dims
+                &inner_real_dims,
                 &sharding_params.codecs,
                 None,
                 pyunicode,
             )?;
-            data.extend(inner_data);
+            total_length += inner_data.len();
+            fill_data_from_shard(
+                &mut data,
+                &inner_data,
+                real_dims,
+                chunk_dims,
+                &inner_real_dims,
+                &sharding_params.chunk_shape,
+                pos,
+            )?;
         }
+        data = data[0..total_length].to_vec();
     } else if let Some(ZarrCodec::Bytes(_)) = array_to_bytes_codec {
         data = bytes
             .chunks(str_len)

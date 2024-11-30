@@ -544,7 +544,7 @@ pub struct ZarrRecordBatchStreamNonBlocking<'a, T: ZarrStream> {
     _mask: Option<BooleanArray>,
 }
 
-impl<'a, T: ZarrStream> ZarrRecordBatchStreamNonBlocking<'a, T> {
+impl<T: ZarrStream> ZarrRecordBatchStreamNonBlocking<'_, T> {
     fn new(meta: ZarrStoreMetadata, filter: Option<ZarrChunkFilter>, store: T) -> Self {
         Self {
             meta,
@@ -557,7 +557,7 @@ impl<'a, T: ZarrStream> ZarrRecordBatchStreamNonBlocking<'a, T> {
     }
 }
 
-impl<'a, T> Stream for ZarrRecordBatchStreamNonBlocking<'a, T>
+impl<T> Stream for ZarrRecordBatchStreamNonBlocking<'_, T>
 where
     T: ZarrStream + Unpin + Send + 'static,
 {

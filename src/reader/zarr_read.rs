@@ -156,11 +156,11 @@ impl ZarrProjection {
             ProjectionType::Null => Ok(all_cols.to_owned()),
             ProjectionType::Skip => {
                 let col_names = self.col_names.as_ref().unwrap();
-                return Ok(all_cols
+                Ok(all_cols
                     .iter()
                     .filter(|x| !col_names.contains(x))
                     .map(|x| x.to_string())
-                    .collect());
+                    .collect())
             }
             ProjectionType::Select => {
                 let col_names = self.col_names.as_ref().unwrap();
