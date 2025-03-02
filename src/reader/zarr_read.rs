@@ -364,33 +364,30 @@ impl ZarrRead for PathBuf {
 #[cfg(test)]
 mod zarr_read_tests {
     use std::collections::HashSet;
-    use std::path::PathBuf;
 
     use super::*;
     use crate::reader::codecs::{Endianness, ZarrCodec, ZarrDataType};
     use crate::reader::metadata::{ChunkSeparator, ZarrArrayMetadata};
-
-    fn get_test_data_path(zarr_store: String) -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("test-data/data/zarr/v2_data")
-            .join(zarr_store)
-    }
+    use crate::test_utils::{StoreWrapper, store_raw_bytes};
+    use rstest::*;
 
     // read the store metadata, given a path to a zarr store.
-    #[test]
-    fn read_metadata() {
-        let p = get_test_data_path("raw_bytes_example.zarr".to_string());
+    #[rstest]
+    fn read_metadata(
+        #[with("read_metadata".to_string())] store_raw_bytes: StoreWrapper
+    ) {
+        let p = store_raw_bytes.store_path();
         let meta = p.get_zarr_metadata().unwrap();
 
         assert_eq!(meta.get_columns(), &vec!["byte_data", "float_data"]);
         assert_eq!(
             meta.get_array_meta("byte_data").unwrap(),
             &ZarrArrayMetadata::new(
-                2,
+                3,
                 ZarrDataType::UInt(1),
                 ChunkPattern {
-                    separator: ChunkSeparator::Period,
-                    c_prefix: false
+                    separator: ChunkSeparator::Slash,
+                    c_prefix: true
                 },
                 None,
                 vec![ZarrCodec::Bytes(Endianness::Little)],
@@ -399,11 +396,11 @@ mod zarr_read_tests {
         assert_eq!(
             meta.get_array_meta("float_data").unwrap(),
             &ZarrArrayMetadata::new(
-                2,
+                3,
                 ZarrDataType::Float(8),
                 ChunkPattern {
-                    separator: ChunkSeparator::Period,
-                    c_prefix: false
+                    separator: ChunkSeparator::Slash,
+                    c_prefix: true
                 },
                 None,
                 vec![ZarrCodec::Bytes(Endianness::Little)],
@@ -413,9 +410,11 @@ mod zarr_read_tests {
 
     // read the raw data contained into a zarr store. one of the variables contains
     // byte data, which we explicitly check here.
-    #[test]
-    fn read_raw_chunks() {
-        let p = get_test_data_path("raw_bytes_example.zarr".to_string());
+    #[rstest]
+    fn read_raw_chunks(
+        #[with("read_raw_chunks".to_string())] store_raw_bytes: StoreWrapper
+    ) {
+        let p = store_raw_bytes.store_path();
         let meta = p.get_zarr_metadata().unwrap();
 
         // no broadcastable arrays

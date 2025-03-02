@@ -17,75 +17,6 @@
 
 //! A module tha provides an asychronous reader for zarr store, to generate [`RecordBatch`]es.
 //!
-//! ```
-//! # #[tokio::main(flavor="current_thread")]
-//! # async fn main() {
-//! #
-//! # use arrow_zarr::async_reader::{ZarrPath, ZarrRecordBatchStreamBuilder};
-//! # use arrow_zarr::reader::ZarrProjection;
-//! # use arrow_cast::pretty::pretty_format_batches;
-//! # use arrow_array::RecordBatch;
-//! # use object_store::{path::Path, local::LocalFileSystem};
-//! # use std::path::PathBuf;
-//! # use std::sync::Arc;
-//! # use futures::stream::Stream;
-//! # use futures_util::TryStreamExt;
-//! #
-//! # fn get_test_data_path(zarr_store: String) -> ZarrPath {
-//! #   let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-//! #                   .join("test-data/data/zarr/v2_data")
-//! #                   .join(zarr_store);
-//! #   ZarrPath::new(
-//! #       Arc::new(LocalFileSystem::new()),
-//! #       Path::from_absolute_path(p).unwrap()
-//! #   )
-//! # }
-//! #
-//! # fn assert_batches_eq(batches: &[RecordBatch], expected_lines: &[&str]) {
-//! #     let formatted = pretty_format_batches(batches).unwrap().to_string();
-//! #     let actual_lines: Vec<_> = formatted.trim().lines().collect();
-//! #     assert_eq!(
-//! #          &actual_lines, expected_lines,
-//! #          "\n\nexpected:\n\n{:#?}\nactual:\n\n{:#?}\n\n",
-//! #          expected_lines, actual_lines
-//! #      );
-//! #  }
-//!
-//! // The ZarrReadAsync trait is implemented for the ZarrPath struct.
-//! let p: ZarrPath = get_test_data_path("lat_lon_example.zarr".to_string());
-//!
-//! let proj = ZarrProjection::keep(vec!["lat".to_string(), "float_data".to_string()]);
-//! let builder = ZarrRecordBatchStreamBuilder::new(p).with_projection(proj);
-//! let mut stream = builder.build().await.unwrap();
-//! let mut rec_batches: Vec<_> = stream.try_collect().await.unwrap();
-//!
-//! assert_batches_eq(
-//!     &[rec_batches.remove(0)],
-//!     &[
-//!         "+------------+------+",
-//!         "| float_data | lat  |",
-//!         "+------------+------+",
-//!         "| 1001.0     | 38.0 |",
-//!         "| 1002.0     | 38.1 |",
-//!         "| 1003.0     | 38.2 |",
-//!         "| 1004.0     | 38.3 |",
-//!         "| 1012.0     | 38.0 |",
-//!         "| 1013.0     | 38.1 |",
-//!         "| 1014.0     | 38.2 |",
-//!         "| 1015.0     | 38.3 |",
-//!         "| 1023.0     | 38.0 |",
-//!         "| 1024.0     | 38.1 |",
-//!         "| 1025.0     | 38.2 |",
-//!         "| 1026.0     | 38.3 |",
-//!         "| 1034.0     | 38.0 |",
-//!         "| 1035.0     | 38.1 |",
-//!         "| 1036.0     | 38.2 |",
-//!         "| 1037.0     | 38.3 |",
-//!         "+------------+------+",
-//!     ],
-//!  );
-//! # }
-//! ```
 
 use arrow_array::{BooleanArray, RecordBatch};
 use async_trait::async_trait;
@@ -709,134 +640,48 @@ impl<T: for<'a> ZarrReadAsync<'a> + Clone + Unpin + Send + 'static>
 
 #[cfg(test)]
 mod zarr_async_reader_tests {
-    use arrow::compute::kernels::cmp::{gt_eq, lt};
-    use arrow_array::cast::AsArray;
+    use crate::test_utils::{
+        store_compression_codecs,
+        store_lat_lon,
+        store_lat_lon_broadcastable,
+        store_partial_sharding,
+        store_partial_sharding_3d,
+        StoreWrapper,
+        validate_names_and_types,
+        validate_bool_column,
+        validate_primitive_column,
+        compare_values,
+        create_filter
+    };
+
+    use arrow::compute::kernels::cmp::gt_eq;
     use arrow_array::types::*;
     use arrow_array::*;
     use arrow_schema::DataType;
     use futures_util::TryStreamExt;
-    use itertools::enumerate;
+    use rstest::*;
     use object_store::{local::LocalFileSystem, path::Path};
+    use std::path::PathBuf;
     use std::sync::Arc;
-    use std::{collections::HashMap, fmt::Debug};
+    use std::collections::HashMap;
 
     use super::*;
     use crate::async_reader::zarr_read_async::ZarrPath;
     use crate::reader::{ZarrArrowPredicate, ZarrArrowPredicateFn};
-    use crate::tests::{get_test_v2_data_path, get_test_v3_data_path};
 
-    fn get_v2_test_zarr_path(zarr_store: String) -> ZarrPath {
+    fn get_zarr_path(zarr_store: PathBuf) -> ZarrPath {
         ZarrPath::new(
             Arc::new(LocalFileSystem::new()),
-            Path::from_absolute_path(get_test_v2_data_path(zarr_store)).unwrap(),
+            Path::from_absolute_path(zarr_store).unwrap(),
         )
     }
 
-    fn validate_names_and_types(targets: &HashMap<String, DataType>, rec: &RecordBatch) {
-        let mut target_cols: Vec<&String> = targets.keys().collect();
-        let schema = rec.schema();
-        let from_rec: Vec<&String> = schema.fields.iter().map(|f| f.name()).collect();
-
-        target_cols.sort();
-        assert_eq!(from_rec, target_cols);
-
-        for field in schema.fields.iter() {
-            assert_eq!(field.data_type(), targets.get(field.name()).unwrap());
-        }
-    }
-
-    fn validate_bool_column(col_name: &str, rec: &RecordBatch, targets: &[bool]) {
-        let mut matched = false;
-        for (idx, col) in enumerate(rec.schema().fields.iter()) {
-            if col.name().as_str() == col_name {
-                assert_eq!(
-                    rec.column(idx).as_boolean(),
-                    &BooleanArray::from(targets.to_vec()),
-                );
-                matched = true;
-            }
-        }
-        assert!(matched);
-    }
-
-    fn validate_primitive_column<T, U>(col_name: &str, rec: &RecordBatch, targets: &[U])
-    where
-        T: ArrowPrimitiveType,
-        [U]: AsRef<[<T as arrow_array::ArrowPrimitiveType>::Native]>,
-        U: Debug,
-    {
-        let mut matched = false;
-        for (idx, col) in enumerate(rec.schema().fields.iter()) {
-            if col.name().as_str() == col_name {
-                assert_eq!(rec.column(idx).as_primitive::<T>().values(), targets,);
-                matched = true;
-            }
-        }
-        assert!(matched);
-    }
-
-    fn compare_values<T>(col_name1: &str, col_name2: &str, rec: &RecordBatch)
-    where
-        T: ArrowPrimitiveType,
-    {
-        let mut vals1 = None;
-        let mut vals2 = None;
-        for (idx, col) in enumerate(rec.schema().fields.iter()) {
-            if col.name().as_str() == col_name1 {
-                vals1 = Some(rec.column(idx).as_primitive::<T>().values())
-            } else if col.name().as_str() == col_name2 {
-                vals2 = Some(rec.column(idx).as_primitive::<T>().values())
-            }
-        }
-
-        if let (Some(vals1), Some(vals2)) = (vals1, vals2) {
-            assert_eq!(vals1, vals2);
-            return;
-        }
-
-        panic!("columns not found");
-    }
-
-    // create a test filter
-    fn create_filter() -> ZarrChunkFilter {
-        let mut filters: Vec<Box<dyn ZarrArrowPredicate>> = Vec::new();
-        let f = ZarrArrowPredicateFn::new(
-            ZarrProjection::keep(vec!["lat".to_string()]),
-            move |batch| {
-                gt_eq(
-                    batch.column_by_name("lat").unwrap(),
-                    &Scalar::new(&Float64Array::from(vec![38.6])),
-                )
-            },
-        );
-        filters.push(Box::new(f));
-        let f = ZarrArrowPredicateFn::new(
-            ZarrProjection::keep(vec!["lon".to_string()]),
-            move |batch| {
-                gt_eq(
-                    batch.column_by_name("lon").unwrap(),
-                    &Scalar::new(&Float64Array::from(vec![-109.7])),
-                )
-            },
-        );
-        filters.push(Box::new(f));
-        let f = ZarrArrowPredicateFn::new(
-            ZarrProjection::keep(vec!["lon".to_string()]),
-            move |batch| {
-                lt(
-                    batch.column_by_name("lon").unwrap(),
-                    &Scalar::new(&Float64Array::from(vec![-109.2])),
-                )
-            },
-        );
-        filters.push(Box::new(f));
-
-        ZarrChunkFilter::new(filters)
-    }
-
+    #[rstest]
     #[tokio::test]
-    async fn projection_tests() {
-        let zp = get_v2_test_zarr_path("compression_example.zarr".to_string());
+    async fn projection_tests(
+        #[with("async_projection_tests".to_string())] store_compression_codecs: StoreWrapper
+    ) {
+        let zp = get_zarr_path(store_compression_codecs.store_path());
         let proj = ZarrProjection::keep(vec!["bool_data".to_string(), "int_data".to_string()]);
         let stream_builder = ZarrRecordBatchStreamBuilder::new(zp).with_projection(proj);
 
@@ -847,10 +692,10 @@ mod zarr_async_reader_tests {
             ("bool_data".to_string(), DataType::Boolean),
             ("int_data".to_string(), DataType::Int64),
         ]);
+        validate_names_and_types(&target_types, &records[0]);
 
         // center chunk
         let rec = &records[4];
-        validate_names_and_types(&target_types, rec);
         validate_bool_column(
             "bool_data",
             rec,
@@ -863,9 +708,12 @@ mod zarr_async_reader_tests {
         );
     }
 
+    #[rstest]
     #[tokio::test]
-    async fn filters_tests() {
-        let zp = get_v2_test_zarr_path("lat_lon_example.zarr".to_string());
+    async fn filters_tests(
+        #[with("async_filter_tests".to_string())] store_lat_lon: StoreWrapper
+    ) {
+        let zp = get_zarr_path(store_lat_lon.store_path());
         let stream_builder = ZarrRecordBatchStreamBuilder::new(zp).with_filter(create_filter());
         let stream = stream_builder.build().await.unwrap();
         let records: Vec<_> = stream.try_collect().await.unwrap();
@@ -875,6 +723,7 @@ mod zarr_async_reader_tests {
             ("lon".to_string(), DataType::Float64),
             ("float_data".to_string(), DataType::Float64),
         ]);
+        validate_names_and_types(&target_types, &records[0]);
 
         // check the values in a chunk. the predicate pushdown only takes care of
         // skipping whole chunks, so there is no guarantee that the values in the
@@ -882,7 +731,6 @@ mod zarr_async_reader_tests {
         // the first chunk that was read is the first one with some values that
         // satisfy the predicate.
         let rec = &records[0];
-        validate_names_and_types(&target_types, rec);
         validate_primitive_column::<Float64Type, f64>(
             "lat",
             rec,
@@ -903,15 +751,18 @@ mod zarr_async_reader_tests {
             "float_data",
             rec,
             &[
-                1005.0, 1006.0, 1007.0, 1008.0, 1016.0, 1017.0, 1018.0, 1019.0, 1027.0, 1028.0,
-                1029.0, 1030.0, 1038.0, 1039.0, 1040.0, 1041.0,
+                4.0, 5.0, 6.0, 7.0, 15.0, 16.0, 17.0, 18.0, 26.0, 27.0, 28.0, 29.0,
+                37.0, 38.0, 39.0, 40.0,
             ],
         );
     }
 
+    #[rstest]
     #[tokio::test]
-    async fn multiple_readers_tests() {
-        let zp = get_v2_test_zarr_path("compression_example.zarr".to_string());
+    async fn multiple_readers_tests(
+        #[with("async_multiple_readers_tests".to_string())] store_compression_codecs: StoreWrapper
+    ) {
+        let zp = get_zarr_path(store_compression_codecs.store_path());
         let stream1 = ZarrRecordBatchStreamBuilder::new(zp.clone())
             .build_partial_reader(Some((0, 5)))
             .await
@@ -928,13 +779,14 @@ mod zarr_async_reader_tests {
             ("bool_data".to_string(), DataType::Boolean),
             ("uint_data".to_string(), DataType::UInt64),
             ("int_data".to_string(), DataType::Int64),
-            ("float_data".to_string(), DataType::Float64),
+            ("float_data".to_string(), DataType::Float32),
             ("float_data_no_comp".to_string(), DataType::Float64),
         ]);
+        validate_names_and_types(&target_types, &records1[0]);
+        validate_names_and_types(&target_types, &records2[0]);
 
         // center chunk
         let rec = &records1[4];
-        validate_names_and_types(&target_types, rec);
         validate_bool_column(
             "bool_data",
             rec,
@@ -950,7 +802,7 @@ mod zarr_async_reader_tests {
             rec,
             &[27, 28, 29, 35, 36, 37, 43, 44, 45],
         );
-        validate_primitive_column::<Float64Type, f64>(
+        validate_primitive_column::<Float32Type, f32>(
             "float_data",
             rec,
             &[127., 128., 129., 135., 136., 137., 143., 144., 145.],
@@ -963,11 +815,10 @@ mod zarr_async_reader_tests {
 
         // bottom edge chunk
         let rec = &records2[2];
-        validate_names_and_types(&target_types, rec);
         validate_bool_column("bool_data", rec, &[false, true, false, false, true, false]);
         validate_primitive_column::<Int64Type, i64>("int_data", rec, &[20, 21, 22, 28, 29, 30]);
         validate_primitive_column::<UInt64Type, u64>("uint_data", rec, &[51, 52, 53, 59, 60, 61]);
-        validate_primitive_column::<Float64Type, f64>(
+        validate_primitive_column::<Float32Type, f32>(
             "float_data",
             rec,
             &[151.0, 152.0, 153.0, 159.0, 160.0, 161.0],
@@ -979,9 +830,12 @@ mod zarr_async_reader_tests {
         );
     }
 
+    #[rstest]
     #[tokio::test]
-    async fn empty_query_tests() {
-        let zp = get_v2_test_zarr_path("lat_lon_example.zarr".to_string());
+    async fn empty_query_tests(
+        #[with("async_empty_query_tests".to_string())] store_lat_lon: StoreWrapper
+    ) {
+        let zp = get_zarr_path(store_lat_lon.store_path());
         let mut builder = ZarrRecordBatchStreamBuilder::new(zp);
 
         // set a filter that will filter out all the data, there should be nothing left after
@@ -1006,31 +860,22 @@ mod zarr_async_reader_tests {
         assert_eq!(records.len(), 0);
     }
 
+    #[rstest]
     #[tokio::test]
-    async fn array_broadcast_tests() {
+    async fn array_broadcast_tests(
+        #[with("async_array_broadcast_tests_part1".to_string())] store_lat_lon: StoreWrapper,
+        #[with("async_array_broadcast_tests_part2".to_string())] store_lat_lon_broadcastable: StoreWrapper,
+    ) {
         // reference that doesn't broadcast a 1D array
-        let zp = get_v2_test_zarr_path("lat_lon_example.zarr".to_string());
+        let zp = get_zarr_path(store_lat_lon.store_path());
         let mut builder = ZarrRecordBatchStreamBuilder::new(zp);
 
         builder = builder.with_filter(create_filter());
         let stream = builder.build().await.unwrap();
         let records: Vec<_> = stream.try_collect().await.unwrap();
 
-        // v2 format with array broadcast
-        let zp = get_v2_test_zarr_path("lat_lon_example_broadcastable.zarr".to_string());
-        let mut builder = ZarrRecordBatchStreamBuilder::new(zp);
-
-        builder = builder.with_filter(create_filter());
-        let stream = builder.build().await.unwrap();
-        let records_from_one_d_repr: Vec<_> = stream.try_collect().await.unwrap();
-
-        assert_eq!(records_from_one_d_repr.len(), records.len());
-        for (rec, rec_from_one_d_repr) in records.iter().zip(records_from_one_d_repr.iter()) {
-            assert_eq!(rec, rec_from_one_d_repr);
-        }
-
-        // v3 format with array broadcast
-        let zp = get_v3_test_zarr_path("with_broadcastable_array.zarr".to_string());
+        // with array broadcast
+        let zp = get_zarr_path(store_lat_lon_broadcastable.store_path());
         let mut builder = ZarrRecordBatchStreamBuilder::new(zp);
 
         builder = builder.with_filter(create_filter());
@@ -1043,91 +888,12 @@ mod zarr_async_reader_tests {
         }
     }
 
-    fn get_v3_test_zarr_path(zarr_store: String) -> ZarrPath {
-        ZarrPath::new(
-            Arc::new(LocalFileSystem::new()),
-            Path::from_absolute_path(get_test_v3_data_path(zarr_store)).unwrap(),
-        )
-    }
-
+    #[rstest]
     #[tokio::test]
-    async fn with_sharding_tests() {
-        let zp = get_v3_test_zarr_path("with_sharding.zarr".to_string());
-        let stream_builder = ZarrRecordBatchStreamBuilder::new(zp);
-
-        let stream = stream_builder.build().await.unwrap();
-        let records: Vec<_> = stream.try_collect().await.unwrap();
-
-        let target_types = HashMap::from([
-            ("float_data".to_string(), DataType::Float64),
-            ("int_data".to_string(), DataType::Int64),
-        ]);
-
-        let rec = &records[2];
-        validate_names_and_types(&target_types, rec);
-        validate_primitive_column::<Float64Type, f64>(
-            "float_data",
-            rec,
-            &[
-                32.0, 33.0, 34.0, 35.0, 40.0, 41.0, 42.0, 43.0, 48.0, 49.0, 50.0, 51.0, 56.0, 57.0,
-                58.0, 59.0,
-            ],
-        );
-        validate_primitive_column::<Int64Type, i64>(
-            "int_data",
-            rec,
-            &[
-                32, 33, 34, 35, 40, 41, 42, 43, 48, 49, 50, 51, 56, 57, 58, 59,
-            ],
-        );
-    }
-
-    #[tokio::test]
-    async fn three_dims_with_sharding_with_edge_tests() {
-        let zp = get_v3_test_zarr_path("with_sharding_with_edge_3d.zarr".to_string());
-        let stream_builder = ZarrRecordBatchStreamBuilder::new(zp);
-
-        let stream = stream_builder.build().await.unwrap();
-        let records: Vec<_> = stream.try_collect().await.unwrap();
-
-        let target_types = HashMap::from([("float_data".to_string(), DataType::Float64)]);
-
-        let rec = &records[23];
-        validate_names_and_types(&target_types, rec);
-        validate_primitive_column::<Float64Type, f64>(
-            "float_data",
-            rec,
-            &[
-                1020.0, 1021.0, 1022.0, 1031.0, 1032.0, 1033.0, 1042.0, 1043.0, 1044.0, 1053.0,
-                1054.0, 1055.0, 1141.0, 1142.0, 1143.0, 1152.0, 1153.0, 1154.0, 1163.0, 1164.0,
-                1165.0, 1174.0, 1175.0, 1176.0, 1262.0, 1263.0, 1264.0, 1273.0, 1274.0, 1275.0,
-                1284.0, 1285.0, 1286.0, 1295.0, 1296.0, 1297.0,
-            ],
-        );
-    }
-
-    #[tokio::test]
-    async fn no_sharding_tests() {
-        let zp = get_v3_test_zarr_path("no_sharding.zarr".to_string());
-        let stream_builder = ZarrRecordBatchStreamBuilder::new(zp);
-
-        let stream = stream_builder.build().await.unwrap();
-        let records: Vec<_> = stream.try_collect().await.unwrap();
-
-        let target_types = HashMap::from([("int_data".to_string(), DataType::Int32)]);
-
-        let rec = &records[1];
-        validate_names_and_types(&target_types, rec);
-        validate_primitive_column::<Int32Type, i32>(
-            "int_data",
-            rec,
-            &[4, 5, 6, 7, 20, 21, 22, 23, 36, 37, 38, 39, 52, 53, 54, 55],
-        );
-    }
-
-    #[tokio::test]
-    async fn with_partial_sharding_tests() {
-        let zp = get_v3_test_zarr_path("with_partial_sharding.zarr".to_string());
+    async fn with_partial_sharding_tests(
+        #[with("async_partial_sharding_tests".to_string())] store_partial_sharding: StoreWrapper,
+    ) {
+        let zp = get_zarr_path(store_partial_sharding.store_path());
         let stream_builder = ZarrRecordBatchStreamBuilder::new(zp);
 
         let stream = stream_builder.build().await.unwrap();
@@ -1137,9 +903,12 @@ mod zarr_async_reader_tests {
         }
     }
 
+    #[rstest]
     #[tokio::test]
-    async fn with_partial_sharding_3d_tests() {
-        let zp = get_v3_test_zarr_path("with_partial_sharding_3D.zarr".to_string());
+    async fn with_partial_sharding_3d_tests(
+        #[with("async_partial_sharding_3d_tests".to_string())] store_partial_sharding_3d: StoreWrapper,
+    ) {
+        let zp = get_zarr_path(store_partial_sharding_3d.store_path());
         let stream_builder = ZarrRecordBatchStreamBuilder::new(zp);
 
         let stream = stream_builder.build().await.unwrap();

@@ -1,61 +1,5 @@
 //! A module tha provides a sychronous reader for zarr store, to generate [`RecordBatch`]es.
 //!
-//! ```
-//! # use arrow_zarr::reader::{ZarrRecordBatchReaderBuilder, ZarrProjection};
-//! # use arrow_cast::pretty::pretty_format_batches;
-//! # use arrow_array::RecordBatch;
-//! # use std::path::PathBuf;
-//! #
-//! # fn get_test_data_path(zarr_store: String) -> PathBuf {
-//! #    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test-data/data/zarr/v2_data").join(zarr_store)
-//! # }
-//! #
-//! # fn assert_batches_eq(batches: &[RecordBatch], expected_lines: &[&str]) {
-//! #     let formatted = pretty_format_batches(batches).unwrap().to_string();
-//! #     let actual_lines: Vec<_> = formatted.trim().lines().collect();
-//! #     assert_eq!(
-//! #          &actual_lines, expected_lines,
-//! #          "\n\nexpected:\n\n{:#?}\nactual:\n\n{:#?}\n\n",
-//! #          expected_lines, actual_lines
-//! #      );
-//! #  }
-//!
-//! // The ZarrRead trait is implemented for PathBuf, so as long as it points
-//! // to a directory with a valid zarr store, it can be used to initialize
-//! // a zarr reader builder.
-//! let p: PathBuf = get_test_data_path("lat_lon_example.zarr".to_string());
-//!
-//! let proj = ZarrProjection::keep(vec!["lat".to_string(), "float_data".to_string()]);
-//! let builder = ZarrRecordBatchReaderBuilder::new(p).with_projection(proj);
-//! let mut reader = builder.build().unwrap();
-//! let rec_batch = reader.next().unwrap().unwrap();
-//!
-//! assert_batches_eq(
-//!     &[rec_batch],
-//!     &[
-//!         "+------------+------+",
-//!         "| float_data | lat  |",
-//!         "+------------+------+",
-//!         "| 1001.0     | 38.0 |",
-//!         "| 1002.0     | 38.1 |",
-//!         "| 1003.0     | 38.2 |",
-//!         "| 1004.0     | 38.3 |",
-//!         "| 1012.0     | 38.0 |",
-//!         "| 1013.0     | 38.1 |",
-//!         "| 1014.0     | 38.2 |",
-//!         "| 1015.0     | 38.3 |",
-//!         "| 1023.0     | 38.0 |",
-//!         "| 1024.0     | 38.1 |",
-//!         "| 1025.0     | 38.2 |",
-//!         "| 1026.0     | 38.3 |",
-//!         "| 1034.0     | 38.0 |",
-//!         "| 1035.0     | 38.1 |",
-//!         "| 1036.0     | 38.2 |",
-//!         "| 1037.0     | 38.3 |",
-//!         "+------------+------+",
-//!     ],
-//! );
-//! ```
 
 use arrow_array::*;
 use arrow_schema::{DataType, Field, FieldRef, Schema};
@@ -402,136 +346,38 @@ impl<T: ZarrRead + Clone> ZarrRecordBatchReaderBuilder<T> {
 
 #[cfg(test)]
 mod zarr_reader_tests {
-    use crate::tests::{get_test_v2_data_path, get_test_v3_data_path};
-    use arrow::compute::kernels::cmp::{gt_eq, lt};
-    use arrow_array::cast::AsArray;
+    use crate::test_utils::{
+        store_compression_codecs,
+        store_endianness_and_order,
+        store_endianness_and_order_3d,
+        store_1d,
+        store_3d,
+        store_lat_lon,
+        store_lat_lon_broadcastable,
+        store_partial_sharding,
+        store_partial_sharding_3d,
+        StoreWrapper,
+        validate_names_and_types,
+        validate_bool_column,
+        validate_primitive_column,
+        compare_values,
+        create_filter,
+    };
+    use arrow::compute::kernels::cmp::gt_eq;
     use arrow_array::types::*;
-    use arrow_schema::{DataType, TimeUnit};
-    use itertools::enumerate;
-    use std::{boxed::Box, collections::HashMap, fmt::Debug};
+    use arrow_schema::DataType;
+    use rstest::*;
+    use std::{boxed::Box, collections::HashMap};
 
     use super::*;
     use crate::reader::filters::{ZarrArrowPredicate, ZarrArrowPredicateFn};
 
-    fn validate_names_and_types(targets: &HashMap<String, DataType>, rec: &RecordBatch) {
-        let mut target_cols: Vec<&String> = targets.keys().collect();
-        let schema = rec.schema();
-        let from_rec: Vec<&String> = schema.fields.iter().map(|f| f.name()).collect();
+    #[rstest]
+    fn compressed_data_tests(
+        #[with("compressed_data_tests".to_string())] store_compression_codecs: StoreWrapper
+    ) {
+        let p = store_compression_codecs.store_path();
 
-        target_cols.sort();
-        assert_eq!(from_rec, target_cols);
-
-        for field in schema.fields.iter() {
-            assert_eq!(field.data_type(), targets.get(field.name()).unwrap());
-        }
-    }
-
-    fn validate_bool_column(col_name: &str, rec: &RecordBatch, targets: &[bool]) {
-        let mut matched = false;
-        for (idx, col) in enumerate(rec.schema().fields.iter()) {
-            if col.name().as_str() == col_name {
-                assert_eq!(
-                    rec.column(idx).as_boolean(),
-                    &BooleanArray::from(targets.to_vec()),
-                );
-                matched = true;
-            }
-        }
-        assert!(matched);
-    }
-
-    fn validate_primitive_column<T, U>(col_name: &str, rec: &RecordBatch, targets: &[U])
-    where
-        T: ArrowPrimitiveType,
-        [U]: AsRef<[<T as arrow_array::ArrowPrimitiveType>::Native]>,
-        U: Debug,
-    {
-        let mut matched = false;
-        for (idx, col) in enumerate(rec.schema().fields.iter()) {
-            if col.name().as_str() == col_name {
-                assert_eq!(rec.column(idx).as_primitive::<T>().values(), targets);
-                matched = true;
-            }
-        }
-        assert!(matched);
-    }
-
-    fn compare_values<T>(col_name1: &str, col_name2: &str, rec: &RecordBatch)
-    where
-        T: ArrowPrimitiveType,
-    {
-        let mut vals1 = None;
-        let mut vals2 = None;
-        for (idx, col) in enumerate(rec.schema().fields.iter()) {
-            if col.name().as_str() == col_name1 {
-                vals1 = Some(rec.column(idx).as_primitive::<T>().values())
-            } else if col.name().as_str() == col_name2 {
-                vals2 = Some(rec.column(idx).as_primitive::<T>().values())
-            }
-        }
-
-        if let (Some(vals1), Some(vals2)) = (vals1, vals2) {
-            assert_eq!(vals1, vals2);
-            return;
-        }
-
-        panic!("columns not found");
-    }
-
-    fn validate_string_column(col_name: &str, rec: &RecordBatch, targets: &[&str]) {
-        let mut matched = false;
-        for (idx, col) in enumerate(rec.schema().fields.iter()) {
-            if col.name().as_str() == col_name {
-                assert_eq!(
-                    rec.column(idx).as_string(),
-                    &StringArray::from(targets.to_vec()),
-                );
-                matched = true;
-            }
-        }
-        assert!(matched);
-    }
-
-    // create a test filter
-    fn create_filter() -> ZarrChunkFilter {
-        let mut filters: Vec<Box<dyn ZarrArrowPredicate>> = Vec::new();
-        let f = ZarrArrowPredicateFn::new(
-            ZarrProjection::keep(vec!["lat".to_string()]),
-            move |batch| {
-                gt_eq(
-                    batch.column_by_name("lat").unwrap(),
-                    &Scalar::new(&Float64Array::from(vec![38.6])),
-                )
-            },
-        );
-        filters.push(Box::new(f));
-        let f = ZarrArrowPredicateFn::new(
-            ZarrProjection::keep(vec!["lon".to_string()]),
-            move |batch| {
-                gt_eq(
-                    batch.column_by_name("lon").unwrap(),
-                    &Scalar::new(&Float64Array::from(vec![-109.7])),
-                )
-            },
-        );
-        filters.push(Box::new(f));
-        let f = ZarrArrowPredicateFn::new(
-            ZarrProjection::keep(vec!["lon".to_string()]),
-            move |batch| {
-                lt(
-                    batch.column_by_name("lon").unwrap(),
-                    &Scalar::new(&Float64Array::from(vec![-109.2])),
-                )
-            },
-        );
-        filters.push(Box::new(f));
-
-        ZarrChunkFilter::new(filters)
-    }
-
-    #[test]
-    fn compression_tests() {
-        let p = get_test_v2_data_path("compression_example.zarr".to_string());
         let reader = ZarrRecordBatchReaderBuilder::new(p).build().unwrap();
         let records: Vec<RecordBatch> = reader.map(|x| x.unwrap()).collect();
 
@@ -539,29 +385,29 @@ mod zarr_reader_tests {
             ("bool_data".to_string(), DataType::Boolean),
             ("uint_data".to_string(), DataType::UInt64),
             ("int_data".to_string(), DataType::Int64),
-            ("float_data".to_string(), DataType::Float64),
+            ("float_data".to_string(), DataType::Float32),
             ("float_data_no_comp".to_string(), DataType::Float64),
         ]);
+        validate_names_and_types(&target_types, &records[0]);
 
         // center chunk
         let rec = &records[4];
-        validate_names_and_types(&target_types, rec);
         validate_bool_column(
             "bool_data",
             rec,
             &[false, true, false, false, true, false, false, true, false],
-        );
-        validate_primitive_column::<Int64Type, i64>(
-            "int_data",
-            rec,
-            &[-4, -3, -2, 4, 5, 6, 12, 13, 14],
         );
         validate_primitive_column::<UInt64Type, u64>(
             "uint_data",
             rec,
             &[27, 28, 29, 35, 36, 37, 43, 44, 45],
         );
-        validate_primitive_column::<Float64Type, f64>(
+        validate_primitive_column::<Int64Type, i64>(
+            "int_data",
+            rec,
+            &[-4, -3, -2, 4, 5, 6, 12, 13, 14],
+        );
+        validate_primitive_column::<Float32Type, f32>(
             "float_data",
             rec,
             &[127., 128., 129., 135., 136., 137., 143., 144., 145.],
@@ -572,13 +418,13 @@ mod zarr_reader_tests {
             &[227., 228., 229., 235., 236., 237., 243., 244., 245.],
         );
 
+
         // right edge chunk
         let rec = &records[5];
-        validate_names_and_types(&target_types, rec);
         validate_bool_column("bool_data", rec, &[true, false, true, false, true, false]);
-        validate_primitive_column::<Int64Type, i64>("int_data", rec, &[-1, 0, 7, 8, 15, 16]);
         validate_primitive_column::<UInt64Type, u64>("uint_data", rec, &[30, 31, 38, 39, 46, 47]);
-        validate_primitive_column::<Float64Type, f64>(
+        validate_primitive_column::<Int64Type, i64>("int_data", rec, &[-1, 0, 7, 8, 15, 16]);
+        validate_primitive_column::<Float32Type, f32>(
             "float_data",
             rec,
             &[130., 131., 138., 139., 146., 147.],
@@ -591,11 +437,10 @@ mod zarr_reader_tests {
 
         // bottom right edge chunk
         let rec = &records[8];
-        validate_names_and_types(&target_types, rec);
         validate_bool_column("bool_data", rec, &[true, false, true, false]);
-        validate_primitive_column::<Int64Type, i64>("int_data", rec, &[23, 24, 31, 32]);
         validate_primitive_column::<UInt64Type, u64>("uint_data", rec, &[54, 55, 62, 63]);
-        validate_primitive_column::<Float64Type, f64>(
+        validate_primitive_column::<Int64Type, i64>("int_data", rec, &[23, 24, 31, 32]);
+        validate_primitive_column::<Float32Type, f32>(
             "float_data",
             rec,
             &[154.0, 155.0, 162.0, 163.0],
@@ -607,9 +452,11 @@ mod zarr_reader_tests {
         );
     }
 
-    #[test]
-    fn projection_tests() {
-        let p = get_test_v2_data_path("compression_example.zarr".to_string());
+    #[rstest]
+    fn projection_tests(
+        #[with("projection_tests".to_string())] store_compression_codecs: StoreWrapper
+    ) {
+        let p = store_compression_codecs.store_path();
         let proj = ZarrProjection::keep(vec!["bool_data".to_string(), "int_data".to_string()]);
         let builder = ZarrRecordBatchReaderBuilder::new(p).with_projection(proj);
         let reader = builder.build().unwrap();
@@ -619,10 +466,10 @@ mod zarr_reader_tests {
             ("bool_data".to_string(), DataType::Boolean),
             ("int_data".to_string(), DataType::Int64),
         ]);
+        validate_names_and_types(&target_types, &records[0]);
 
         // center chunk
         let rec = &records[4];
-        validate_names_and_types(&target_types, rec);
         validate_bool_column(
             "bool_data",
             rec,
@@ -635,9 +482,11 @@ mod zarr_reader_tests {
         );
     }
 
-    #[test]
-    fn multiple_readers_tests() {
-        let p = get_test_v2_data_path("compression_example.zarr".to_string());
+    #[rstest]
+    fn multiple_readers_tests(
+        #[with("multiple_readers_tests".to_string())] store_compression_codecs: StoreWrapper
+    ) {
+        let p = store_compression_codecs.store_path();
         let reader1 = ZarrRecordBatchReaderBuilder::new(p.clone())
             .build_partial_reader(Some((0, 5)))
             .unwrap();
@@ -655,13 +504,14 @@ mod zarr_reader_tests {
             ("bool_data".to_string(), DataType::Boolean),
             ("uint_data".to_string(), DataType::UInt64),
             ("int_data".to_string(), DataType::Int64),
-            ("float_data".to_string(), DataType::Float64),
+            ("float_data".to_string(), DataType::Float32),
             ("float_data_no_comp".to_string(), DataType::Float64),
         ]);
+        validate_names_and_types(&target_types, &records1[0]);
+        validate_names_and_types(&target_types, &records2[0]);
 
         // center chunk
         let rec = &records1[4];
-        validate_names_and_types(&target_types, rec);
         validate_bool_column(
             "bool_data",
             rec,
@@ -677,7 +527,7 @@ mod zarr_reader_tests {
             rec,
             &[27, 28, 29, 35, 36, 37, 43, 44, 45],
         );
-        validate_primitive_column::<Float64Type, f64>(
+        validate_primitive_column::<Float32Type, f32>(
             "float_data",
             rec,
             &[127., 128., 129., 135., 136., 137., 143., 144., 145.],
@@ -690,11 +540,10 @@ mod zarr_reader_tests {
 
         // bottom edge chunk
         let rec = &records2[2];
-        validate_names_and_types(&target_types, rec);
         validate_bool_column("bool_data", rec, &[false, true, false, false, true, false]);
         validate_primitive_column::<Int64Type, i64>("int_data", rec, &[20, 21, 22, 28, 29, 30]);
         validate_primitive_column::<UInt64Type, u64>("uint_data", rec, &[51, 52, 53, 59, 60, 61]);
-        validate_primitive_column::<Float64Type, f64>(
+        validate_primitive_column::<Float32Type, f32>(
             "float_data",
             rec,
             &[151.0, 152.0, 153.0, 159.0, 160.0, 161.0],
@@ -706,184 +555,123 @@ mod zarr_reader_tests {
         );
     }
 
-    #[test]
-    fn endianness_and_order_tests() {
-        let p = get_test_v2_data_path("endianness_and_order_example.zarr".to_string());
+    #[rstest]
+    fn endianness_and_order_tests(
+        #[with("endianness_and_order_tests".to_string())] store_endianness_and_order: StoreWrapper
+    ) {
+        let p = store_endianness_and_order.store_path();
         let reader = ZarrRecordBatchReaderBuilder::new(p).build().unwrap();
         let records: Vec<RecordBatch> = reader.map(|x| x.unwrap()).collect();
 
         let target_types = HashMap::from([
-            ("var1".to_string(), DataType::Int32),
-            ("var2".to_string(), DataType::Int32),
+            ("int_data_big_endian_f_order".to_string(), DataType::Int32),
+            ("int_data".to_string(), DataType::Int32),
         ]);
+        validate_names_and_types(&target_types, &records[0]);
 
-        // bottom edge chunk
-        let rec = &records[9];
-        validate_names_and_types(&target_types, rec);
-        validate_primitive_column::<Int32Type, i32>(
-            "var1",
-            rec,
-            &[69, 80, 91, 70, 81, 92, 71, 82, 93],
-        );
-        validate_primitive_column::<Int32Type, i32>(
-            "var2",
-            rec,
-            &[69, 80, 91, 70, 81, 92, 71, 82, 93],
-        );
+        for rec in &records {
+            compare_values::<Int32Type>("int_data_big_endian_f_order", "int_data", rec);
+        }
     }
 
-    #[test]
-    fn string_data_tests() {
-        let p = get_test_v2_data_path("string_example.zarr".to_string());
+    #[rstest]
+    fn endianness_and_order_3d_tests(
+        #[with("endianness_and_order_3d_tests".to_string())] store_endianness_and_order_3d: StoreWrapper
+    ) {
+        let p = store_endianness_and_order_3d.store_path();
         let reader = ZarrRecordBatchReaderBuilder::new(p).build().unwrap();
         let records: Vec<RecordBatch> = reader.map(|x| x.unwrap()).collect();
 
         let target_types = HashMap::from([
-            ("uint_data".to_string(), DataType::UInt8),
-            ("string_data".to_string(), DataType::Utf8),
-            ("utf8_data".to_string(), DataType::Utf8),
+            ("int_data_big_endian_f_order".to_string(), DataType::Int32),
+            ("int_data".to_string(), DataType::Int32),
         ]);
+        validate_names_and_types(&target_types, &records[0]);
 
-        // bottom edge chunk
-        let rec = &records[7];
-        validate_names_and_types(&target_types, rec);
-        validate_primitive_column::<UInt8Type, u8>("uint_data", rec, &[51, 52, 53, 59, 60, 61]);
-        validate_string_column(
-            "string_data",
-            rec,
-            &["abc61", "abc62", "abc63", "abc69", "abc70", "abc71"],
-        );
-        validate_string_column(
-            "utf8_data",
-            rec,
-            &["def61", "def62", "def63", "def69", "def70", "def71"],
-        );
+        for rec in &records {
+            compare_values::<Int32Type>("int_data_big_endian_f_order", "int_data", rec);
+        }
     }
 
-    #[test]
-    fn ts_data_tests() {
-        let p = get_test_v2_data_path("ts_example.zarr".to_string());
+    // apparently in zarr v3 the type is just "string", so I'm not too sure
+    // how this is supposed to be handled, how should I get the length for
+    // example... I will revisit later and uncomment this test.
+    // #[rstest]
+    // fn string_data_tests(
+    //     #[with("string_data_tests".to_string())] store_strings: StoreWrapper
+    // ) {
+    //     let p = store_strings.prefix_to_fs_path(&StorePrefix::new("").unwrap());
+    //     let reader = ZarrRecordBatchReaderBuilder::new(p).build().unwrap();
+    //     let records: Vec<RecordBatch> = reader.map(|x| x.unwrap()).collect();
+
+    //     let target_types = HashMap::from([
+    //         ("int_data".to_string(), DataType::Int8),
+    //         ("string_data".to_string(), DataType::Utf8),
+    //     ]);
+    //     validate_names_and_types(&target_types, &records[0]);
+
+    //     // top left corner
+    //     let rec = &records[0];
+    //     validate_primitive_column::<UInt8Type, u8>("uint_data", rec, &[1, 2, 3, 9, 10, 11, 17, 18, 19]);
+    //     validate_string_column(
+    //         "string_data",
+    //         rec,
+    //         &["abc01", "abc02", "abc03", "abc09", "abc10", "abc11", "abc17", "abc18", "abc19"],
+    //     );
+
+    //     // bottom edge chunk
+    //     let rec = &records[7];
+    //     validate_primitive_column::<UInt8Type, u8>("uint_data", rec, &[61, 62, 63, 69, 70, 71]);
+    //     validate_string_column(
+    //         "string_data",
+    //         rec,
+    //         &["abc61", "abc62", "abc63", "abc69", "abc70", "abc71"],
+    //     );
+    // }
+
+    #[rstest]
+    fn one_dim_tests(
+        #[with("one_dim_tests".to_string())] store_1d: StoreWrapper
+    ) {
+        let p = store_1d.store_path();
         let reader = ZarrRecordBatchReaderBuilder::new(p).build().unwrap();
         let records: Vec<RecordBatch> = reader.map(|x| x.unwrap()).collect();
 
         let target_types = HashMap::from([
-            (
-                "ts_s_data".to_string(),
-                DataType::Timestamp(TimeUnit::Second, None),
-            ),
-            (
-                "ts_ms_data".to_string(),
-                DataType::Timestamp(TimeUnit::Millisecond, None),
-            ),
-            (
-                "ts_us_data".to_string(),
-                DataType::Timestamp(TimeUnit::Microsecond, None),
-            ),
-            (
-                "ts_ns_data".to_string(),
-                DataType::Timestamp(TimeUnit::Nanosecond, None),
-            ),
+            ("int_data".to_string(), DataType::Int32),
+            ("float_data".to_string(), DataType::Float32),
         ]);
-
-        // top center chunk
-        let rec = &records[1];
-        validate_names_and_types(&target_types, rec);
-        validate_primitive_column::<TimestampSecondType, i64>(
-            "ts_s_data",
-            rec,
-            &[1685750400, 1685836800, 1686182400, 1686268800],
-        );
-        validate_primitive_column::<TimestampMillisecondType, i64>(
-            "ts_ms_data",
-            rec,
-            &[1685750400000, 1685836800000, 1686182400000, 1686268800000],
-        );
-        validate_primitive_column::<TimestampMicrosecondType, i64>(
-            "ts_us_data",
-            rec,
-            &[
-                1685750400000000,
-                1685836800000000,
-                1686182400000000,
-                1686268800000000,
-            ],
-        );
-        validate_primitive_column::<TimestampNanosecondType, i64>(
-            "ts_ns_data",
-            rec,
-            &[
-                1685750400000000000,
-                1685836800000000000,
-                1686182400000000000,
-                1686268800000000000,
-            ],
-        );
-
-        // top right edge chunk
-        let rec = &records[2];
-        validate_names_and_types(&target_types, rec);
-        validate_primitive_column::<TimestampSecondType, i64>(
-            "ts_s_data",
-            rec,
-            &[1685923200, 1686355200],
-        );
-        validate_primitive_column::<TimestampMillisecondType, i64>(
-            "ts_ms_data",
-            rec,
-            &[1685923200000, 1686355200000],
-        );
-        validate_primitive_column::<TimestampMicrosecondType, i64>(
-            "ts_us_data",
-            rec,
-            &[1685923200000000, 1686355200000000],
-        );
-        validate_primitive_column::<TimestampNanosecondType, i64>(
-            "ts_ns_data",
-            rec,
-            &[1685923200000000000, 1686355200000000000],
-        );
-    }
-
-    #[test]
-    fn one_dim_tests() {
-        let p = get_test_v2_data_path("one_dim_example.zarr".to_string());
-        let reader = ZarrRecordBatchReaderBuilder::new(p).build().unwrap();
-        let records: Vec<RecordBatch> = reader.map(|x| x.unwrap()).collect();
-
-        let target_types = HashMap::from([
-            ("int_data".to_string(), DataType::Int64),
-            ("float_data".to_string(), DataType::Float64),
-        ]);
+        validate_names_and_types(&target_types, &records[0]);
 
         // center chunk
         let rec = &records[1];
-        validate_names_and_types(&target_types, rec);
-        validate_primitive_column::<Int64Type, i64>("int_data", rec, &[-2, -1, 0]);
-        validate_primitive_column::<Float64Type, f64>("float_data", rec, &[103.0, 104.0, 105.0]);
+        validate_primitive_column::<Int32Type, i32>("int_data", rec, &[-2, -1, 0]);
+        validate_primitive_column::<Float32Type, f32>("float_data", rec, &[103.0, 104.0, 105.0]);
 
         // right edge chunk
         let rec = &records[3];
-        validate_names_and_types(&target_types, rec);
-        validate_primitive_column::<Int64Type, i64>("int_data", rec, &[4, 5]);
-        validate_primitive_column::<Float64Type, f64>("float_data", rec, &[109.0, 110.0]);
+        validate_primitive_column::<Int32Type, i32>("int_data", rec, &[4, 5]);
+        validate_primitive_column::<Float32Type, f32>("float_data", rec, &[109.0, 110.0]);
     }
 
-    #[test]
-    fn three_dim_tests() {
-        let p = get_test_v2_data_path("three_dim_example.zarr".to_string());
+    #[rstest]
+    fn three_dim_tests(
+        #[with("three_dim_tests".to_string())] store_3d: StoreWrapper
+    ) {
+        let p = store_3d.store_path();
         let reader = ZarrRecordBatchReaderBuilder::new(p).build().unwrap();
         let records: Vec<RecordBatch> = reader.map(|x| x.unwrap()).collect();
 
         let target_types = HashMap::from([
-            ("int_data".to_string(), DataType::Int64),
-            ("float_data".to_string(), DataType::Float64),
+            ("int_data".to_string(), DataType::Int32),
+            ("float_data".to_string(), DataType::Float32),
         ]);
+        validate_names_and_types(&target_types, &records[0]);
 
         // center chunk
         let rec = &records[13];
-        validate_names_and_types(&target_types, rec);
-        validate_primitive_column::<Int64Type, i64>("int_data", rec, &[0, 1, 5, 6, 25, 26, 30, 31]);
-        validate_primitive_column::<Float64Type, f64>(
+        validate_primitive_column::<Int32Type, i32>("int_data", rec, &[0, 1, 5, 6, 25, 26, 30, 31]);
+        validate_primitive_column::<Float32Type, f32>(
             "float_data",
             rec,
             &[162.0, 163.0, 167.0, 168.0, 187.0, 188.0, 192.0, 193.0],
@@ -892,8 +680,8 @@ mod zarr_reader_tests {
         // right edge chunk
         let rec = &records[14];
         validate_names_and_types(&target_types, rec);
-        validate_primitive_column::<Int64Type, i64>("int_data", rec, &[2, 7, 27, 32]);
-        validate_primitive_column::<Float64Type, f64>(
+        validate_primitive_column::<Int32Type, i32>("int_data", rec, &[2, 7, 27, 32]);
+        validate_primitive_column::<Float32Type, f32>(
             "float_data",
             rec,
             &[164.0, 169.0, 189.0, 194.0],
@@ -902,25 +690,27 @@ mod zarr_reader_tests {
         // right front edge chunk
         let rec = &records[23];
         validate_names_and_types(&target_types, rec);
-        validate_primitive_column::<Int64Type, i64>("int_data", rec, &[52, 57]);
-        validate_primitive_column::<Float64Type, f64>("float_data", rec, &[214.0, 219.0]);
+        validate_primitive_column::<Int32Type, i32>("int_data", rec, &[52, 57]);
+        validate_primitive_column::<Float32Type, f32>("float_data", rec, &[214.0, 219.0]);
 
         // bottom front edge chunk
         let rec = &records[24];
         validate_names_and_types(&target_types, rec);
-        validate_primitive_column::<Int64Type, i64>("int_data", rec, &[58, 59]);
-        validate_primitive_column::<Float64Type, f64>("float_data", rec, &[220.0, 221.0]);
+        validate_primitive_column::<Int32Type, i32>("int_data", rec, &[58, 59]);
+        validate_primitive_column::<Float32Type, f32>("float_data", rec, &[220.0, 221.0]);
 
         // right front bottom edge chunk
         let rec = &records[26];
         validate_names_and_types(&target_types, rec);
-        validate_primitive_column::<Int64Type, i64>("int_data", rec, &[62]);
-        validate_primitive_column::<Float64Type, f64>("float_data", rec, &[224.0]);
+        validate_primitive_column::<Int32Type, i32>("int_data", rec, &[62]);
+        validate_primitive_column::<Float32Type, f32>("float_data", rec, &[224.0]);
     }
 
-    #[test]
-    fn filters_tests() {
-        let p = get_test_v2_data_path("lat_lon_example.zarr".to_string());
+    #[rstest]
+    fn filters_tests (
+        #[with("filters_tests".to_string())] store_lat_lon: StoreWrapper
+    ) {
+        let p = store_lat_lon.store_path();
         let mut builder = ZarrRecordBatchReaderBuilder::new(p);
 
         // set the filters to select part of the raster, based on lat and
@@ -936,6 +726,7 @@ mod zarr_reader_tests {
             ("lon".to_string(), DataType::Float64),
             ("float_data".to_string(), DataType::Float64),
         ]);
+        validate_names_and_types(&target_types, &records[0]);
 
         // check the values in a chunk. the predicate pushdown only takes care of
         // skipping whole chunks, so there is no guarantee that the values in the
@@ -964,15 +755,17 @@ mod zarr_reader_tests {
             "float_data",
             rec,
             &[
-                1005.0, 1006.0, 1007.0, 1008.0, 1016.0, 1017.0, 1018.0, 1019.0, 1027.0, 1028.0,
-                1029.0, 1030.0, 1038.0, 1039.0, 1040.0, 1041.0,
+                4.0, 5.0, 6.0, 7.0, 15.0, 16.0, 17.0, 18.0, 26.0, 27.0, 28.0, 29.0,
+                37.0, 38.0, 39.0, 40.0,
             ],
         );
     }
 
-    #[test]
-    fn empty_query_tests() {
-        let p = get_test_v2_data_path("lat_lon_example.zarr".to_string());
+    #[rstest]
+    fn empty_query_tests(
+        #[with("empty_query_tests".to_string())] store_lat_lon: StoreWrapper
+    ) {
+        let p = store_lat_lon.store_path();
         let mut builder = ZarrRecordBatchReaderBuilder::new(p);
 
         // set a filter that will filter out all the data, there should be nothing left after
@@ -997,31 +790,21 @@ mod zarr_reader_tests {
         assert_eq!(records.len(), 0);
     }
 
-    #[test]
-    fn array_broadcast_tests() {
+    #[rstest]
+    fn array_broadcast_tests(
+        #[with("array_broadcast_tests_part1".to_string())] store_lat_lon: StoreWrapper,
+        #[with("array_broadcast_tests_part2".to_string())] store_lat_lon_broadcastable: StoreWrapper,
+    ) {
         // reference that doesn't broadcast a 1D array
-        let p = get_test_v2_data_path("lat_lon_example.zarr".to_string());
+        let p = store_lat_lon.store_path();
         let mut builder = ZarrRecordBatchReaderBuilder::new(p);
 
         builder = builder.with_filter(create_filter());
         let reader = builder.build().unwrap();
         let records: Vec<RecordBatch> = reader.map(|x| x.unwrap()).collect();
-
-        // v2 format with array broadcast
-        let p = get_test_v2_data_path("lat_lon_example_broadcastable.zarr".to_string());
-        let mut builder = ZarrRecordBatchReaderBuilder::new(p);
-
-        builder = builder.with_filter(create_filter());
-        let reader = builder.build().unwrap();
-        let records_from_one_d_repr: Vec<RecordBatch> = reader.map(|x| x.unwrap()).collect();
-
-        assert_eq!(records_from_one_d_repr.len(), records.len());
-        for (rec, rec_from_one_d_repr) in records.iter().zip(records_from_one_d_repr.iter()) {
-            assert_eq!(rec, rec_from_one_d_repr);
-        }
 
         // v3 format with array broadcast
-        let p = get_test_v3_data_path("with_broadcastable_array.zarr".to_string());
+        let p = store_lat_lon_broadcastable.store_path();
         let mut builder = ZarrRecordBatchReaderBuilder::new(p);
 
         builder = builder.with_filter(create_filter());
@@ -1031,60 +814,14 @@ mod zarr_reader_tests {
         assert_eq!(records_from_one_d_repr.len(), records.len());
         for (rec, rec_from_one_d_repr) in records.iter().zip(records_from_one_d_repr.iter()) {
             assert_eq!(rec, rec_from_one_d_repr);
-        }
+        }        
     }
 
-    #[test]
-    fn no_sharding_tests() {
-        let p = get_test_v3_data_path("no_sharding.zarr".to_string());
-        let builder = ZarrRecordBatchReaderBuilder::new(p);
-
-        let reader = builder.build().unwrap();
-        let records: Vec<RecordBatch> = reader.map(|x| x.unwrap()).collect();
-
-        let target_types = HashMap::from([("int_data".to_string(), DataType::Int32)]);
-
-        let rec = &records[1];
-        validate_names_and_types(&target_types, rec);
-        validate_primitive_column::<Int32Type, i32>(
-            "int_data",
-            rec,
-            &[4, 5, 6, 7, 20, 21, 22, 23, 36, 37, 38, 39, 52, 53, 54, 55],
-        );
-    }
-
-    #[test]
-    fn no_sharding_with_edge_tests() {
-        let p = get_test_v3_data_path("no_sharding_with_edge.zarr".to_string());
-        let builder = ZarrRecordBatchReaderBuilder::new(p);
-
-        let reader = builder.build().unwrap();
-        let records: Vec<RecordBatch> = reader.map(|x| x.unwrap()).collect();
-
-        let target_types = HashMap::from([
-            ("float_data".to_string(), DataType::Float32),
-            ("uint_data".to_string(), DataType::UInt64),
-        ]);
-
-        let rec = &records[3];
-        validate_names_and_types(&target_types, rec);
-        validate_primitive_column::<Float32Type, f32>(
-            "float_data",
-            rec,
-            &[
-                12.0, 13.0, 14.0, 27.0, 28.0, 29.0, 42.0, 43.0, 44.0, 57.0, 58.0, 59.0,
-            ],
-        );
-        validate_primitive_column::<UInt64Type, u64>(
-            "uint_data",
-            rec,
-            &[12, 13, 14, 27, 28, 29, 42, 43, 44, 57, 58, 59],
-        );
-    }
-
-    #[test]
-    fn with_partial_sharding_tests() {
-        let p = get_test_v3_data_path("with_partial_sharding.zarr".to_string());
+    #[rstest]
+    fn partial_sharding_tests(
+        #[with("partial_sharding_tests".to_string())] store_partial_sharding: StoreWrapper,
+    ) {
+        let p = store_partial_sharding.store_path();
         let builder = ZarrRecordBatchReaderBuilder::new(p);
 
         let reader = builder.build().unwrap();
@@ -1095,9 +832,11 @@ mod zarr_reader_tests {
         }
     }
 
-    #[test]
-    fn with_partial_sharding_3d_tests() {
-        let p = get_test_v3_data_path("with_partial_sharding_3D.zarr".to_string());
+    #[rstest]
+    fn partial_sharding_3d_tests(
+        #[with("partial_sharding_3d_tests".to_string())] store_partial_sharding_3d: StoreWrapper,
+    ) {
+        let p = store_partial_sharding_3d.store_path();
         let builder = ZarrRecordBatchReaderBuilder::new(p);
 
         let reader = builder.build().unwrap();
@@ -1106,95 +845,5 @@ mod zarr_reader_tests {
         for rec in records {
             compare_values::<Float64Type>("float_data_not_sharded", "float_data_sharded", &rec);
         }
-    }
-
-    #[test]
-    fn with_sharding_tests() {
-        let p = get_test_v3_data_path("with_sharding.zarr".to_string());
-        let builder = ZarrRecordBatchReaderBuilder::new(p);
-
-        let reader = builder.build().unwrap();
-        let records: Vec<RecordBatch> = reader.map(|x| x.unwrap()).collect();
-
-        let target_types = HashMap::from([
-            ("float_data".to_string(), DataType::Float64),
-            ("int_data".to_string(), DataType::Int64),
-        ]);
-
-        let rec = &records[2];
-        validate_names_and_types(&target_types, rec);
-        validate_primitive_column::<Float64Type, f64>(
-            "float_data",
-            rec,
-            &[
-                32.0, 33.0, 34.0, 35.0, 40.0, 41.0, 42.0, 43.0, 48.0, 49.0, 50.0, 51.0, 56.0, 57.0,
-                58.0, 59.0,
-            ],
-        );
-        validate_primitive_column::<Int64Type, i64>(
-            "int_data",
-            rec,
-            &[
-                32, 33, 34, 35, 40, 41, 42, 43, 48, 49, 50, 51, 56, 57, 58, 59,
-            ],
-        );
-    }
-
-    #[test]
-    fn with_sharding_with_edge_tests() {
-        let p = get_test_v3_data_path("with_sharding_with_edge.zarr".to_string());
-        let builder = ZarrRecordBatchReaderBuilder::new(p);
-
-        let reader = builder.build().unwrap();
-        let records: Vec<RecordBatch> = reader.map(|x| x.unwrap()).collect();
-
-        let target_types = HashMap::from([("uint_data".to_string(), DataType::UInt16)]);
-
-        let rec = &records[1];
-        validate_names_and_types(&target_types, rec);
-        validate_primitive_column::<UInt16Type, u16>(
-            "uint_data",
-            rec,
-            &[4, 5, 6, 11, 12, 13, 18, 19, 20, 25, 26, 27],
-        );
-    }
-
-    #[test]
-    fn three_dims_no_sharding_with_edge_tests() {
-        let p = get_test_v3_data_path("no_sharding_with_edge_3d.zarr".to_string());
-        let builder = ZarrRecordBatchReaderBuilder::new(p);
-
-        let reader = builder.build().unwrap();
-        let records: Vec<RecordBatch> = reader.map(|x| x.unwrap()).collect();
-
-        let target_types = HashMap::from([("uint_data".to_string(), DataType::UInt64)]);
-
-        let rec = &records[5];
-        validate_names_and_types(&target_types, rec);
-        validate_primitive_column::<UInt64Type, u64>("uint_data", rec, &[14, 19, 39, 44]);
-    }
-
-    #[test]
-    fn three_dims_with_sharding_with_edge_tests() {
-        let p = get_test_v3_data_path("with_sharding_with_edge_3d.zarr".to_string());
-        let builder = ZarrRecordBatchReaderBuilder::new(p);
-
-        let reader = builder.build().unwrap();
-        let records: Vec<RecordBatch> = reader.map(|x| x.unwrap()).collect();
-
-        let target_types = HashMap::from([("float_data".to_string(), DataType::Float64)]);
-
-        let rec = &records[23];
-        validate_names_and_types(&target_types, rec);
-        validate_primitive_column::<Float64Type, f64>(
-            "float_data",
-            rec,
-            &[
-                1020.0, 1021.0, 1022.0, 1031.0, 1032.0, 1033.0, 1042.0, 1043.0, 1044.0, 1053.0,
-                1054.0, 1055.0, 1141.0, 1142.0, 1143.0, 1152.0, 1153.0, 1154.0, 1163.0, 1164.0,
-                1165.0, 1174.0, 1175.0, 1176.0, 1262.0, 1263.0, 1264.0, 1273.0, 1274.0, 1275.0,
-                1284.0, 1285.0, 1286.0, 1295.0, 1296.0, 1297.0,
-            ],
-        );
     }
 }

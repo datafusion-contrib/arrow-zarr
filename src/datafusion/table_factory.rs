@@ -119,7 +119,6 @@ impl TableProviderFactory for ZarrListingTableFactory {
 
 #[cfg(test)]
 mod tests {
-    use crate::tests::get_test_v2_data_path;
     use arrow::record_batch::RecordBatch;
     use arrow_array::types::*;
     use arrow_array::{cast::AsArray, StringArray};
@@ -131,6 +130,8 @@ mod tests {
         runtime_env::RuntimeEnv,
     };
     use std::sync::Arc;
+    use rstest::*;
+    use crate::test_utils::{StoreWrapper, store_lat_lon, store_lat_lon_with_partition};
 
     fn extract_col<T>(col_name: &str, rec_batch: &RecordBatch) -> ScalarBuffer<T::Native>
     where
@@ -152,8 +153,11 @@ mod tests {
             .to_owned()
     }
 
+    #[rstest]
     #[tokio::test]
-    async fn test_create() -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_create(
+        #[with("test_create".to_string())] store_lat_lon: StoreWrapper
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let mut state = SessionState::new_with_config_rt(
             SessionConfig::default(),
             Arc::new(RuntimeEnv::default()),
@@ -163,7 +167,7 @@ mod tests {
             .table_factories_mut()
             .insert("ZARR".into(), Arc::new(super::ZarrListingTableFactory {}));
 
-        let test_data = get_test_v2_data_path("lat_lon_example.zarr".to_string());
+        let test_data = store_lat_lon.store_path();
 
         let sql = format!(
             "CREATE EXTERNAL TABLE zarr_table STORED AS ZARR LOCATION '{}'",
@@ -187,8 +191,11 @@ mod tests {
         Ok(())
     }
 
+    #[rstest]
     #[tokio::test]
-    async fn test_predicates() -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_predicates(
+        #[with("test_predicate".to_string())] store_lat_lon: StoreWrapper
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let mut state = SessionState::new_with_config_rt(
             SessionConfig::default(),
             Arc::new(RuntimeEnv::default()),
@@ -198,7 +205,7 @@ mod tests {
             .table_factories_mut()
             .insert("ZARR".into(), Arc::new(super::ZarrListingTableFactory {}));
 
-        let test_data = get_test_v2_data_path("lat_lon_example.zarr".to_string());
+        let test_data = store_lat_lon.store_path();
 
         let sql = format!(
             "CREATE EXTERNAL TABLE zarr_table STORED AS ZARR LOCATION '{}'",
@@ -308,8 +315,11 @@ mod tests {
         Ok(())
     }
 
+    #[rstest]
     #[tokio::test]
-    async fn test_partitions() -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_partitions(
+        #[with("test_partitions".to_string())] store_lat_lon_with_partition: StoreWrapper
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let mut state = SessionState::new_with_config_rt(
             SessionConfig::default(),
             Arc::new(RuntimeEnv::default()),
@@ -319,13 +329,12 @@ mod tests {
             .table_factories_mut()
             .insert("ZARR".into(), Arc::new(super::ZarrListingTableFactory {}));
 
-        let test_data = get_test_v2_data_path("lat_lon_w_groups_example.zarr".to_string());
+        let test_data = store_lat_lon_with_partition.store_path();
 
         let sql = format!(
             "CREATE EXTERNAL TABLE zarr_table (
                lat double,
                lon double,
-               float_data double,
                var int,
                other_var string
             )
