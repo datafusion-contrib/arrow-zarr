@@ -19,15 +19,15 @@ use crate::reader::errors::throw_invalid_meta;
 use crate::reader::{ZarrError, ZarrResult};
 use arrow_array::*;
 use arrow_schema::{DataType, Field, FieldRef, TimeUnit};
+use blosc_src::{blosc_cbuffer_sizes, blosc_decompress_ctx};
 use crc32c::crc32c;
 use flate2::read::GzDecoder;
 use itertools::Itertools;
 use std::io::Read;
+use std::os::raw::c_void;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::vec;
-use std::os::raw::c_void;
-use blosc_src::{blosc_cbuffer_sizes, blosc_decompress_ctx};
 
 // couple useful constant for empty shards
 const NULL_OFFSET: usize = usize::pow(2, 63) + (usize::pow(2, 63) - 1);
@@ -279,7 +279,7 @@ fn decode_transpose<T: Clone>(
         3 => (0..chunk_dims[order[2]])
             .cartesian_product(0..chunk_dims[order[1]])
             .cartesian_product(0..chunk_dims[order[0]])
-            .map(|t| t.1 * chunk_dims[0] * chunk_dims[1] + t.0 .1 * chunk_dims[0] + t.0.0)
+            .map(|t| t.1 * chunk_dims[0] * chunk_dims[1] + t.0 .1 * chunk_dims[0] + t.0 .0)
             .collect(),
         _ => {
             panic!("Invalid number of dims for transpose")
@@ -364,7 +364,9 @@ unsafe fn blosc_decompress_bytes(src: &[u8]) -> ZarrResult<Vec<u8>> {
         Ok(dest)
     } else {
         // Buffer too small, data corrupted, decompressor not available, etc
-        Err(ZarrError::Read("A problem occured with blosc decompression".to_string()))
+        Err(ZarrError::Read(
+            "A problem occured with blosc decompression".to_string(),
+        ))
     }
 }
 
@@ -384,7 +386,7 @@ fn apply_bytes_to_bytes_codec(codec: &ZarrCodec, bytes: &[u8]) -> ZarrResult<Vec
             let l = bytes.len();
             let checksum = bytes.split_off(l - 4);
             if crc32c(&bytes[..]).to_le_bytes() != checksum[..4] {
-                 return Err(throw_invalid_meta("crc32c checksum failed"));
+                return Err(throw_invalid_meta("crc32c checksum failed"));
             }
             decompressed_bytes = bytes;
         }

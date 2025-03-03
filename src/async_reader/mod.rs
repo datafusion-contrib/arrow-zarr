@@ -641,17 +641,9 @@ impl<T: for<'a> ZarrReadAsync<'a> + Clone + Unpin + Send + 'static>
 #[cfg(test)]
 mod zarr_async_reader_tests {
     use crate::test_utils::{
-        store_compression_codecs,
-        store_lat_lon,
-        store_lat_lon_broadcastable,
-        store_partial_sharding,
-        store_partial_sharding_3d,
-        StoreWrapper,
-        validate_names_and_types,
-        validate_bool_column,
-        validate_primitive_column,
-        compare_values,
-        create_filter
+        compare_values, create_filter, store_compression_codecs, store_lat_lon,
+        store_lat_lon_broadcastable, store_partial_sharding, store_partial_sharding_3d,
+        validate_bool_column, validate_names_and_types, validate_primitive_column, StoreWrapper,
     };
 
     use arrow::compute::kernels::cmp::gt_eq;
@@ -659,11 +651,11 @@ mod zarr_async_reader_tests {
     use arrow_array::*;
     use arrow_schema::DataType;
     use futures_util::TryStreamExt;
-    use rstest::*;
     use object_store::{local::LocalFileSystem, path::Path};
+    use rstest::*;
+    use std::collections::HashMap;
     use std::path::PathBuf;
     use std::sync::Arc;
-    use std::collections::HashMap;
 
     use super::*;
     use crate::async_reader::zarr_read_async::ZarrPath;
@@ -679,7 +671,7 @@ mod zarr_async_reader_tests {
     #[rstest]
     #[tokio::test]
     async fn projection_tests(
-        #[with("async_projection_tests".to_string())] store_compression_codecs: StoreWrapper
+        #[with("async_projection_tests".to_string())] store_compression_codecs: StoreWrapper,
     ) {
         let zp = get_zarr_path(store_compression_codecs.store_path());
         let proj = ZarrProjection::keep(vec!["bool_data".to_string(), "int_data".to_string()]);
@@ -710,9 +702,7 @@ mod zarr_async_reader_tests {
 
     #[rstest]
     #[tokio::test]
-    async fn filters_tests(
-        #[with("async_filter_tests".to_string())] store_lat_lon: StoreWrapper
-    ) {
+    async fn filters_tests(#[with("async_filter_tests".to_string())] store_lat_lon: StoreWrapper) {
         let zp = get_zarr_path(store_lat_lon.store_path());
         let stream_builder = ZarrRecordBatchStreamBuilder::new(zp).with_filter(create_filter());
         let stream = stream_builder.build().await.unwrap();
@@ -751,8 +741,8 @@ mod zarr_async_reader_tests {
             "float_data",
             rec,
             &[
-                4.0, 5.0, 6.0, 7.0, 15.0, 16.0, 17.0, 18.0, 26.0, 27.0, 28.0, 29.0,
-                37.0, 38.0, 39.0, 40.0,
+                4.0, 5.0, 6.0, 7.0, 15.0, 16.0, 17.0, 18.0, 26.0, 27.0, 28.0, 29.0, 37.0, 38.0,
+                39.0, 40.0,
             ],
         );
     }
@@ -760,7 +750,7 @@ mod zarr_async_reader_tests {
     #[rstest]
     #[tokio::test]
     async fn multiple_readers_tests(
-        #[with("async_multiple_readers_tests".to_string())] store_compression_codecs: StoreWrapper
+        #[with("async_multiple_readers_tests".to_string())] store_compression_codecs: StoreWrapper,
     ) {
         let zp = get_zarr_path(store_compression_codecs.store_path());
         let stream1 = ZarrRecordBatchStreamBuilder::new(zp.clone())
@@ -833,7 +823,7 @@ mod zarr_async_reader_tests {
     #[rstest]
     #[tokio::test]
     async fn empty_query_tests(
-        #[with("async_empty_query_tests".to_string())] store_lat_lon: StoreWrapper
+        #[with("async_empty_query_tests".to_string())] store_lat_lon: StoreWrapper,
     ) {
         let zp = get_zarr_path(store_lat_lon.store_path());
         let mut builder = ZarrRecordBatchStreamBuilder::new(zp);
@@ -864,7 +854,8 @@ mod zarr_async_reader_tests {
     #[tokio::test]
     async fn array_broadcast_tests(
         #[with("async_array_broadcast_tests_part1".to_string())] store_lat_lon: StoreWrapper,
-        #[with("async_array_broadcast_tests_part2".to_string())] store_lat_lon_broadcastable: StoreWrapper,
+        #[with("async_array_broadcast_tests_part2".to_string())]
+        store_lat_lon_broadcastable: StoreWrapper,
     ) {
         // reference that doesn't broadcast a 1D array
         let zp = get_zarr_path(store_lat_lon.store_path());
@@ -906,7 +897,8 @@ mod zarr_async_reader_tests {
     #[rstest]
     #[tokio::test]
     async fn with_partial_sharding_3d_tests(
-        #[with("async_partial_sharding_3d_tests".to_string())] store_partial_sharding_3d: StoreWrapper,
+        #[with("async_partial_sharding_3d_tests".to_string())]
+        store_partial_sharding_3d: StoreWrapper,
     ) {
         let zp = get_zarr_path(store_partial_sharding_3d.store_path());
         let stream_builder = ZarrRecordBatchStreamBuilder::new(zp);

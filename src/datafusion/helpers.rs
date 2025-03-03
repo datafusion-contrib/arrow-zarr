@@ -521,16 +521,17 @@ pub fn split_files(
 #[cfg(test)]
 mod helpers_tests {
     use super::*;
+    use crate::test_utils::{store_lat_lon_with_partition, StoreWrapper};
     use datafusion_expr::{and, col, lit};
     use itertools::Itertools;
     use object_store::local::LocalFileSystem;
-    use crate::test_utils::{StoreWrapper, store_lat_lon_with_partition};
     use rstest::*;
 
     #[rstest]
     #[tokio::test]
     async fn test_listing_and_pruning_partitions(
-        #[with("test_listing_and_pruning_partitions".to_string())] store_lat_lon_with_partition: StoreWrapper
+        #[with("test_listing_and_pruning_partitions".to_string())]
+        store_lat_lon_with_partition: StoreWrapper,
     ) {
         let table_path_buf = store_lat_lon_with_partition.store_path();
         let table_path = table_path_buf.to_str().unwrap();

@@ -368,14 +368,12 @@ mod zarr_read_tests {
     use super::*;
     use crate::reader::codecs::{Endianness, ZarrCodec, ZarrDataType};
     use crate::reader::metadata::{ChunkSeparator, ZarrArrayMetadata};
-    use crate::test_utils::{StoreWrapper, store_raw_bytes};
+    use crate::test_utils::{store_raw_bytes, StoreWrapper};
     use rstest::*;
 
     // read the store metadata, given a path to a zarr store.
     #[rstest]
-    fn read_metadata(
-        #[with("read_metadata".to_string())] store_raw_bytes: StoreWrapper
-    ) {
+    fn read_metadata(#[with("read_metadata".to_string())] store_raw_bytes: StoreWrapper) {
         let p = store_raw_bytes.store_path();
         let meta = p.get_zarr_metadata().unwrap();
 
@@ -411,9 +409,7 @@ mod zarr_read_tests {
     // read the raw data contained into a zarr store. one of the variables contains
     // byte data, which we explicitly check here.
     #[rstest]
-    fn read_raw_chunks(
-        #[with("read_raw_chunks".to_string())] store_raw_bytes: StoreWrapper
-    ) {
+    fn read_raw_chunks(#[with("read_raw_chunks".to_string())] store_raw_bytes: StoreWrapper) {
         let p = store_raw_bytes.store_path();
         let meta = p.get_zarr_metadata().unwrap();
 

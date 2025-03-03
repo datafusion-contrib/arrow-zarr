@@ -208,18 +208,26 @@ mod zarr_read_async_tests {
     use crate::reader::codecs::{Endianness, ZarrCodec, ZarrDataType};
     use crate::reader::metadata::{ChunkSeparator, ZarrArrayMetadata};
     use crate::reader::ZarrProjection;
+    use crate::test_utils::{store_raw_bytes, StoreWrapper};
     use rstest::*;
-    use crate::test_utils::{StoreWrapper, store_raw_bytes};
 
     #[rstest]
     #[tokio::test]
     async fn read_metadata(
-        #[with("read_metadata_async".to_string())] store_raw_bytes: StoreWrapper
+        #[with("read_metadata_async".to_string())] store_raw_bytes: StoreWrapper,
     ) {
         let file_sys = LocalFileSystem::new_with_prefix(env!("CARGO_MANIFEST_DIR")).unwrap();
         let p = Path::parse(
-            store_raw_bytes.store_path().components().last().unwrap().as_os_str().to_str().unwrap()
-        ).unwrap();
+            store_raw_bytes
+                .store_path()
+                .components()
+                .last()
+                .unwrap()
+                .as_os_str()
+                .to_str()
+                .unwrap(),
+        )
+        .unwrap();
 
         let store = ZarrPath::new(Arc::new(file_sys), p);
         let meta = store.get_zarr_metadata().await.unwrap();
@@ -256,12 +264,20 @@ mod zarr_read_async_tests {
     #[rstest]
     #[tokio::test]
     async fn read_raw_chunks(
-        #[with("read_raw_chunks_async".to_string())] store_raw_bytes: StoreWrapper
+        #[with("read_raw_chunks_async".to_string())] store_raw_bytes: StoreWrapper,
     ) {
         let file_sys = LocalFileSystem::new_with_prefix(env!("CARGO_MANIFEST_DIR")).unwrap();
         let p = Path::parse(
-            store_raw_bytes.store_path().components().last().unwrap().as_os_str().to_str().unwrap()
-        ).unwrap();
+            store_raw_bytes
+                .store_path()
+                .components()
+                .last()
+                .unwrap()
+                .as_os_str()
+                .to_str()
+                .unwrap(),
+        )
+        .unwrap();
         let mut io_uring_worker_pool = WorkerPool::new(32, 2).unwrap();
 
         let store = ZarrPath::new(Arc::new(file_sys), p);

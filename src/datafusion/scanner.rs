@@ -140,15 +140,15 @@ mod tests {
     use futures::TryStreamExt;
     use object_store::{local::LocalFileSystem, path::Path, ObjectMeta};
 
-    use crate::async_reader::{ZarrPath, ZarrReadAsync};
-    use rstest::*;
-    use crate::test_utils::{StoreWrapper, store_lat_lon};
     use super::*;
+    use crate::async_reader::{ZarrPath, ZarrReadAsync};
+    use crate::test_utils::{store_lat_lon, StoreWrapper};
+    use rstest::*;
 
     #[rstest]
     #[tokio::test]
     async fn test_scanner_open(
-        #[with("test_scanner_open".to_string())] store_lat_lon: StoreWrapper
+        #[with("test_scanner_open".to_string())] store_lat_lon: StoreWrapper,
     ) -> Result<(), Box<dyn Error>> {
         let local_fs = Arc::new(LocalFileSystem::new());
 

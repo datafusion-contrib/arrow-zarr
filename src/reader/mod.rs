@@ -347,21 +347,10 @@ impl<T: ZarrRead + Clone> ZarrRecordBatchReaderBuilder<T> {
 #[cfg(test)]
 mod zarr_reader_tests {
     use crate::test_utils::{
-        store_compression_codecs,
-        store_endianness_and_order,
-        store_endianness_and_order_3d,
-        store_1d,
-        store_3d,
-        store_lat_lon,
-        store_lat_lon_broadcastable,
-        store_partial_sharding,
-        store_partial_sharding_3d,
-        StoreWrapper,
-        validate_names_and_types,
-        validate_bool_column,
-        validate_primitive_column,
-        compare_values,
-        create_filter,
+        compare_values, create_filter, store_1d, store_3d, store_compression_codecs,
+        store_endianness_and_order, store_endianness_and_order_3d, store_lat_lon,
+        store_lat_lon_broadcastable, store_partial_sharding, store_partial_sharding_3d,
+        validate_bool_column, validate_names_and_types, validate_primitive_column, StoreWrapper,
     };
     use arrow::compute::kernels::cmp::gt_eq;
     use arrow_array::types::*;
@@ -374,7 +363,7 @@ mod zarr_reader_tests {
 
     #[rstest]
     fn compressed_data_tests(
-        #[with("compressed_data_tests".to_string())] store_compression_codecs: StoreWrapper
+        #[with("compressed_data_tests".to_string())] store_compression_codecs: StoreWrapper,
     ) {
         let p = store_compression_codecs.store_path();
 
@@ -418,7 +407,6 @@ mod zarr_reader_tests {
             &[227., 228., 229., 235., 236., 237., 243., 244., 245.],
         );
 
-
         // right edge chunk
         let rec = &records[5];
         validate_bool_column("bool_data", rec, &[true, false, true, false, true, false]);
@@ -454,7 +442,7 @@ mod zarr_reader_tests {
 
     #[rstest]
     fn projection_tests(
-        #[with("projection_tests".to_string())] store_compression_codecs: StoreWrapper
+        #[with("projection_tests".to_string())] store_compression_codecs: StoreWrapper,
     ) {
         let p = store_compression_codecs.store_path();
         let proj = ZarrProjection::keep(vec!["bool_data".to_string(), "int_data".to_string()]);
@@ -484,7 +472,7 @@ mod zarr_reader_tests {
 
     #[rstest]
     fn multiple_readers_tests(
-        #[with("multiple_readers_tests".to_string())] store_compression_codecs: StoreWrapper
+        #[with("multiple_readers_tests".to_string())] store_compression_codecs: StoreWrapper,
     ) {
         let p = store_compression_codecs.store_path();
         let reader1 = ZarrRecordBatchReaderBuilder::new(p.clone())
@@ -557,7 +545,7 @@ mod zarr_reader_tests {
 
     #[rstest]
     fn endianness_and_order_tests(
-        #[with("endianness_and_order_tests".to_string())] store_endianness_and_order: StoreWrapper
+        #[with("endianness_and_order_tests".to_string())] store_endianness_and_order: StoreWrapper,
     ) {
         let p = store_endianness_and_order.store_path();
         let reader = ZarrRecordBatchReaderBuilder::new(p).build().unwrap();
@@ -576,7 +564,8 @@ mod zarr_reader_tests {
 
     #[rstest]
     fn endianness_and_order_3d_tests(
-        #[with("endianness_and_order_3d_tests".to_string())] store_endianness_and_order_3d: StoreWrapper
+        #[with("endianness_and_order_3d_tests".to_string())]
+        store_endianness_and_order_3d: StoreWrapper,
     ) {
         let p = store_endianness_and_order_3d.store_path();
         let reader = ZarrRecordBatchReaderBuilder::new(p).build().unwrap();
@@ -630,9 +619,7 @@ mod zarr_reader_tests {
     // }
 
     #[rstest]
-    fn one_dim_tests(
-        #[with("one_dim_tests".to_string())] store_1d: StoreWrapper
-    ) {
+    fn one_dim_tests(#[with("one_dim_tests".to_string())] store_1d: StoreWrapper) {
         let p = store_1d.store_path();
         let reader = ZarrRecordBatchReaderBuilder::new(p).build().unwrap();
         let records: Vec<RecordBatch> = reader.map(|x| x.unwrap()).collect();
@@ -655,9 +642,7 @@ mod zarr_reader_tests {
     }
 
     #[rstest]
-    fn three_dim_tests(
-        #[with("three_dim_tests".to_string())] store_3d: StoreWrapper
-    ) {
+    fn three_dim_tests(#[with("three_dim_tests".to_string())] store_3d: StoreWrapper) {
         let p = store_3d.store_path();
         let reader = ZarrRecordBatchReaderBuilder::new(p).build().unwrap();
         let records: Vec<RecordBatch> = reader.map(|x| x.unwrap()).collect();
@@ -707,9 +692,7 @@ mod zarr_reader_tests {
     }
 
     #[rstest]
-    fn filters_tests (
-        #[with("filters_tests".to_string())] store_lat_lon: StoreWrapper
-    ) {
+    fn filters_tests(#[with("filters_tests".to_string())] store_lat_lon: StoreWrapper) {
         let p = store_lat_lon.store_path();
         let mut builder = ZarrRecordBatchReaderBuilder::new(p);
 
@@ -755,16 +738,14 @@ mod zarr_reader_tests {
             "float_data",
             rec,
             &[
-                4.0, 5.0, 6.0, 7.0, 15.0, 16.0, 17.0, 18.0, 26.0, 27.0, 28.0, 29.0,
-                37.0, 38.0, 39.0, 40.0,
+                4.0, 5.0, 6.0, 7.0, 15.0, 16.0, 17.0, 18.0, 26.0, 27.0, 28.0, 29.0, 37.0, 38.0,
+                39.0, 40.0,
             ],
         );
     }
 
     #[rstest]
-    fn empty_query_tests(
-        #[with("empty_query_tests".to_string())] store_lat_lon: StoreWrapper
-    ) {
+    fn empty_query_tests(#[with("empty_query_tests".to_string())] store_lat_lon: StoreWrapper) {
         let p = store_lat_lon.store_path();
         let mut builder = ZarrRecordBatchReaderBuilder::new(p);
 
@@ -793,7 +774,8 @@ mod zarr_reader_tests {
     #[rstest]
     fn array_broadcast_tests(
         #[with("array_broadcast_tests_part1".to_string())] store_lat_lon: StoreWrapper,
-        #[with("array_broadcast_tests_part2".to_string())] store_lat_lon_broadcastable: StoreWrapper,
+        #[with("array_broadcast_tests_part2".to_string())]
+        store_lat_lon_broadcastable: StoreWrapper,
     ) {
         // reference that doesn't broadcast a 1D array
         let p = store_lat_lon.store_path();
@@ -814,7 +796,7 @@ mod zarr_reader_tests {
         assert_eq!(records_from_one_d_repr.len(), records.len());
         for (rec, rec_from_one_d_repr) in records.iter().zip(records_from_one_d_repr.iter()) {
             assert_eq!(rec, rec_from_one_d_repr);
-        }        
+        }
     }
 
     #[rstest]

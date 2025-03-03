@@ -92,7 +92,7 @@ mod tests {
     #[rstest]
     #[tokio::test]
     async fn test_open(
-        #[with("ftest_open".to_string())] store_lat_lon: StoreWrapper
+        #[with("ftest_open".to_string())] store_lat_lon: StoreWrapper,
     ) -> Result<(), Box<dyn Error>> {
         let local_fs = LocalFileSystem::new();
 

@@ -23,23 +23,25 @@ pub mod datafusion;
 
 #[cfg(test)]
 mod test_utils {
-    use std::path::PathBuf;
-    use zarrs::array::codec::array_to_bytes::sharding::ShardingCodecBuilder;
-    use zarrs_filesystem::FilesystemStore;
+    use crate::reader::{
+        ZarrArrowPredicate, ZarrArrowPredicateFn, ZarrChunkFilter, ZarrProjection,
+    };
+    use arrow::compute::kernels::cmp::{gt_eq, lt};
+    use arrow_array::cast::AsArray;
+    use arrow_array::types::*;
+    use arrow_array::RecordBatch;
+    use arrow_array::*;
+    use itertools::enumerate;
+    use ndarray::{Array, Array1, Array2, Array3};
     use rstest::*;
-    use zarrs_storage::{WritableStorageTraits, StorePrefix};
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::{collections::HashMap, fmt::Debug};
+    use zarrs::array::codec::array_to_bytes::sharding::ShardingCodecBuilder;
     use zarrs::array::{codec, ArrayBuilder, DataType, FillValue};
     use zarrs::array_subset::ArraySubset;
-    use std::sync::Arc;
-    use ndarray::{Array, Array1, Array2, Array3};
-    use itertools::enumerate;
-    use arrow_array::types::*;
-    use arrow_array::*;
-    use std::{collections::HashMap, fmt::Debug};
-    use arrow_array::RecordBatch;
-    use arrow_array::cast::AsArray;
-    use crate::reader::{ZarrArrowPredicate, ZarrArrowPredicateFn, ZarrChunkFilter, ZarrProjection};
-    use arrow::compute::kernels::cmp::{gt_eq, lt};
+    use zarrs_filesystem::FilesystemStore;
+    use zarrs_storage::{StorePrefix, WritableStorageTraits};
 
     fn create_zarr_store(store_name: String) -> FilesystemStore {
         let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(store_name);
@@ -47,8 +49,8 @@ mod test_utils {
     }
 
     fn clear_store(store: &Arc<FilesystemStore>) {
-         let prefix = StorePrefix::new("").unwrap();
-         store.erase_prefix(&prefix).unwrap();
+        let prefix = StorePrefix::new("").unwrap();
+        store.erase_prefix(&prefix).unwrap();
     }
 
     fn get_lz4_compressor() -> codec::BloscCodec {
@@ -58,7 +60,8 @@ mod test_utils {
             Some(0),
             codec::bytes_to_bytes::blosc::BloscShuffleMode::NoShuffle,
             Some(1),
-        ).unwrap()
+        )
+        .unwrap()
     }
 
     // we won't actually use this, it's a place holder
@@ -70,13 +73,13 @@ mod test_utils {
     // convenience class to make sure the stores get cleanup
     // after we're done running a test.
     pub(crate) struct StoreWrapper {
-        store: Arc<FilesystemStore>
+        store: Arc<FilesystemStore>,
     }
 
     impl StoreWrapper {
         fn new(store_name: String) -> Self {
-            StoreWrapper{
-                store: Arc::new(create_zarr_store(store_name))
+            StoreWrapper {
+                store: Arc::new(create_zarr_store(store_name)),
             }
         }
 
@@ -101,7 +104,7 @@ mod test_utils {
         // create the store
         let store_wrapper = StoreWrapper::new(dummy_name);
         let store = store_wrapper.get_store();
-    
+
         // uint array with no compression
         let array = ArrayBuilder::new(
             vec![9, 9],
@@ -113,11 +116,12 @@ mod test_utils {
         .unwrap();
         array.store_metadata().unwrap();
 
-        let arr: Array2<u8> =  Array::from_vec((0..81).collect()).into_shape_with_order((9, 9)).unwrap();
-        array.store_array_subset_ndarray(
-            ArraySubset::new_with_ranges(&[0..9, 0..9]).start(),
-            arr,
-        ).unwrap();
+        let arr: Array2<u8> = Array::from_vec((0..81).collect())
+            .into_shape_with_order((9, 9))
+            .unwrap();
+        array
+            .store_array_subset_ndarray(ArraySubset::new_with_ranges(&[0..9, 0..9]).start(), arr)
+            .unwrap();
 
         // float data with no compression
         let array = ArrayBuilder::new(
@@ -130,11 +134,12 @@ mod test_utils {
         .unwrap();
         array.store_metadata().unwrap();
 
-        let arr: Array2<f64> = Array::range(0.0, 81.0, 1.0).into_shape_with_order((9, 9)).unwrap();
-        array.store_array_subset_ndarray(
-            ArraySubset::new_with_ranges(&[0..9, 0..9]).start(),
-            arr,
-        ).unwrap();
+        let arr: Array2<f64> = Array::range(0.0, 81.0, 1.0)
+            .into_shape_with_order((9, 9))
+            .unwrap();
+        array
+            .store_array_subset_ndarray(ArraySubset::new_with_ranges(&[0..9, 0..9]).start(), arr)
+            .unwrap();
 
         store_wrapper
     }
@@ -152,9 +157,7 @@ mod test_utils {
             vec![3, 3].try_into().unwrap(),
             FillValue::new(vec![0]),
         )
-        .bytes_to_bytes_codecs(vec![
-            Arc::new(get_lz4_compressor()),
-        ])
+        .bytes_to_bytes_codecs(vec![Arc::new(get_lz4_compressor())])
         .build(store.clone(), "/bool_data")
         .unwrap();
         array.store_metadata().unwrap();
@@ -164,10 +167,9 @@ mod test_utils {
             v.push(i % 2 == 0);
         }
         let arr: Array2<bool> = Array::from_vec(v).into_shape_with_order((8, 8)).unwrap();
-        array.store_array_subset_ndarray(
-            ArraySubset::new_with_ranges(&[0..8, 0..8]).start(),
-            arr,
-        ).unwrap();
+        array
+            .store_array_subset_ndarray(ArraySubset::new_with_ranges(&[0..8, 0..8]).start(), arr)
+            .unwrap();
 
         // uint array with blosc zlib compression
         let codec = codec::BloscCodec::new(
@@ -176,7 +178,8 @@ mod test_utils {
             Some(0),
             codec::bytes_to_bytes::blosc::BloscShuffleMode::Shuffle,
             Some(1),
-        ).unwrap();
+        )
+        .unwrap();
 
         let array = ArrayBuilder::new(
             vec![8, 8],
@@ -184,18 +187,17 @@ mod test_utils {
             vec![3, 3].try_into().unwrap(),
             FillValue::new(vec![0; 8]),
         )
-        .bytes_to_bytes_codecs(vec![
-            Arc::new(codec),
-        ])
+        .bytes_to_bytes_codecs(vec![Arc::new(codec)])
         .build(store.clone(), "/uint_data")
         .unwrap();
         array.store_metadata().unwrap();
 
-        let arr: Array2<u64> = Array::from_vec((0..64).collect()).into_shape_with_order((8, 8)).unwrap();
-        array.store_array_subset_ndarray(
-            ArraySubset::new_with_ranges(&[0..8, 0..8]).start(),
-            arr,
-        ).unwrap();
+        let arr: Array2<u64> = Array::from_vec((0..64).collect())
+            .into_shape_with_order((8, 8))
+            .unwrap();
+        array
+            .store_array_subset_ndarray(ArraySubset::new_with_ranges(&[0..8, 0..8]).start(), arr)
+            .unwrap();
 
         // int array with zstd compression
         let codec = codec::BloscCodec::new(
@@ -204,7 +206,8 @@ mod test_utils {
             Some(0),
             codec::bytes_to_bytes::blosc::BloscShuffleMode::BitShuffle,
             Some(1),
-        ).unwrap();
+        )
+        .unwrap();
 
         let array = ArrayBuilder::new(
             vec![8, 8],
@@ -212,18 +215,17 @@ mod test_utils {
             vec![3, 3].try_into().unwrap(),
             FillValue::new(vec![0; 8]),
         )
-        .bytes_to_bytes_codecs(vec![
-            Arc::new(codec),
-        ])
+        .bytes_to_bytes_codecs(vec![Arc::new(codec)])
         .build(store.clone(), "/int_data")
         .unwrap();
         array.store_metadata().unwrap();
 
-        let arr: Array2<i64> = Array::from_vec((-31..33).collect()).into_shape_with_order((8, 8)).unwrap();
-        array.store_array_subset_ndarray(
-            ArraySubset::new_with_ranges(&[0..8, 0..8]).start(),
-            arr,
-        ).unwrap();
+        let arr: Array2<i64> = Array::from_vec((-31..33).collect())
+            .into_shape_with_order((8, 8))
+            .unwrap();
+        array
+            .store_array_subset_ndarray(ArraySubset::new_with_ranges(&[0..8, 0..8]).start(), arr)
+            .unwrap();
 
         // float32 array with blosclz compression
         let codec = codec::BloscCodec::new(
@@ -232,7 +234,8 @@ mod test_utils {
             Some(0),
             codec::bytes_to_bytes::blosc::BloscShuffleMode::NoShuffle,
             Some(1),
-        ).unwrap();
+        )
+        .unwrap();
 
         let array = ArrayBuilder::new(
             vec![8, 8],
@@ -240,18 +243,17 @@ mod test_utils {
             vec![3, 3].try_into().unwrap(),
             FillValue::new(vec![0; 4]),
         )
-        .bytes_to_bytes_codecs(vec![
-            Arc::new(codec),
-        ])
+        .bytes_to_bytes_codecs(vec![Arc::new(codec)])
         .build(store.clone(), "/float_data")
         .unwrap();
         array.store_metadata().unwrap();
 
-        let arr: Array2<f32> = Array::range(100.0, 164.0, 1.0).into_shape_with_order((8, 8)).unwrap();
-        array.store_array_subset_ndarray(
-            ArraySubset::new_with_ranges(&[0..8, 0..8]).start(),
-            arr,
-        ).unwrap();
+        let arr: Array2<f32> = Array::range(100.0, 164.0, 1.0)
+            .into_shape_with_order((8, 8))
+            .unwrap();
+        array
+            .store_array_subset_ndarray(ArraySubset::new_with_ranges(&[0..8, 0..8]).start(), arr)
+            .unwrap();
 
         // float64 array with no compression
         let array = ArrayBuilder::new(
@@ -264,11 +266,12 @@ mod test_utils {
         .unwrap();
         array.store_metadata().unwrap();
 
-        let arr: Array2<f64> = Array::range(200.0, 264.0, 1.0).into_shape_with_order((8, 8)).unwrap();
-        array.store_array_subset_ndarray(
-            ArraySubset::new_with_ranges(&[0..8, 0..8]).start(),
-            arr,
-        ).unwrap();
+        let arr: Array2<f64> = Array::range(200.0, 264.0, 1.0)
+            .into_shape_with_order((8, 8))
+            .unwrap();
+        array
+            .store_array_subset_ndarray(ArraySubset::new_with_ranges(&[0..8, 0..8]).start(), arr)
+            .unwrap();
 
         store_wrapper
     }
@@ -279,51 +282,49 @@ mod test_utils {
         let store_wrapper = StoreWrapper::new(dummy_name);
         let store = store_wrapper.get_store();
 
-        // big endian and F order 
+        // big endian and F order
         let array = ArrayBuilder::new(
             vec![10, 11],
             DataType::Int32,
             vec![3, 3].try_into().unwrap(),
             FillValue::new(vec![0; 4]),
         )
-        .bytes_to_bytes_codecs(vec![
-            Arc::new(get_lz4_compressor())
-        ])
-        .array_to_bytes_codec(
-            Arc::new(codec::BytesCodec::new(Some(zarrs::array::Endianness::Big))),
-        )
-        .array_to_array_codecs(vec![
-            Arc::new(codec::TransposeCodec::new(codec::array_to_array::transpose::TransposeOrder::new(&[1, 0]).unwrap()))
-        ])
+        .bytes_to_bytes_codecs(vec![Arc::new(get_lz4_compressor())])
+        .array_to_bytes_codec(Arc::new(codec::BytesCodec::new(Some(
+            zarrs::array::Endianness::Big,
+        ))))
+        .array_to_array_codecs(vec![Arc::new(codec::TransposeCodec::new(
+            codec::array_to_array::transpose::TransposeOrder::new(&[1, 0]).unwrap(),
+        ))])
         .build(store.clone(), "/int_data_big_endian_f_order")
         .unwrap();
         array.store_metadata().unwrap();
 
-        let arr: Array2<i32> = Array::from_vec((0..110).collect()).into_shape_with_order((10, 11)).unwrap();
-        array.store_array_subset_ndarray(
-            ArraySubset::new_with_ranges(&[0..10, 0..11]).start(),
-            arr,
-        ).unwrap();
+        let arr: Array2<i32> = Array::from_vec((0..110).collect())
+            .into_shape_with_order((10, 11))
+            .unwrap();
+        array
+            .store_array_subset_ndarray(ArraySubset::new_with_ranges(&[0..10, 0..11]).start(), arr)
+            .unwrap();
 
-        // little endian and C order 
+        // little endian and C order
         let array = ArrayBuilder::new(
             vec![10, 11],
             DataType::Int32,
             vec![3, 3].try_into().unwrap(),
             FillValue::new(vec![0; 4]),
         )
-        .bytes_to_bytes_codecs(vec![
-            Arc::new(get_lz4_compressor())
-        ])
+        .bytes_to_bytes_codecs(vec![Arc::new(get_lz4_compressor())])
         .build(store.clone(), "/int_data")
         .unwrap();
         array.store_metadata().unwrap();
 
-        let arr: Array2<i32> = Array::from_vec((0..110).collect()).into_shape_with_order((10, 11)).unwrap();
-        array.store_array_subset_ndarray(
-            ArraySubset::new_with_ranges(&[0..10, 0..11]).start(),
-            arr,
-        ).unwrap();
+        let arr: Array2<i32> = Array::from_vec((0..110).collect())
+            .into_shape_with_order((10, 11))
+            .unwrap();
+        array
+            .store_array_subset_ndarray(ArraySubset::new_with_ranges(&[0..10, 0..11]).start(), arr)
+            .unwrap();
 
         store_wrapper
     }
@@ -334,51 +335,55 @@ mod test_utils {
         let store_wrapper = StoreWrapper::new(dummy_name);
         let store = store_wrapper.get_store();
 
-        // big endian and F order 
+        // big endian and F order
         let array = ArrayBuilder::new(
             vec![10, 11, 12],
             DataType::Int32,
             vec![3, 4, 5].try_into().unwrap(),
             FillValue::new(vec![0; 4]),
         )
-        .bytes_to_bytes_codecs(vec![
-            Arc::new(get_lz4_compressor())
-        ])
-        .array_to_bytes_codec(
-            Arc::new(codec::BytesCodec::new(Some(zarrs::array::Endianness::Big))),
-        )
-        .array_to_array_codecs(vec![
-            Arc::new(codec::TransposeCodec::new(codec::array_to_array::transpose::TransposeOrder::new(&[2, 1, 0]).unwrap()))
-        ])
+        .bytes_to_bytes_codecs(vec![Arc::new(get_lz4_compressor())])
+        .array_to_bytes_codec(Arc::new(codec::BytesCodec::new(Some(
+            zarrs::array::Endianness::Big,
+        ))))
+        .array_to_array_codecs(vec![Arc::new(codec::TransposeCodec::new(
+            codec::array_to_array::transpose::TransposeOrder::new(&[2, 1, 0]).unwrap(),
+        ))])
         .build(store.clone(), "/int_data_big_endian_f_order")
         .unwrap();
         array.store_metadata().unwrap();
 
-        let arr: Array3<i32> = Array::from_vec((0..(10*11*12)).collect()).into_shape_with_order((10, 11, 12)).unwrap();
-        array.store_array_subset_ndarray(
-            ArraySubset::new_with_ranges(&[0..10, 0..11, 0..12]).start(),
-            arr,
-        ).unwrap();
+        let arr: Array3<i32> = Array::from_vec((0..(10 * 11 * 12)).collect())
+            .into_shape_with_order((10, 11, 12))
+            .unwrap();
+        array
+            .store_array_subset_ndarray(
+                ArraySubset::new_with_ranges(&[0..10, 0..11, 0..12]).start(),
+                arr,
+            )
+            .unwrap();
 
-        // little endian and C order 
+        // little endian and C order
         let array = ArrayBuilder::new(
             vec![10, 11, 12],
             DataType::Int32,
             vec![3, 4, 5].try_into().unwrap(),
             FillValue::new(vec![0; 4]),
         )
-        .bytes_to_bytes_codecs(vec![
-            Arc::new(get_lz4_compressor())
-        ])
+        .bytes_to_bytes_codecs(vec![Arc::new(get_lz4_compressor())])
         .build(store.clone(), "/int_data")
         .unwrap();
         array.store_metadata().unwrap();
 
-        let arr: Array3<i32> = Array::from_vec((0..(10*11*12)).collect()).into_shape_with_order((10, 11, 12)).unwrap();
-        array.store_array_subset_ndarray(
-            ArraySubset::new_with_ranges(&[0..10, 0..11, 0..12]).start(),
-            arr,
-        ).unwrap();
+        let arr: Array3<i32> = Array::from_vec((0..(10 * 11 * 12)).collect())
+            .into_shape_with_order((10, 11, 12))
+            .unwrap();
+        array
+            .store_array_subset_ndarray(
+                ArraySubset::new_with_ranges(&[0..10, 0..11, 0..12]).start(),
+                arr,
+            )
+            .unwrap();
 
         store_wrapper
     }
@@ -450,18 +455,13 @@ mod test_utils {
             vec![3].try_into().unwrap(),
             FillValue::new(vec![0; 4]),
         )
-        .bytes_to_bytes_codecs(vec![
-            Arc::new(get_lz4_compressor()),
-        ])
+        .bytes_to_bytes_codecs(vec![Arc::new(get_lz4_compressor())])
         .build(store.clone(), "/int_data")
         .unwrap();
         array.store_metadata().unwrap();
 
         let arr: Array1<i32> = Array::from_vec((-5..6).collect());
-        array.store_array_subset_ndarray(
-            &[0],
-            arr,
-        ).unwrap();
+        array.store_array_subset_ndarray(&[0], arr).unwrap();
 
         // float data
         let array = ArrayBuilder::new(
@@ -470,18 +470,13 @@ mod test_utils {
             vec![3].try_into().unwrap(),
             FillValue::new(vec![0; 4]),
         )
-        .bytes_to_bytes_codecs(vec![
-            Arc::new(get_lz4_compressor()),
-        ])
+        .bytes_to_bytes_codecs(vec![Arc::new(get_lz4_compressor())])
         .build(store.clone(), "/float_data")
         .unwrap();
         array.store_metadata().unwrap();
 
         let arr: Array1<f32> = Array::range(100.0, 111.0, 1.0);
-        array.store_array_subset_ndarray(
-            &[0],
-            arr,
-        ).unwrap();
+        array.store_array_subset_ndarray(&[0], arr).unwrap();
 
         store_wrapper
     }
@@ -499,18 +494,20 @@ mod test_utils {
             vec![2, 2, 2].try_into().unwrap(),
             FillValue::new(vec![0; 4]),
         )
-        .bytes_to_bytes_codecs(vec![
-            Arc::new(get_lz4_compressor()),
-        ])
+        .bytes_to_bytes_codecs(vec![Arc::new(get_lz4_compressor())])
         .build(store.clone(), "/int_data")
         .unwrap();
         array.store_metadata().unwrap();
 
-        let arr: Array3<i32> = Array::from_vec((-62..63).collect()).into_shape_with_order((5, 5, 5)).unwrap();
-        array.store_array_subset_ndarray(
-            ArraySubset::new_with_ranges(&[0..5, 0..5, 0..5]).start(),
-            arr,
-        ).unwrap();
+        let arr: Array3<i32> = Array::from_vec((-62..63).collect())
+            .into_shape_with_order((5, 5, 5))
+            .unwrap();
+        array
+            .store_array_subset_ndarray(
+                ArraySubset::new_with_ranges(&[0..5, 0..5, 0..5]).start(),
+                arr,
+            )
+            .unwrap();
 
         // float data
         let array = ArrayBuilder::new(
@@ -519,18 +516,20 @@ mod test_utils {
             vec![2, 2, 2].try_into().unwrap(),
             FillValue::new(vec![0; 4]),
         )
-        .bytes_to_bytes_codecs(vec![
-            Arc::new(get_lz4_compressor()),
-        ])
+        .bytes_to_bytes_codecs(vec![Arc::new(get_lz4_compressor())])
         .build(store.clone(), "/float_data")
         .unwrap();
         array.store_metadata().unwrap();
 
-        let arr: Array3<f32> = Array::range(100.0, 225.0, 1.0).into_shape_with_order((5, 5, 5)).unwrap();
-        array.store_array_subset_ndarray(
-            ArraySubset::new_with_ranges(&[0..5, 0..5, 0..5]).start(),
-            arr,
-        ).unwrap();
+        let arr: Array3<f32> = Array::range(100.0, 225.0, 1.0)
+            .into_shape_with_order((5, 5, 5))
+            .unwrap();
+        array
+            .store_array_subset_ndarray(
+                ArraySubset::new_with_ranges(&[0..5, 0..5, 0..5]).start(),
+                arr,
+            )
+            .unwrap();
 
         store_wrapper
     }
@@ -548,23 +547,22 @@ mod test_utils {
             vec![4, 4].try_into().unwrap(),
             FillValue::new(vec![0; 8]),
         )
-        .bytes_to_bytes_codecs(vec![
-            Arc::new(get_lz4_compressor()),
-        ])
+        .bytes_to_bytes_codecs(vec![Arc::new(get_lz4_compressor())])
         .build(store.clone(), "/lat")
         .unwrap();
         array.store_metadata().unwrap();
 
-        let mut v = vec![38. , 38.1, 38.2, 38.3, 38.4, 38.5, 38.6, 38.7, 38.8, 38.9, 39.];
+        let mut v = vec![
+            38., 38.1, 38.2, 38.3, 38.4, 38.5, 38.6, 38.7, 38.8, 38.9, 39.,
+        ];
         for _ in 0..10 {
             v.extend_from_within(..11);
         }
-        
+
         let arr: Array2<f64> = Array::from_vec(v).into_shape_with_order((11, 11)).unwrap();
-        array.store_array_subset_ndarray(
-            ArraySubset::new_with_ranges(&[0..11, 0..11]).start(),
-            arr,
-        ).unwrap();
+        array
+            .store_array_subset_ndarray(ArraySubset::new_with_ranges(&[0..11, 0..11]).start(), arr)
+            .unwrap();
 
         // longitude
         let array = ArrayBuilder::new(
@@ -573,24 +571,23 @@ mod test_utils {
             vec![4, 4].try_into().unwrap(),
             FillValue::new(vec![0; 8]),
         )
-        .bytes_to_bytes_codecs(vec![
-            Arc::new(get_lz4_compressor()),
-        ])
+        .bytes_to_bytes_codecs(vec![Arc::new(get_lz4_compressor())])
         .build(store.clone(), "/lon")
         .unwrap();
         array.store_metadata().unwrap();
 
-        let mut v = vec![-110. , -109.9, -109.8, -109.7, -109.6, -109.5, -109.4, -109.3, -109.2, -109.1, -109.];
+        let mut v = vec![
+            -110., -109.9, -109.8, -109.7, -109.6, -109.5, -109.4, -109.3, -109.2, -109.1, -109.,
+        ];
         for _ in 0..10 {
             v.extend_from_within(..11);
         }
-        
+
         let mut arr: Array2<f64> = Array::from_vec(v).into_shape_with_order((11, 11)).unwrap();
         arr.swap_axes(1, 0);
-        array.store_array_subset_ndarray(
-            ArraySubset::new_with_ranges(&[0..11, 0..11]).start(),
-            arr,
-        ).unwrap();
+        array
+            .store_array_subset_ndarray(ArraySubset::new_with_ranges(&[0..11, 0..11]).start(), arr)
+            .unwrap();
 
         // float data
         let array = ArrayBuilder::new(
@@ -603,11 +600,12 @@ mod test_utils {
         .unwrap();
         array.store_metadata().unwrap();
 
-        let arr: Array2<f64> = Array::range(0.0, 121.0, 1.0).into_shape_with_order((11, 11)).unwrap();
-        array.store_array_subset_ndarray(
-            ArraySubset::new_with_ranges(&[0..11, 0..11]).start(),
-            arr,
-        ).unwrap();
+        let arr: Array2<f64> = Array::range(0.0, 121.0, 1.0)
+            .into_shape_with_order((11, 11))
+            .unwrap();
+        array
+            .store_array_subset_ndarray(ArraySubset::new_with_ranges(&[0..11, 0..11]).start(), arr)
+            .unwrap();
 
         store_wrapper
     }
@@ -625,28 +623,28 @@ mod test_utils {
             vec![4].try_into().unwrap(),
             FillValue::new(vec![0; 8]),
         )
-        .bytes_to_bytes_codecs(vec![
-            Arc::new(get_lz4_compressor()),
-        ])
-        .attributes(serde_json::from_str(
-            r#"{
+        .bytes_to_bytes_codecs(vec![Arc::new(get_lz4_compressor())])
+        .attributes(
+            serde_json::from_str(
+                r#"{
                 "broadcast_params": {
                     "target_shape": [11, 11],
                     "target_chunks": [4, 4],
                     "axis": 1
                 }
-            }"#
-        ).unwrap())
+            }"#,
+            )
+            .unwrap(),
+        )
         .build(store.clone(), "/lat")
         .unwrap();
         array.store_metadata().unwrap();
 
-        let v = vec![38. , 38.1, 38.2, 38.3, 38.4, 38.5, 38.6, 38.7, 38.8, 38.9, 39.];
+        let v = vec![
+            38., 38.1, 38.2, 38.3, 38.4, 38.5, 38.6, 38.7, 38.8, 38.9, 39.,
+        ];
         let arr: Array1<f64> = Array::from_vec(v);
-        array.store_array_subset_ndarray(
-            &[0],
-            arr,
-        ).unwrap();
+        array.store_array_subset_ndarray(&[0], arr).unwrap();
 
         // longitude
         let array = ArrayBuilder::new(
@@ -655,28 +653,28 @@ mod test_utils {
             vec![4].try_into().unwrap(),
             FillValue::new(vec![0; 8]),
         )
-        .bytes_to_bytes_codecs(vec![
-            Arc::new(get_lz4_compressor()),
-        ])
-        .attributes(serde_json::from_str(
-            r#"{
+        .bytes_to_bytes_codecs(vec![Arc::new(get_lz4_compressor())])
+        .attributes(
+            serde_json::from_str(
+                r#"{
                 "broadcast_params": {
                     "target_shape": [11, 11],
                     "target_chunks": [4, 4],
                     "axis": 0
                 }
-            }"#
-        ).unwrap())
+            }"#,
+            )
+            .unwrap(),
+        )
         .build(store.clone(), "/lon")
         .unwrap();
         array.store_metadata().unwrap();
 
-        let v = vec![-110. , -109.9, -109.8, -109.7, -109.6, -109.5, -109.4, -109.3, -109.2, -109.1, -109.];
+        let v = vec![
+            -110., -109.9, -109.8, -109.7, -109.6, -109.5, -109.4, -109.3, -109.2, -109.1, -109.,
+        ];
         let arr: Array1<f64> = Array::from_vec(v);
-        array.store_array_subset_ndarray(
-            &[0],
-            arr,
-        ).unwrap();
+        array.store_array_subset_ndarray(&[0], arr).unwrap();
 
         // float data
         let array = ArrayBuilder::new(
@@ -689,11 +687,12 @@ mod test_utils {
         .unwrap();
         array.store_metadata().unwrap();
 
-        let arr: Array2<f64> = Array::range(0.0, 121.0, 1.0).into_shape_with_order((11, 11)).unwrap();
-        array.store_array_subset_ndarray(
-            ArraySubset::new_with_ranges(&[0..11, 0..11]).start(),
-            arr,
-        ).unwrap();
+        let arr: Array2<f64> = Array::range(0.0, 121.0, 1.0)
+            .into_shape_with_order((11, 11))
+            .unwrap();
+        array
+            .store_array_subset_ndarray(ArraySubset::new_with_ranges(&[0..11, 0..11]).start(), arr)
+            .unwrap();
 
         store_wrapper
     }
@@ -706,7 +705,8 @@ mod test_utils {
 
         // float data with sharding
         let sharding_chunk = vec![3, 2];
-        let mut codec_builder = ShardingCodecBuilder::new(sharding_chunk.as_slice().try_into().unwrap());
+        let mut codec_builder =
+            ShardingCodecBuilder::new(sharding_chunk.as_slice().try_into().unwrap());
         codec_builder.bytes_to_bytes_codecs(vec![Arc::new(get_lz4_compressor())]);
         let array = ArrayBuilder::new(
             vec![11, 10],
@@ -719,11 +719,12 @@ mod test_utils {
         .unwrap();
         array.store_metadata().unwrap();
 
-        let arr: Array2<f64> = Array::range(0.0, 110.0, 1.0).into_shape_with_order((11, 10)).unwrap();
-        array.store_array_subset_ndarray(
-            ArraySubset::new_with_ranges(&[0..11, 0..10]).start(),
-            arr,
-        ).unwrap();
+        let arr: Array2<f64> = Array::range(0.0, 110.0, 1.0)
+            .into_shape_with_order((11, 10))
+            .unwrap();
+        array
+            .store_array_subset_ndarray(ArraySubset::new_with_ranges(&[0..11, 0..10]).start(), arr)
+            .unwrap();
 
         // float data without sharding
         let array = ArrayBuilder::new(
@@ -736,11 +737,12 @@ mod test_utils {
         .unwrap();
         array.store_metadata().unwrap();
 
-        let arr: Array2<f64> = Array::range(0.0, 110.0, 1.0).into_shape_with_order((11, 10)).unwrap();
-        array.store_array_subset_ndarray(
-            ArraySubset::new_with_ranges(&[0..11, 0..10]).start(),
-            arr,
-        ).unwrap();
+        let arr: Array2<f64> = Array::range(0.0, 110.0, 1.0)
+            .into_shape_with_order((11, 10))
+            .unwrap();
+        array
+            .store_array_subset_ndarray(ArraySubset::new_with_ranges(&[0..11, 0..10]).start(), arr)
+            .unwrap();
 
         store_wrapper
     }
@@ -753,7 +755,8 @@ mod test_utils {
 
         // float data with sharding
         let sharding_chunk = vec![3, 2, 4];
-        let mut codec_builder = ShardingCodecBuilder::new(sharding_chunk.as_slice().try_into().unwrap());
+        let mut codec_builder =
+            ShardingCodecBuilder::new(sharding_chunk.as_slice().try_into().unwrap());
         codec_builder.bytes_to_bytes_codecs(vec![Arc::new(get_lz4_compressor())]);
         let array = ArrayBuilder::new(
             vec![11, 10, 9],
@@ -766,11 +769,15 @@ mod test_utils {
         .unwrap();
         array.store_metadata().unwrap();
 
-        let arr: Array3<f64> = Array::range(0.0, 990.0, 1.0).into_shape_with_order((11, 10, 9)).unwrap();
-        array.store_array_subset_ndarray(
-            ArraySubset::new_with_ranges(&[0..11, 0..10, 0..9]).start(),
-            arr,
-        ).unwrap();
+        let arr: Array3<f64> = Array::range(0.0, 990.0, 1.0)
+            .into_shape_with_order((11, 10, 9))
+            .unwrap();
+        array
+            .store_array_subset_ndarray(
+                ArraySubset::new_with_ranges(&[0..11, 0..10, 0..9]).start(),
+                arr,
+            )
+            .unwrap();
 
         // float data without sharding
         let array = ArrayBuilder::new(
@@ -783,11 +790,15 @@ mod test_utils {
         .unwrap();
         array.store_metadata().unwrap();
 
-        let arr: Array3<f64> = Array::range(0.0, 990.0, 1.0).into_shape_with_order((11, 10, 9)).unwrap();
-        array.store_array_subset_ndarray(
-            ArraySubset::new_with_ranges(&[0..11, 0..10, 0..9]).start(),
-            arr,
-        ).unwrap();
+        let arr: Array3<f64> = Array::range(0.0, 990.0, 1.0)
+            .into_shape_with_order((11, 10, 9))
+            .unwrap();
+        array
+            .store_array_subset_ndarray(
+                ArraySubset::new_with_ranges(&[0..11, 0..10, 0..9]).start(),
+                arr,
+            )
+            .unwrap();
 
         store_wrapper
     }
@@ -806,23 +817,22 @@ mod test_utils {
             vec![4, 4].try_into().unwrap(),
             FillValue::new(vec![0; 8]),
         )
-        .bytes_to_bytes_codecs(vec![
-            Arc::new(get_lz4_compressor()),
-        ])
+        .bytes_to_bytes_codecs(vec![Arc::new(get_lz4_compressor())])
         .build(store.clone(), "/var=1/other_var=a/lat")
         .unwrap();
         array.store_metadata().unwrap();
 
-        let mut v = vec![38. , 38.1, 38.2, 38.3, 38.4, 38.5, 38.6, 38.7, 38.8, 38.9, 39.];
+        let mut v = vec![
+            38., 38.1, 38.2, 38.3, 38.4, 38.5, 38.6, 38.7, 38.8, 38.9, 39.,
+        ];
         for _ in 0..10 {
             v.extend_from_within(..11);
         }
-        
+
         let arr: Array2<f64> = Array::from_vec(v).into_shape_with_order((11, 11)).unwrap();
-        array.store_array_subset_ndarray(
-            ArraySubset::new_with_ranges(&[0..11, 0..11]).start(),
-            arr,
-        ).unwrap();
+        array
+            .store_array_subset_ndarray(ArraySubset::new_with_ranges(&[0..11, 0..11]).start(), arr)
+            .unwrap();
 
         // longitude
         let array = ArrayBuilder::new(
@@ -831,24 +841,23 @@ mod test_utils {
             vec![4, 4].try_into().unwrap(),
             FillValue::new(vec![0; 8]),
         )
-        .bytes_to_bytes_codecs(vec![
-            Arc::new(get_lz4_compressor()),
-        ])
+        .bytes_to_bytes_codecs(vec![Arc::new(get_lz4_compressor())])
         .build(store.clone(), "/var=1/other_var=a/lon")
         .unwrap();
         array.store_metadata().unwrap();
 
-        let mut v = vec![-110. , -109.9, -109.8, -109.7, -109.6, -109.5, -109.4, -109.3, -109.2, -109.1, -109.];
+        let mut v = vec![
+            -110., -109.9, -109.8, -109.7, -109.6, -109.5, -109.4, -109.3, -109.2, -109.1, -109.,
+        ];
         for _ in 0..10 {
             v.extend_from_within(..11);
         }
-        
+
         let mut arr: Array2<f64> = Array::from_vec(v).into_shape_with_order((11, 11)).unwrap();
         arr.swap_axes(1, 0);
-        array.store_array_subset_ndarray(
-            ArraySubset::new_with_ranges(&[0..11, 0..11]).start(),
-            arr,
-        ).unwrap();
+        array
+            .store_array_subset_ndarray(ArraySubset::new_with_ranges(&[0..11, 0..11]).start(), arr)
+            .unwrap();
 
         //var=2, other_var=a
         // latitude
@@ -858,23 +867,22 @@ mod test_utils {
             vec![4, 4].try_into().unwrap(),
             FillValue::new(vec![0; 8]),
         )
-        .bytes_to_bytes_codecs(vec![
-            Arc::new(get_lz4_compressor()),
-        ])
+        .bytes_to_bytes_codecs(vec![Arc::new(get_lz4_compressor())])
         .build(store.clone(), "/var=2/other_var=a/lat")
         .unwrap();
         array.store_metadata().unwrap();
 
-        let mut v = vec![39. , 39.1, 39.2, 39.3, 39.4, 39.5, 39.6, 39.7, 39.8, 39.9, 40.];
+        let mut v = vec![
+            39., 39.1, 39.2, 39.3, 39.4, 39.5, 39.6, 39.7, 39.8, 39.9, 40.,
+        ];
         for _ in 0..10 {
             v.extend_from_within(..11);
         }
-        
+
         let arr: Array2<f64> = Array::from_vec(v).into_shape_with_order((11, 11)).unwrap();
-        array.store_array_subset_ndarray(
-            ArraySubset::new_with_ranges(&[0..11, 0..11]).start(),
-            arr,
-        ).unwrap();
+        array
+            .store_array_subset_ndarray(ArraySubset::new_with_ranges(&[0..11, 0..11]).start(), arr)
+            .unwrap();
 
         // longitude
         let array = ArrayBuilder::new(
@@ -883,24 +891,23 @@ mod test_utils {
             vec![4, 4].try_into().unwrap(),
             FillValue::new(vec![0; 8]),
         )
-        .bytes_to_bytes_codecs(vec![
-            Arc::new(get_lz4_compressor()),
-        ])
+        .bytes_to_bytes_codecs(vec![Arc::new(get_lz4_compressor())])
         .build(store.clone(), "/var=2/other_var=a/lon")
         .unwrap();
         array.store_metadata().unwrap();
 
-        let mut v = vec![-110. , -109.9, -109.8, -109.7, -109.6, -109.5, -109.4, -109.3, -109.2, -109.1, -109.];
+        let mut v = vec![
+            -110., -109.9, -109.8, -109.7, -109.6, -109.5, -109.4, -109.3, -109.2, -109.1, -109.,
+        ];
         for _ in 0..10 {
             v.extend_from_within(..11);
         }
-        
+
         let mut arr: Array2<f64> = Array::from_vec(v).into_shape_with_order((11, 11)).unwrap();
         arr.swap_axes(1, 0);
-        array.store_array_subset_ndarray(
-            ArraySubset::new_with_ranges(&[0..11, 0..11]).start(),
-            arr,
-        ).unwrap();
+        array
+            .store_array_subset_ndarray(ArraySubset::new_with_ranges(&[0..11, 0..11]).start(), arr)
+            .unwrap();
 
         //var=1, other_var=b
         // latitude
@@ -910,23 +917,22 @@ mod test_utils {
             vec![4, 4].try_into().unwrap(),
             FillValue::new(vec![0; 8]),
         )
-        .bytes_to_bytes_codecs(vec![
-            Arc::new(get_lz4_compressor()),
-        ])
+        .bytes_to_bytes_codecs(vec![Arc::new(get_lz4_compressor())])
         .build(store.clone(), "/var=1/other_var=b/lat")
         .unwrap();
         array.store_metadata().unwrap();
 
-        let mut v = vec![38. , 38.1, 38.2, 38.3, 38.4, 38.5, 38.6, 38.7, 38.8, 38.9, 39.];
+        let mut v = vec![
+            38., 38.1, 38.2, 38.3, 38.4, 38.5, 38.6, 38.7, 38.8, 38.9, 39.,
+        ];
         for _ in 0..10 {
             v.extend_from_within(..11);
         }
-        
+
         let arr: Array2<f64> = Array::from_vec(v).into_shape_with_order((11, 11)).unwrap();
-        array.store_array_subset_ndarray(
-            ArraySubset::new_with_ranges(&[0..11, 0..11]).start(),
-            arr,
-        ).unwrap();
+        array
+            .store_array_subset_ndarray(ArraySubset::new_with_ranges(&[0..11, 0..11]).start(), arr)
+            .unwrap();
 
         // longitude
         let array = ArrayBuilder::new(
@@ -935,24 +941,23 @@ mod test_utils {
             vec![4, 4].try_into().unwrap(),
             FillValue::new(vec![0; 8]),
         )
-        .bytes_to_bytes_codecs(vec![
-            Arc::new(get_lz4_compressor()),
-        ])
+        .bytes_to_bytes_codecs(vec![Arc::new(get_lz4_compressor())])
         .build(store.clone(), "/var=1/other_var=b/lon")
         .unwrap();
         array.store_metadata().unwrap();
 
-        let mut v = vec![-108.9, -108.8, -108.7, -108.6, -108.5, -108.4, -108.3, -108.2, -108.1, -108.0, -107.9];
+        let mut v = vec![
+            -108.9, -108.8, -108.7, -108.6, -108.5, -108.4, -108.3, -108.2, -108.1, -108.0, -107.9,
+        ];
         for _ in 0..10 {
             v.extend_from_within(..11);
         }
-        
+
         let mut arr: Array2<f64> = Array::from_vec(v).into_shape_with_order((11, 11)).unwrap();
         arr.swap_axes(1, 0);
-        array.store_array_subset_ndarray(
-            ArraySubset::new_with_ranges(&[0..11, 0..11]).start(),
-            arr,
-        ).unwrap();
+        array
+            .store_array_subset_ndarray(ArraySubset::new_with_ranges(&[0..11, 0..11]).start(), arr)
+            .unwrap();
 
         //var=2, other_var=b
         // latitude
@@ -962,23 +967,22 @@ mod test_utils {
             vec![4, 4].try_into().unwrap(),
             FillValue::new(vec![0; 8]),
         )
-        .bytes_to_bytes_codecs(vec![
-            Arc::new(get_lz4_compressor()),
-        ])
+        .bytes_to_bytes_codecs(vec![Arc::new(get_lz4_compressor())])
         .build(store.clone(), "/var=2/other_var=b/lat")
         .unwrap();
         array.store_metadata().unwrap();
 
-        let mut v = vec![39. , 39.1, 39.2, 39.3, 39.4, 39.5, 39.6, 39.7, 39.8, 39.9, 40.];
+        let mut v = vec![
+            39., 39.1, 39.2, 39.3, 39.4, 39.5, 39.6, 39.7, 39.8, 39.9, 40.,
+        ];
         for _ in 0..10 {
             v.extend_from_within(..11);
         }
-        
+
         let arr: Array2<f64> = Array::from_vec(v).into_shape_with_order((11, 11)).unwrap();
-        array.store_array_subset_ndarray(
-            ArraySubset::new_with_ranges(&[0..11, 0..11]).start(),
-            arr,
-        ).unwrap();
+        array
+            .store_array_subset_ndarray(ArraySubset::new_with_ranges(&[0..11, 0..11]).start(), arr)
+            .unwrap();
 
         // longitude
         let array = ArrayBuilder::new(
@@ -987,29 +991,31 @@ mod test_utils {
             vec![4, 4].try_into().unwrap(),
             FillValue::new(vec![0; 8]),
         )
-        .bytes_to_bytes_codecs(vec![
-            Arc::new(get_lz4_compressor()),
-        ])
+        .bytes_to_bytes_codecs(vec![Arc::new(get_lz4_compressor())])
         .build(store.clone(), "/var=2/other_var=b/lon")
         .unwrap();
         array.store_metadata().unwrap();
 
-        let mut v = vec![-108.9, -108.8, -108.7, -108.6, -108.5, -108.4, -108.3, -108.2, -108.1, -108.0, -107.9];
+        let mut v = vec![
+            -108.9, -108.8, -108.7, -108.6, -108.5, -108.4, -108.3, -108.2, -108.1, -108.0, -107.9,
+        ];
         for _ in 0..10 {
             v.extend_from_within(..11);
         }
-        
+
         let mut arr: Array2<f64> = Array::from_vec(v).into_shape_with_order((11, 11)).unwrap();
         arr.swap_axes(1, 0);
-        array.store_array_subset_ndarray(
-            ArraySubset::new_with_ranges(&[0..11, 0..11]).start(),
-            arr,
-        ).unwrap();
+        array
+            .store_array_subset_ndarray(ArraySubset::new_with_ranges(&[0..11, 0..11]).start(), arr)
+            .unwrap();
 
         store_wrapper
     }
 
-    pub(crate) fn validate_names_and_types(targets: &HashMap<String, arrow_schema::DataType>, rec: &RecordBatch) {
+    pub(crate) fn validate_names_and_types(
+        targets: &HashMap<String, arrow_schema::DataType>,
+        rec: &RecordBatch,
+    ) {
         let mut target_cols: Vec<&String> = targets.keys().collect();
         let schema = rec.schema();
         let from_rec: Vec<&String> = schema.fields.iter().map(|f| f.name()).collect();

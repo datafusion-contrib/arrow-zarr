@@ -124,14 +124,14 @@ mod tests {
     use arrow_array::{cast::AsArray, StringArray};
     use arrow_buffer::ScalarBuffer;
 
+    use crate::test_utils::{store_lat_lon, store_lat_lon_with_partition, StoreWrapper};
     use datafusion::execution::{
         config::SessionConfig,
         context::{SessionContext, SessionState},
         runtime_env::RuntimeEnv,
     };
-    use std::sync::Arc;
     use rstest::*;
-    use crate::test_utils::{StoreWrapper, store_lat_lon, store_lat_lon_with_partition};
+    use std::sync::Arc;
 
     fn extract_col<T>(col_name: &str, rec_batch: &RecordBatch) -> ScalarBuffer<T::Native>
     where
@@ -156,7 +156,7 @@ mod tests {
     #[rstest]
     #[tokio::test]
     async fn test_create(
-        #[with("test_create".to_string())] store_lat_lon: StoreWrapper
+        #[with("test_create".to_string())] store_lat_lon: StoreWrapper,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut state = SessionState::new_with_config_rt(
             SessionConfig::default(),
@@ -194,7 +194,7 @@ mod tests {
     #[rstest]
     #[tokio::test]
     async fn test_predicates(
-        #[with("test_predicate".to_string())] store_lat_lon: StoreWrapper
+        #[with("test_predicate".to_string())] store_lat_lon: StoreWrapper,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut state = SessionState::new_with_config_rt(
             SessionConfig::default(),
@@ -318,7 +318,7 @@ mod tests {
     #[rstest]
     #[tokio::test]
     async fn test_partitions(
-        #[with("test_partitions".to_string())] store_lat_lon_with_partition: StoreWrapper
+        #[with("test_partitions".to_string())] store_lat_lon_with_partition: StoreWrapper,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut state = SessionState::new_with_config_rt(
             SessionConfig::default(),

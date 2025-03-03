@@ -90,7 +90,6 @@ impl ListingZarrTableOptions {
             .arrow_schema()?;
         Ok(schema)
 
-
         // let n_partitions = self.table_partition_cols.len();
         // let mut files = table_path.list_all_files(state, &store, "zgroup").await?;
         // let mut schema_to_return: Option<Schema> = None;
