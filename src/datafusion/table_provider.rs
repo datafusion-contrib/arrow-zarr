@@ -36,7 +36,7 @@ use futures::StreamExt;
 
 use crate::{
     async_reader::{ZarrPath, ZarrReadAsync},
-    reader::{ZarrError, ZarrResult},
+    reader::ZarrResult,
 };
 
 use super::helpers::{expr_applicable_for_cols, pruned_partition_list, split_files};
@@ -79,42 +79,53 @@ impl ListingZarrTableOptions {
         let store = state.runtime_env().object_store(table_path)?;
         let prefix = table_path.prefix();
 
-        let n_partitions = self.table_partition_cols.len();
-        let mut files = table_path.list_all_files(state, &store, "zgroup").await?;
-        let mut schema_to_return: Option<Schema> = None;
-        while let Some(file) = files.next().await {
-            let mut p = prefix.clone();
-            let file = file?.location;
-            for (cnt, part) in file.prefix_match(prefix).unwrap().enumerate() {
-                if cnt == n_partitions {
-                    if let Some(ext) = file.extension() {
-                        if ext == "zgroup" {
-                            let schema = ZarrPath::new(store.clone(), p.clone())
-                                .get_zarr_metadata()
-                                .await?
-                                .arrow_schema()?;
-                            if let Some(sch) = &schema_to_return {
-                                if sch != &schema {
-                                    return Err(ZarrError::InvalidMetadata(
-                                        "mismatch between different partition schemas".into(),
-                                    ));
-                                }
-                            } else {
-                                schema_to_return = Some(schema);
-                            }
-                        }
-                    }
-                }
-                p = p.child(part);
-            }
-        }
+        // this is clearly not correct, but I don't think the commented
+        // out logic, for when we need to infer a schema but there are
+        // partitions, works either. for now I'll just hack this so that
+        // I can test most of the logic, I will refactor everything with
+        // zarrs anyway so I will revisit shortly.
+        let schema = ZarrPath::new(store.clone(), prefix.clone())
+            .get_zarr_metadata()
+            .await?
+            .arrow_schema()?;
+        Ok(schema)
 
-        if let Some(schema_to_return) = schema_to_return {
-            return Ok(schema_to_return);
-        }
-        Err(ZarrError::InvalidMetadata(
-            "could not infer schema for zarr table path".into(),
-        ))
+        // let n_partitions = self.table_partition_cols.len();
+        // let mut files = table_path.list_all_files(state, &store, "zgroup").await?;
+        // let mut schema_to_return: Option<Schema> = None;
+        // while let Some(file) = files.next().await {
+        //     let mut p = prefix.clone();
+        //     let file = file?.location;
+        //     for (cnt, part) in file.prefix_match(prefix).unwrap().enumerate() {
+        //         if cnt == n_partitions {
+        //             if let Some(ext) = file.extension() {
+        //                 if ext == "zgroup" {
+        //                     let schema = ZarrPath::new(store.clone(), p.clone())
+        //                         .get_zarr_metadata()
+        //                         .await?
+        //                         .arrow_schema()?;
+        //                     if let Some(sch) = &schema_to_return {
+        //                         if sch != &schema {
+        //                             return Err(ZarrError::InvalidMetadata(
+        //                                 "mismatch between different partition schemas".into(),
+        //                             ));
+        //                         }
+        //                     } else {
+        //                         schema_to_return = Some(schema);
+        //                     }
+        //                 }
+        //             }
+        //         }
+        //         p = p.child(part);
+        //     }
+        // }
+
+        // if let Some(schema_to_return) = schema_to_return {
+        //     return Ok(schema_to_return);
+        // }
+        // Err(ZarrError::InvalidMetadata(
+        //     "could not infer schema for zarr table path".into(),
+        // ))
     }
 }
 

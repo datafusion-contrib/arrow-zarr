@@ -202,25 +202,32 @@ impl<'a> ZarrReadAsync<'a> for ZarrPath {
 mod zarr_read_async_tests {
     use object_store::{local::LocalFileSystem, path::Path};
     use std::collections::HashSet;
-    use std::path::PathBuf;
     use std::sync::Arc;
 
     use super::*;
     use crate::reader::codecs::{Endianness, ZarrCodec, ZarrDataType};
     use crate::reader::metadata::{ChunkSeparator, ZarrArrayMetadata};
     use crate::reader::ZarrProjection;
+    use crate::test_utils::{store_raw_bytes, StoreWrapper};
+    use rstest::*;
 
-    fn get_test_data_file_system() -> LocalFileSystem {
-        LocalFileSystem::new_with_prefix(
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test-data/data/zarr/v2_data"),
-        )
-        .unwrap()
-    }
-
+    #[rstest]
     #[tokio::test]
-    async fn read_metadata() {
-        let file_sys = get_test_data_file_system();
-        let p = Path::parse("raw_bytes_example.zarr").unwrap();
+    async fn read_metadata(
+        #[with("read_metadata_async".to_string())] store_raw_bytes: StoreWrapper,
+    ) {
+        let file_sys = LocalFileSystem::new_with_prefix(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let p = Path::parse(
+            store_raw_bytes
+                .store_path()
+                .components()
+                .last()
+                .unwrap()
+                .as_os_str()
+                .to_str()
+                .unwrap(),
+        )
+        .unwrap();
 
         let store = ZarrPath::new(Arc::new(file_sys), p);
         let meta = store.get_zarr_metadata().await.unwrap();
@@ -229,11 +236,11 @@ mod zarr_read_async_tests {
         assert_eq!(
             meta.get_array_meta("byte_data").unwrap(),
             &ZarrArrayMetadata::new(
-                2,
+                3,
                 ZarrDataType::UInt(1),
                 ChunkPattern {
-                    separator: ChunkSeparator::Period,
-                    c_prefix: false
+                    separator: ChunkSeparator::Slash,
+                    c_prefix: true
                 },
                 None,
                 vec![ZarrCodec::Bytes(Endianness::Little)],
@@ -242,11 +249,11 @@ mod zarr_read_async_tests {
         assert_eq!(
             meta.get_array_meta("float_data").unwrap(),
             &ZarrArrayMetadata::new(
-                2,
+                3,
                 ZarrDataType::Float(8),
                 ChunkPattern {
-                    separator: ChunkSeparator::Period,
-                    c_prefix: false
+                    separator: ChunkSeparator::Slash,
+                    c_prefix: true
                 },
                 None,
                 vec![ZarrCodec::Bytes(Endianness::Little)],
@@ -254,10 +261,23 @@ mod zarr_read_async_tests {
         );
     }
 
+    #[rstest]
     #[tokio::test]
-    async fn read_raw_chunks() {
-        let file_sys = get_test_data_file_system();
-        let p = Path::parse("raw_bytes_example.zarr").unwrap();
+    async fn read_raw_chunks(
+        #[with("read_raw_chunks_async".to_string())] store_raw_bytes: StoreWrapper,
+    ) {
+        let file_sys = LocalFileSystem::new_with_prefix(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let p = Path::parse(
+            store_raw_bytes
+                .store_path()
+                .components()
+                .last()
+                .unwrap()
+                .as_os_str()
+                .to_str()
+                .unwrap(),
+        )
+        .unwrap();
         let mut io_uring_worker_pool = WorkerPool::new(32, 2).unwrap();
 
         let store = ZarrPath::new(Arc::new(file_sys), p);

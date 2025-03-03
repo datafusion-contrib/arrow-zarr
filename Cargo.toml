@@ -10,13 +10,13 @@ edition = "2021"
 rust-version = "1.64"
 
 [dependencies]
-async-trait = { version = "0.1.53" }
+async-trait = { version = "^0.1.86" }
 itertools = { version = "0.12.0" }
 regex = { version = "1.9.5" }
 serde_json = { version = "1.0.107" }
 serde = { version = "1.0.188", features = ["derive"] }
 flate2 = { version = "1.0.27" }
-blosc = { version = "0.2.0" }
+blosc-src = { version = "^0.3.4" }
 crc32c = { version = "0.6.5" }
 object_store = { version = "0.9" }
 futures = { version = "0.3" }
@@ -49,6 +49,9 @@ all = ["datafusion"]
 [dev-dependencies]
 arrow-cast = { version = "50.0.0", features = ["prettyprint"] }
 chrono = { version = "0.4" }
+zarrs = { version = "0.19.2" }
+zarrs_filesystem = { version = "0.2.0" }
+zarrs_storage = { version = "0.3.0" }
+rstest = { version = "0.24.0" }
+ndarray = { version = "^0.16.1" }
 
-[[bin]]
-name = "async-benchmark"

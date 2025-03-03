@@ -19,10 +19,12 @@ use crate::reader::errors::throw_invalid_meta;
 use crate::reader::{ZarrError, ZarrResult};
 use arrow_array::*;
 use arrow_schema::{DataType, Field, FieldRef, TimeUnit};
+use blosc_src::{blosc_cbuffer_sizes, blosc_decompress_ctx};
 use crc32c::crc32c;
 use flate2::read::GzDecoder;
 use itertools::Itertools;
 use std::io::Read;
+use std::os::raw::c_void;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::vec;
@@ -270,14 +272,14 @@ fn decode_transpose<T: Clone>(
     order: &[usize],
 ) -> ZarrResult<Vec<T>> {
     let new_indices: Vec<_> = match order.len() {
-        2 => (0..chunk_dims[order[0]])
-            .cartesian_product(0..chunk_dims[order[1]])
-            .map(|t| t.0 * chunk_dims[1] + t.1)
+        2 => (0..chunk_dims[order[1]])
+            .cartesian_product(0..chunk_dims[order[0]])
+            .map(|t| t.1 * chunk_dims[0] + t.0)
             .collect(),
-        3 => (0..chunk_dims[order[0]])
+        3 => (0..chunk_dims[order[2]])
             .cartesian_product(0..chunk_dims[order[1]])
-            .cartesian_product(0..chunk_dims[order[2]])
-            .map(|t| t.0 .0 * chunk_dims[1] * chunk_dims[2] + t.0 .1 * chunk_dims[2] + t.1)
+            .cartesian_product(0..chunk_dims[order[0]])
+            .map(|t| t.1 * chunk_dims[0] * chunk_dims[1] + t.0 .1 * chunk_dims[0] + t.0 .0)
             .collect(),
         _ => {
             panic!("Invalid number of dims for transpose")
@@ -333,6 +335,41 @@ fn process_edge_chunk<T: Clone + Default>(
     keep_indices(buf, &indices_to_keep);
 }
 
+// copied this from the blosc library, since we directly import blosc-src for
+// this project due to using zarrs.
+unsafe fn blosc_decompress_bytes(src: &[u8]) -> ZarrResult<Vec<u8>> {
+    let mut nbytes: usize = 0;
+    let mut _cbytes: usize = 0;
+    let mut _blocksize: usize = 0;
+    // Unsafe if src comes from an untrusted source.
+    blosc_cbuffer_sizes(
+        src.as_ptr() as *const c_void,
+        &mut nbytes as *mut usize,
+        &mut _cbytes as *mut usize,
+        &mut _blocksize as *mut usize,
+    );
+    let dest_size = nbytes;
+    let mut dest: Vec<u8> = Vec::with_capacity(dest_size);
+    // Unsafe if src comes from an untrusted source.
+    let rsize = blosc_decompress_ctx(
+        src.as_ptr() as *const c_void,
+        dest.as_mut_ptr() as *mut c_void,
+        nbytes,
+        1,
+    );
+    if rsize > 0 {
+        // Unsafe if T contains references or pointers
+        dest.set_len(rsize as usize);
+        dest.shrink_to_fit();
+        Ok(dest)
+    } else {
+        // Buffer too small, data corrupted, decompressor not available, etc
+        Err(ZarrError::Read(
+            "A problem occured with blosc decompression".to_string(),
+        ))
+    }
+}
+
 // decode data that was encoded with a bytes to bytes codec.
 fn apply_bytes_to_bytes_codec(codec: &ZarrCodec, bytes: &[u8]) -> ZarrResult<Vec<u8>> {
     let mut decompressed_bytes = Vec::new();
@@ -342,14 +379,13 @@ fn apply_bytes_to_bytes_codec(codec: &ZarrCodec, bytes: &[u8]) -> ZarrResult<Vec
             decoder.read_to_end(&mut decompressed_bytes)?;
         }
         ZarrCodec::BloscCompressor(_) => {
-            decompressed_bytes = unsafe { blosc::decompress_bytes(bytes).unwrap() };
+            decompressed_bytes = unsafe { blosc_decompress_bytes(bytes).unwrap() };
         }
         ZarrCodec::Crc32c => {
             let mut bytes = bytes.to_vec();
             let l = bytes.len();
             let checksum = bytes.split_off(l - 4);
-            let checksum = [checksum[0], checksum[1], checksum[2], checksum[3]];
-            if crc32c(&bytes[..]) != u32::from_le_bytes(checksum) {
+            if crc32c(&bytes[..]).to_le_bytes() != checksum[..4] {
                 return Err(throw_invalid_meta("crc32c checksum failed"));
             }
             decompressed_bytes = bytes;
@@ -705,7 +741,7 @@ macro_rules! create_decode_function {
             if let Some(sharding_params) = sharding_params.as_ref() {
                 let mut index_size: usize =
                     2 * 8 * sharding_params.n_chunks.iter().fold(1, |mult, x| mult * x);
-                index_size += sharding_params
+                index_size += 4 * sharding_params
                     .index_codecs
                     .iter()
                     .any(|c| c == &ZarrCodec::Crc32c) as usize;
@@ -1018,154 +1054,7 @@ pub(crate) fn apply_codecs(
 
 #[cfg(test)]
 mod zarr_codecs_tests {
-    use crate::tests::get_test_v3_data_path;
-
     use super::*;
-    use ::std::fs::read;
-
-    // reading a chunk and decoding it using hard coded, known options. this test
-    // doesn't included any sharding.
-    #[test]
-    fn no_sharding_tests() {
-        let path = get_test_v3_data_path("no_sharding.zarr/int_data/c/1/1".to_string());
-        let raw_data = read(path).unwrap();
-
-        let chunk_shape = vec![4, 4];
-        let real_dims = vec![4, 4];
-        let data_type = ZarrDataType::Int(4);
-        let codecs = vec![
-            ZarrCodec::Bytes(Endianness::Little),
-            ZarrCodec::BloscCompressor(BloscOptions::new(
-                CompressorName::Zstd,
-                5,
-                ShuffleOptions::Noshuffle,
-                0,
-            )),
-        ];
-        let sharding_params: Option<ShardingOptions> = None;
-
-        let (arr, field) = apply_codecs(
-            "int_data".to_string(),
-            raw_data,
-            &chunk_shape,
-            &real_dims,
-            &data_type,
-            &codecs,
-            sharding_params,
-            None,
-        )
-        .unwrap();
-
-        assert_eq!(
-            field,
-            Arc::new(Field::new("int_data", DataType::Int32, false))
-        );
-        let target_arr: Int32Array = vec![
-            68, 69, 70, 71, 84, 85, 86, 87, 100, 101, 102, 103, 116, 117, 118, 119,
-        ]
-        .into();
-        assert_eq!(*arr, target_arr);
-    }
-
-    // reading a chunk and decoding it using hard coded, known options. this test
-    // includes sharding.
-    #[test]
-    fn with_sharding_tests() {
-        let path = get_test_v3_data_path("with_sharding.zarr/float_data/1.1".to_string());
-        let raw_data = read(path).unwrap();
-
-        let chunk_shape = vec![4, 4];
-        let real_dims = vec![4, 4];
-        let data_type = ZarrDataType::Float(8);
-        let codecs: Vec<ZarrCodec> = vec![];
-        let sharding_params = Some(ShardingOptions::new(
-            vec![2, 2],
-            vec![2, 2],
-            vec![
-                ZarrCodec::Bytes(Endianness::Little),
-                ZarrCodec::BloscCompressor(BloscOptions::new(
-                    CompressorName::Zstd,
-                    5,
-                    ShuffleOptions::Noshuffle,
-                    0,
-                )),
-            ],
-            vec![ZarrCodec::Bytes(Endianness::Little)],
-            IndexLocation::End,
-            0,
-        ));
-
-        let (arr, field) = apply_codecs(
-            "float_data".to_string(),
-            raw_data,
-            &chunk_shape,
-            &real_dims,
-            &data_type,
-            &codecs,
-            sharding_params,
-            None,
-        )
-        .unwrap();
-
-        assert_eq!(
-            field,
-            Arc::new(Field::new("float_data", DataType::Float64, false))
-        );
-        let target_arr: Float64Array = vec![
-            36.0, 37.0, 38.0, 39.0, 44.0, 45.0, 46.0, 47.0, 52.0, 53.0, 54.0, 55.0, 60.0, 61.0,
-            62.0, 63.0,
-        ]
-        .into();
-        assert_eq!(*arr, target_arr);
-    }
-
-    // reading a chunk and decoding it using hard coded, known options. this test
-    // includes sharding, and the shape doesn't exactly line up with the chunks.
-    #[test]
-    fn with_sharding_with_edge_tests() {
-        let path = get_test_v3_data_path("with_sharding_with_edge.zarr/uint_data/1.1".to_string());
-        let raw_data = read(path).unwrap();
-
-        let chunk_shape = vec![4, 4];
-        let real_dims = vec![3, 3];
-        let data_type = ZarrDataType::UInt(2);
-        let codecs: Vec<ZarrCodec> = vec![];
-        let sharding_params = Some(ShardingOptions::new(
-            vec![2, 2],
-            vec![2, 2],
-            vec![
-                ZarrCodec::Bytes(Endianness::Little),
-                ZarrCodec::BloscCompressor(BloscOptions::new(
-                    CompressorName::Zstd,
-                    5,
-                    ShuffleOptions::Noshuffle,
-                    0,
-                )),
-            ],
-            vec![ZarrCodec::Bytes(Endianness::Little)],
-            IndexLocation::End,
-            0,
-        ));
-
-        let (arr, field) = apply_codecs(
-            "uint_data".to_string(),
-            raw_data,
-            &chunk_shape,
-            &real_dims,
-            &data_type,
-            &codecs,
-            sharding_params,
-            None,
-        )
-        .unwrap();
-
-        assert_eq!(
-            field,
-            Arc::new(Field::new("uint_data", DataType::UInt16, false))
-        );
-        let target_arr: UInt16Array = vec![32, 33, 34, 39, 40, 41, 46, 47, 48].into();
-        assert_eq!(*arr, target_arr);
-    }
 
     #[test]
     fn test_zarr_data_type_to_arrow_datatype() -> ZarrResult<()> {

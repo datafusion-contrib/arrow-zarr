@@ -521,20 +521,23 @@ pub fn split_files(
 #[cfg(test)]
 mod helpers_tests {
     use super::*;
-    use crate::tests::get_test_v2_data_path;
+    use crate::test_utils::{store_lat_lon_with_partition, StoreWrapper};
     use datafusion_expr::{and, col, lit};
     use itertools::Itertools;
     use object_store::local::LocalFileSystem;
+    use rstest::*;
 
+    #[rstest]
     #[tokio::test]
-    async fn test_listing_and_pruning_partitions() {
-        let table_path = get_test_v2_data_path("lat_lon_w_groups_example.zarr".to_string())
-            .to_str()
-            .unwrap()
-            .to_string();
+    async fn test_listing_and_pruning_partitions(
+        #[with("test_listing_and_pruning_partitions".to_string())]
+        store_lat_lon_with_partition: StoreWrapper,
+    ) {
+        let table_path_buf = store_lat_lon_with_partition.store_path();
+        let table_path = table_path_buf.to_str().unwrap();
 
         let store = LocalFileSystem::new();
-        let url = ListingTableUrl::parse(&table_path).unwrap();
+        let url = ListingTableUrl::parse(table_path).unwrap();
         let partitions = list_partitions(&store, &url, 2).await.unwrap();
 
         let expr1 = col("var").eq(lit(1_i32));
@@ -545,14 +548,14 @@ mod helpers_tests {
         ];
 
         let part_1a = Partition {
-            path: Path::parse(&table_path)
+            path: Path::parse(table_path)
                 .unwrap()
                 .child("var=1")
                 .child("other_var=a"),
             depth: 2,
         };
         let part_1b = Partition {
-            path: Path::parse(&table_path)
+            path: Path::parse(table_path)
                 .unwrap()
                 .child("var=1")
                 .child("other_var=b"),

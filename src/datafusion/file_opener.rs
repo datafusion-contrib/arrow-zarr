@@ -84,15 +84,19 @@ mod tests {
     use datafusion::datasource::physical_plan::FileMeta;
     use object_store::{local::LocalFileSystem, path::Path, ObjectMeta};
 
-    use crate::tests::get_test_v2_data_path;
+    use crate::test_utils::{store_lat_lon, StoreWrapper};
+    use rstest::*;
 
     use super::*;
 
+    #[rstest]
     #[tokio::test]
-    async fn test_open() -> Result<(), Box<dyn Error>> {
+    async fn test_open(
+        #[with("ftest_open".to_string())] store_lat_lon: StoreWrapper,
+    ) -> Result<(), Box<dyn Error>> {
         let local_fs = LocalFileSystem::new();
 
-        let test_data = get_test_v2_data_path("lat_lon_example.zarr".to_string());
+        let test_data = store_lat_lon.store_path();
 
         let config = ZarrConfig::new(Arc::new(local_fs));
         let opener = ZarrFileOpener::new(config, None);
