@@ -15,8 +15,10 @@
 // specific language governing permissions and limitations
 // under the License.
 
+use arrow::error::ArrowError;
 use std::error::Error;
-use zarrs::array::ArrayCreateError;
+use zarrs::array::codec::CodecError;
+use zarrs::array::{ArrayCreateError, ArrayError};
 use zarrs_storage::{StorageError, StorePrefixError};
 
 #[derive(Debug)]
@@ -25,6 +27,8 @@ pub enum ZarrQueryError {
     InvalidType(String),
     InvalidArrayShapes(String),
     InvalidMetadata(String),
+    InvalidCompute(String),
+    RecordBatchError(Box<dyn Error + Send + Sync>),
     Zarrs(Box<dyn Error + Send + Sync>),
 }
 
@@ -35,7 +39,9 @@ impl std::fmt::Display for ZarrQueryError {
             Self::InvalidType(msg) => write!(fmt, "Invaild type: {msg}"),
             Self::InvalidArrayShapes(msg) => write!(fmt, "Invaild array shapes: {msg}"),
             Self::InvalidMetadata(msg) => write!(fmt, "Invaild meta data: {msg}"),
-            Self::Zarrs(e) => write!(fmt, "A zarrs call return an error: {e}"),
+            Self::InvalidCompute(msg) => write!(fmt, "Invaild compute: {msg}"),
+            Self::RecordBatchError(e) => write!(fmt, "A record batch call returned an error: {e}"),
+            Self::Zarrs(e) => write!(fmt, "A zarrs call returned an error: {e}"),
         }
     }
 }
@@ -57,6 +63,24 @@ impl From<StorePrefixError> for ZarrQueryError {
 impl From<ArrayCreateError> for ZarrQueryError {
     fn from(e: ArrayCreateError) -> ZarrQueryError {
         ZarrQueryError::Zarrs(Box::new(e))
+    }
+}
+
+impl From<CodecError> for ZarrQueryError {
+    fn from(e: CodecError) -> ZarrQueryError {
+        ZarrQueryError::Zarrs(Box::new(e))
+    }
+}
+
+impl From<ArrayError> for ZarrQueryError {
+    fn from(e: ArrayError) -> ZarrQueryError {
+        ZarrQueryError::Zarrs(Box::new(e))
+    }
+}
+
+impl From<ArrowError> for ZarrQueryError {
+    fn from(e: ArrowError) -> ZarrQueryError {
+        ZarrQueryError::RecordBatchError(Box::new(e))
     }
 }
 

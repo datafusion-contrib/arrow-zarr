@@ -7,17 +7,23 @@ authors = ["Maxime Dion <maxdion@gmail.com>"]
 license = "Apache-2.0"
 keywords = ["arrow"]
 edition = "2021"
-rust-version = "1.84"
+rust-version = "1.85"
 
 [dependencies]
 arrow = { version = "54.3.1" }
 arrow-array = { version = "54.3.1" }
 arrow-schema = { version = "54.3.1" }
-hashbag = { version = "0.1.12" }
+bytes = { version = "1.10.1" }
+futures = { version = "0.3.31" }
+futures-util = { version = "0.3.31" }
 itertools = { version = "0.14.0" }
+object_store = { version = "0.12.0" }
+tokio = { version = "1.44.2", features = ["rt", "macros"] }
+tokio-test = { version = "0.4.4" }
 zarrs = { version = "0.19.2", features = ["async"] }
 zarrs_filesystem = { version = "0.2.0" }
 zarrs_metadata = { version = "0.3.4" }
+zarrs_object_store = { version = "0.4.0" }
 zarrs_storage = { version = "0.3.0", features = ["async"] }
 
 [features]
@@ -26,4 +32,5 @@ all = []
 
 [dev-dependencies]
 ndarray = { version = "^0.16.1" }
+walkdir = { version = "2.5.0" }
 

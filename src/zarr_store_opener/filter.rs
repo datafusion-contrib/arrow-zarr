@@ -2,6 +2,7 @@ use crate::errors::zarr_errors::ZarrQueryResult;
 use crate::zarr_store_opener::projection::ZarrQueryProjection;
 use arrow_array::{BooleanArray, RecordBatch};
 use arrow_schema::ArrowError;
+use itertools::Itertools;
 
 /// A predicate operating on [`RecordBatch`].
 pub trait ZarrArrowPredicate: Send + 'static {
@@ -72,6 +73,30 @@ impl ZarrChunkFilter {
         }
 
         Ok(proj)
+    }
+
+    pub fn evaluate(&mut self, rec_batch: &RecordBatch) -> Result<bool, ArrowError> {
+        let mut bool_arr: Option<BooleanArray> = None;
+        for predicate in self.predicates.iter_mut() {
+            let mask = predicate.evaluate(rec_batch)?;
+            if let Some(old_bool_arr) = bool_arr {
+                bool_arr = Some(BooleanArray::from(
+                    old_bool_arr
+                        .iter()
+                        .zip(mask.iter())
+                        .map(|(x, y)| x.unwrap() && y.unwrap())
+                        .collect_vec(),
+                ));
+            } else {
+                bool_arr = Some(mask);
+            }
+        }
+
+        if let Some(bool_arr) = bool_arr {
+            Ok(bool_arr.true_count() > 0)
+        } else {
+            Ok(true)
+        }
     }
 }
 
