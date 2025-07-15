@@ -30,6 +30,7 @@ pub enum ZarrQueryError {
     InvalidCompute(String),
     RecordBatchError(Box<dyn Error + Send + Sync>),
     Zarrs(Box<dyn Error + Send + Sync>),
+    Io(Box<dyn Error + Send + Sync>),
 }
 
 impl std::fmt::Display for ZarrQueryError {
@@ -42,6 +43,7 @@ impl std::fmt::Display for ZarrQueryError {
             Self::InvalidCompute(msg) => write!(fmt, "Invaild compute: {msg}"),
             Self::RecordBatchError(e) => write!(fmt, "A record batch call returned an error: {e}"),
             Self::Zarrs(e) => write!(fmt, "A zarrs call returned an error: {e}"),
+            Self::Io(e) => write!(fmt, "A zarrs call returned an error: {e}"),
         }
     }
 }
@@ -81,6 +83,12 @@ impl From<ArrayError> for ZarrQueryError {
 impl From<ArrowError> for ZarrQueryError {
     fn from(e: ArrowError) -> ZarrQueryError {
         ZarrQueryError::RecordBatchError(Box::new(e))
+    }
+}
+
+impl From<std::io::Error> for ZarrQueryError {
+    fn from(e: std::io::Error) -> ZarrQueryError {
+        ZarrQueryError::Io(Box::new(e))
     }
 }
 

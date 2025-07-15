@@ -1,4 +1,4 @@
-use super::{filter::ZarrChunkFilter, projection::ZarrQueryProjection};
+use super::{filter::ZarrChunkFilter, io_runtime::IoRuntime, projection::ZarrQueryProjection};
 use crate::errors::zarr_errors::{ZarrQueryError, ZarrQueryResult};
 use arrow::array::*;
 use arrow::datatypes::*;
@@ -10,12 +10,13 @@ use futures::{ready, FutureExt};
 use futures_util::future::BoxFuture;
 use itertools::iproduct;
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::collections::VecDeque;
-use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use tokio::task::JoinSet;
 use zarrs::array::codec::{ArrayToBytesCodecTraits, CodecOptions};
 use zarrs::array::{
     Array, ArrayBytes, ArrayMetadata, ArrayMetadataV3, ArraySize, DataType as zDataType,
@@ -23,8 +24,7 @@ use zarrs::array::{
 };
 use zarrs::array_subset::ArraySubset;
 use zarrs_metadata::v3::array::data_type::DataTypeMetadataV3;
-use zarrs_storage::{AsyncReadableListableStorageTraits, StoreKey, StorePrefix};
-
+use zarrs_storage::{AsyncReadableListableStorageTraits, StorePrefix};
 //********************************************
 // various utils to handle metadata from the zarr array, data types,
 // schemas, etc...
@@ -590,6 +590,7 @@ struct ZarrStore<T: AsyncReadableListableStorageTraits> {
     chunk_shape: Vec<u64>,
     chunk_grid_shape: Vec<u64>,
     array_shape: Vec<u64>,
+    io_runtime: IoRuntime,
 }
 
 impl<T: AsyncReadableListableStorageTraits + 'static> ZarrStore<T> {
@@ -627,12 +628,18 @@ impl<T: AsyncReadableListableStorageTraits + 'static> ZarrStore<T> {
         }
         let array_shape = resolve_vector(&coordinates, arr_shapes)?;
 
+        // this runtime will handle the i/o. i/o tasks spawned in
+        // that runtime will not share a thead pool with out (probably
+        // compute heavy, blocking) tasks.
+        let io_runtime = IoRuntime::try_new()?;
+
         Ok(Self {
             arrays: arrays.into_iter().map(|(k, a)| (k, Arc::new(a))).collect(),
             coordinates: Arc::new(coordinates),
             chunk_shape,
             chunk_grid_shape,
             array_shape,
+            io_runtime,
         })
     }
 
@@ -694,27 +701,67 @@ impl<T: AsyncReadableListableStorageTraits + 'static> ZarrStore<T> {
             .collect::<ZarrQueryResult<Vec<_>>>()
             .unwrap();
 
-        // first column, we grab the data without decoding it.
-        let mut data = arr_interfaces[0].read_bytes().await?;
+        // channel for the tasks on the io runtime to send results
+        // back to this runtime.
+        let (tx, mut rx) = tokio::sync::mpsc::channel(2);
+        let mut join_set = JoinSet::new();
+
+        // first column, we grab the data without decoding it, and we
+        // clone the first array interface to use it later to decode
+        // that first chunk of data.
+        let tx_copy = tx.clone();
+        let arr_for_future = arr_interfaces[0].clone();
+        join_set.spawn_on(
+            async move {
+                let data = arr_for_future.read_bytes().await;
+                let _ = tx_copy.send(data).await;
+            },
+            self.io_runtime.handle(),
+        );
+        let mut data;
+        if let Some(Ok(d)) = rx.recv().await {
+            data = d;
+        } else {
+            return Err(ZarrQueryError::InvalidCompute(
+                "Unable to retrieve first data chunk".into(),
+            ));
+        }
         let mut last_arr = arr_interfaces[0].clone();
 
         // loop over all other column, intervealing decoding the
         // previously fetched data with reading from the next array.
         for arr in arr_interfaces.iter().skip(1) {
+            // this is the name of a column we have already read
+            // the data for.
             let last_col = last_arr.name.to_string();
-            let compute_fut =
-                tokio::task::spawn_blocking(move || last_arr.decode_data(data)).boxed();
-            let arr_for_future = arr.clone();
-            let io_fut = tokio::spawn(async move { arr_for_future.read_bytes().await }).boxed();
 
-            if let (Ok(d), Ok(array_ref)) = tokio::join!(io_fut, compute_fut) {
-                data = d?;
-                chk_data.add_data(last_col, array_ref?);
+            // this task, spawned on the io runtime, reads the next
+            // data chunk.
+            let tx_copy = tx.clone();
+            let arr_for_future = arr.clone();
+            let io_task = async move {
+                let b = arr_for_future.read_bytes().await;
+                let _ = tx_copy.send(b).await;
+            };
+            join_set.spawn_on(io_task, self.io_runtime.handle());
+
+            // this decodes the last data chunk we read.
+            let array_ref = last_arr.decode_data(data);
+
+            // if everything went as expected, we have a decoded
+            // chunk and a newly read (still encoded) chunk.
+            if let (Some(Ok(d)), Ok(array_ref)) = (rx.recv().await, array_ref) {
+                data = d;
+                chk_data.add_data(last_col, array_ref);
             } else {
                 return Err(ZarrQueryError::InvalidCompute(
                     "Unable to retrieve decoded chunk".into(),
                 ));
             }
+
+            // keep a copy of the array interface we just read
+            // from, to use it to decode the data for the next
+            // iteration (or the final task after the loop).
             last_arr = arr.clone();
         }
 
