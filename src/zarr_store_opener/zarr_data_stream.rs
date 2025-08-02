@@ -1,6 +1,5 @@
 use super::{filter::ZarrChunkFilter, io_runtime::IoRuntime, projection::ZarrQueryProjection};
 use crate::errors::zarr_errors::{ZarrQueryError, ZarrQueryResult};
-use crate::zarr_store_opener::io_runtime;
 use arrow::array::*;
 use arrow::datatypes::*;
 use arrow::record_batch::RecordBatch;
@@ -10,8 +9,6 @@ use futures::stream::Stream;
 use futures::{ready, FutureExt};
 use futures_util::future::BoxFuture;
 use itertools::iproduct;
-//use rayon::ThreadPool;
-//use rayon::ThreadPoolBuilder;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::collections::VecDeque;
