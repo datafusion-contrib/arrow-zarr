@@ -5,6 +5,7 @@ use arrow::datatypes::*;
 use arrow::record_batch::RecordBatch;
 use arrow_schema::{DataType, Field, Fields, Schema};
 use bytes::Bytes;
+use datafusion::error::{DataFusionError, Result as DfResult};
 use futures::stream::Stream;
 use futures::{ready, FutureExt};
 use futures_util::future::BoxFuture;
@@ -25,6 +26,7 @@ use zarrs::array::{
 use zarrs::array_subset::ArraySubset;
 use zarrs_metadata::v3::array::data_type::DataTypeMetadataV3;
 use zarrs_storage::{AsyncReadableListableStorageTraits, StorePrefix};
+
 //********************************************
 // various utils to handle metadata from the zarr array, data types,
 // schemas, etc...
@@ -798,7 +800,7 @@ pub struct ZarrRecordBatchStream<T: AsyncReadableListableStorageTraits> {
 }
 
 impl<T: AsyncReadableListableStorageTraits + 'static> ZarrRecordBatchStream<T> {
-    async fn new(
+    pub(crate) async fn new(
         store: Arc<T>,
         group: Option<String>,
         projection: Option<ZarrQueryProjection>,
@@ -881,6 +883,10 @@ impl<T: AsyncReadableListableStorageTraits + 'static> ZarrRecordBatchStream<T> {
         })
     }
 
+    pub(crate) fn get_schema_ref(&self) -> Arc<Schema> {
+        Arc::new(self.schema.clone())
+    }
+
     fn pop_chunk_idx(&mut self) -> Option<Vec<u64>> {
         self.chunk_indices.pop_front()
     }
@@ -911,7 +917,7 @@ impl<T> Stream for ZarrRecordBatchStream<T>
 where
     T: AsyncReadableListableStorageTraits + Unpin + Send + 'static,
 {
-    type Item = ZarrQueryResult<RecordBatch>;
+    type Item = DfResult<RecordBatch>;
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         loop {
             let cols: Vec<_> = self
@@ -953,12 +959,17 @@ where
                     match res {
                         Err(e) => {
                             self.state = ZarrStreamState::Error;
+                            let e = DataFusionError::External(Box::new(e));
                             return Poll::Ready(Some(Err(e)));
                         }
                         Ok((store, chunk, _)) => {
                             self.zarr_store = Some(store);
                             self.state = ZarrStreamState::Init;
-                            return Poll::Ready(Some(chunk.into_record_batch(&self.schema)));
+                            return Poll::Ready(Some(
+                                chunk
+                                    .into_record_batch(&self.schema)
+                                    .map_err(|e| DataFusionError::External(Box::new(e))),
+                            ));
                         }
                     }
                 }
@@ -967,12 +978,15 @@ where
                     match res {
                         Err(e) => {
                             self.state = ZarrStreamState::Error;
+                            let e = DataFusionError::External(Box::new(e));
                             return Poll::Ready(Some(Err(e)));
                         }
                         Ok((store, chunk, chk_idx)) => {
                             let chk_data;
                             if let Some(filter_schema) = &self.filter_schema {
-                                chk_data = chunk.into_record_batch(filter_schema)?;
+                                chk_data = chunk
+                                    .into_record_batch(filter_schema)
+                                    .map_err(|e| DataFusionError::External(Box::new(e)))?;
                             } else {
                                 panic!("lost filter schema!");
                             }
