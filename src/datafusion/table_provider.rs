@@ -150,6 +150,7 @@ impl ListingZarrTableConfig {
     }
 }
 
+#[derive(Debug)]
 pub struct ZarrTableProvider {
     // the distinction between the file schema and the table schema is
     // that the latter could include partitioned columns.
@@ -238,7 +239,7 @@ impl TableProvider for ZarrTableProvider {
 
     async fn scan(
         &self,
-        state: &SessionState,
+        state: &dyn datafusion_catalog::Session,
         projection: Option<&Vec<usize>>,
         filters: &[Expr],
         limit: Option<usize>,

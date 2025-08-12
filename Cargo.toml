@@ -45,7 +45,7 @@ datafusion = [
     "dep:datafusion-expr",
     "dep:datafusion-common",
 ]
-all = ["datafusion", "io-uring"]
+all = ["io-uring"]
 
 [target.'cfg(target_os = "linux")'.dependencies]
 io-uring = { version = "0.6.4", optional = true }

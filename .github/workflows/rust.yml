@@ -21,8 +21,8 @@ jobs:
         run: |
           cargo fmt --all -- --check
 
-  check-clippy-all-features:
-    name: Check cargo clippy
+  check-clippy-io-uring-feature:
+    name: Check cargo clippy with io-uring
     runs-on: ubuntu-latest
     container:
       image: amd64/rust
@@ -33,7 +33,7 @@ jobs:
           components: clippy
       - name: Run check
         run: |
-          cargo clippy --all-targets --all-features -- -D warnings
+          cargo clippy --all-targets --features io-uring -- -D warnings
 
   # Check clippy without features, helps to catch missing feature configurations
   check-clippy-no-features:

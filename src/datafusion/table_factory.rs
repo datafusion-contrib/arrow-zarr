@@ -22,11 +22,12 @@ use arrow_schema::Field;
 use async_trait::async_trait;
 use datafusion::{
     common::arrow_datafusion_err,
-    datasource::{listing::ListingTableUrl, provider::TableProviderFactory, TableProvider},
+    datasource::{listing::ListingTableUrl, TableProvider},
     error::DataFusionError,
-    execution::context::SessionState,
+    execution::{config::SessionConfig, context::SessionState, runtime_env::RuntimeEnv},
     logical_expr::CreateExternalTable,
 };
+use datafusion_catalog::{MemoryCatalogProvider, TableProviderFactory};
 
 use super::table_provider::{ListingZarrTableConfig, ListingZarrTableOptions, ZarrTableProvider};
 
@@ -158,9 +159,10 @@ mod tests {
     async fn test_create(
         #[with("test_create".to_string())] store_lat_lon: StoreWrapper,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut state = SessionState::new_with_config_rt(
+        let mut state = SessionState::new_with_config_rt_and_catalog_list(
             SessionConfig::default(),
             Arc::new(RuntimeEnv::default()),
+            Arc::new(datafusion_catalog::MemoryCatalogProvider::new()),
         );
 
         state
@@ -196,9 +198,10 @@ mod tests {
     async fn test_predicates(
         #[with("test_predicate".to_string())] store_lat_lon: StoreWrapper,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut state = SessionState::new_with_config_rt(
+        let mut state = SessionState::new_with_config_rt_and_catalog_list(
             SessionConfig::default(),
             Arc::new(RuntimeEnv::default()),
+            Arc::new(datafusion_catalog::MemoryCatalogProvider::new()),
         );
 
         state
@@ -320,9 +323,10 @@ mod tests {
     async fn test_partitions(
         #[with("test_partitions".to_string())] store_lat_lon_with_partition: StoreWrapper,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut state = SessionState::new_with_config_rt(
+        let mut state = SessionState::new_with_config_rt_and_catalog_list(
             SessionConfig::default(),
             Arc::new(RuntimeEnv::default()),
+            Arc::new(datafusion_catalog::MemoryCatalogProvider::new()),
         );
 
         state

@@ -44,6 +44,7 @@ impl FileOpener for ZarrFileOpener {
     fn open(
         &self,
         file_meta: datafusion::datasource::physical_plan::FileMeta,
+        _range: &datafusion::datasource::listing::PartitionedFile,
     ) -> datafusion::error::Result<datafusion::datasource::physical_plan::FileOpenFuture> {
         let config = self.config.clone();
 

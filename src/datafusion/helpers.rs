@@ -27,10 +27,10 @@ use arrow_schema::{Fields, Schema};
 use datafusion::datasource::listing::{ListingTableUrl, PartitionedFile};
 use datafusion_common::cast::as_boolean_array;
 use datafusion_common::scalar::ScalarValue;
-use datafusion_common::tree_node::{RewriteRecursion, TreeNode, TreeNodeRewriter, VisitRecursion};
+use datafusion_common::tree_node::{TreeNode, TreeNodeRewriter, TreeNodeVisitor};
 use datafusion_common::Result as DataFusionResult;
-use datafusion_common::{internal_err, DFField, DFSchema, DataFusionError};
-use datafusion_expr::{Expr, ScalarFunctionDefinition, Volatility};
+use datafusion_common::{internal_err, DFSchema};
+use datafusion_expr::{Expr, Volatility};
 use datafusion_physical_expr::create_physical_expr;
 use datafusion_physical_expr::execution_props::ExecutionProps;
 use datafusion_physical_expr::expressions::Column;
@@ -46,76 +46,87 @@ use std::sync::Arc;
 // Checks whether the given expression can be resolved using only the columns `col_names`.
 // Copied from datafusion, because it's not accessible from the outside.
 pub fn expr_applicable_for_cols(col_names: &[String], expr: &Expr) -> bool {
-    let mut is_applicable = true;
-    expr.apply(&mut |expr| match expr {
-        Expr::Column(datafusion_common::Column { ref name, .. }) => {
-            is_applicable &= col_names.contains(name);
-            if is_applicable {
-                Ok(VisitRecursion::Skip)
-            } else {
-                Ok(VisitRecursion::Stop)
+    struct ApplicabilityVisitor<'a> {
+        col_names: &'a [String],
+        is_applicable: bool,
+    }
+
+    impl TreeNodeVisitor for ApplicabilityVisitor<'_> {
+        type Node = Expr;
+
+        fn f_down(
+            &mut self,
+            node: &Self::Node,
+        ) -> DataFusionResult<datafusion_common::tree_node::TreeNodeRecursion> {
+            use datafusion_common::tree_node::TreeNodeRecursion;
+
+            match node {
+                Expr::Column(datafusion_common::Column { ref name, .. }) => {
+                    self.is_applicable &= self.col_names.contains(name);
+                    if self.is_applicable {
+                        Ok(TreeNodeRecursion::Jump)
+                    } else {
+                        Ok(TreeNodeRecursion::Stop)
+                    }
+                }
+                Expr::Literal(_)
+                | Expr::Alias(_)
+                | Expr::OuterReferenceColumn(_, _)
+                | Expr::ScalarVariable(_, _)
+                | Expr::Not(_)
+                | Expr::IsNotNull(_)
+                | Expr::IsNull(_)
+                | Expr::IsTrue(_)
+                | Expr::IsFalse(_)
+                | Expr::IsUnknown(_)
+                | Expr::IsNotTrue(_)
+                | Expr::IsNotFalse(_)
+                | Expr::IsNotUnknown(_)
+                | Expr::Negative(_)
+                | Expr::Cast { .. }
+                | Expr::TryCast { .. }
+                | Expr::BinaryExpr { .. }
+                | Expr::Between { .. }
+                | Expr::Like { .. }
+                | Expr::SimilarTo { .. }
+                | Expr::InList { .. }
+                | Expr::Exists { .. }
+                | Expr::InSubquery(_)
+                | Expr::ScalarSubquery(_)
+                | Expr::GetIndexedField { .. }
+                | Expr::GroupingSet(_)
+                | Expr::Case { .. } => Ok(TreeNodeRecursion::Continue),
+
+                Expr::ScalarFunction(scalar_function) => {
+                    // For simplicity, assume all scalar functions are immutable for now
+                    // TODO: Check actual volatility when API is stable
+                    Ok(TreeNodeRecursion::Continue)
+                }
+
+                Expr::AggregateFunction { .. }
+                | Expr::Sort { .. }
+                | Expr::WindowFunction { .. }
+                | Expr::Unnest { .. }
+                | Expr::Placeholder(_) => {
+                    self.is_applicable = false;
+                    Ok(TreeNodeRecursion::Stop)
+                }
+                #[allow(deprecated)]
+                Expr::Wildcard { .. } => {
+                    self.is_applicable = false;
+                    Ok(TreeNodeRecursion::Stop)
+                }
             }
         }
-        Expr::Literal(_)
-        | Expr::Alias(_)
-        | Expr::OuterReferenceColumn(_, _)
-        | Expr::ScalarVariable(_, _)
-        | Expr::Not(_)
-        | Expr::IsNotNull(_)
-        | Expr::IsNull(_)
-        | Expr::IsTrue(_)
-        | Expr::IsFalse(_)
-        | Expr::IsUnknown(_)
-        | Expr::IsNotTrue(_)
-        | Expr::IsNotFalse(_)
-        | Expr::IsNotUnknown(_)
-        | Expr::Negative(_)
-        | Expr::Cast { .. }
-        | Expr::TryCast { .. }
-        | Expr::BinaryExpr { .. }
-        | Expr::Between { .. }
-        | Expr::Like { .. }
-        | Expr::SimilarTo { .. }
-        | Expr::InList { .. }
-        | Expr::Exists { .. }
-        | Expr::InSubquery(_)
-        | Expr::ScalarSubquery(_)
-        | Expr::GetIndexedField { .. }
-        | Expr::GroupingSet(_)
-        | Expr::Case { .. } => Ok(VisitRecursion::Continue),
+    }
 
-        Expr::ScalarFunction(scalar_function) => match &scalar_function.func_def {
-            ScalarFunctionDefinition::BuiltIn(fun) => match fun.volatility() {
-                Volatility::Immutable => Ok(VisitRecursion::Continue),
-                Volatility::Stable | Volatility::Volatile => {
-                    is_applicable = false;
-                    Ok(VisitRecursion::Stop)
-                }
-            },
-            ScalarFunctionDefinition::UDF(fun) => match fun.signature().volatility {
-                Volatility::Immutable => Ok(VisitRecursion::Continue),
-                Volatility::Stable | Volatility::Volatile => {
-                    is_applicable = false;
-                    Ok(VisitRecursion::Stop)
-                }
-            },
-            ScalarFunctionDefinition::Name(_) => {
-                internal_err!("Function `Expr` with name should be resolved.")
-            }
-        },
+    let mut visitor = ApplicabilityVisitor {
+        col_names,
+        is_applicable: true,
+    };
 
-        Expr::AggregateFunction { .. }
-        | Expr::Sort { .. }
-        | Expr::WindowFunction { .. }
-        | Expr::Wildcard { .. }
-        | Expr::Unnest { .. }
-        | Expr::Placeholder(_) => {
-            is_applicable = false;
-            Ok(VisitRecursion::Stop)
-        }
-    })
-    .unwrap();
-    is_applicable
+    expr.visit(&mut visitor).unwrap();
+    visitor.is_applicable
 }
 
 // Below is all the logic necessary (I think) to convert a PhysicalExpr into a ZarrChunkFilter.
@@ -159,9 +170,12 @@ impl<'a> ZarrFilterCandidateBuilder<'a> {
 }
 
 impl TreeNodeRewriter for ZarrFilterCandidateBuilder<'_> {
-    type N = Arc<dyn PhysicalExpr>;
+    type Node = Arc<dyn PhysicalExpr>;
 
-    fn pre_visit(&mut self, node: &Arc<dyn PhysicalExpr>) -> DataFusionResult<RewriteRecursion> {
+    fn f_down(
+        &mut self,
+        node: Self::Node,
+    ) -> DataFusionResult<datafusion_common::tree_node::Transformed<Self::Node>> {
         if let Some(column) = node.as_any().downcast_ref::<Column>() {
             if let Ok(idx) = self.file_schema.index_of(column.name()) {
                 self.required_column_indices.insert(idx);
@@ -172,15 +186,15 @@ impl TreeNodeRewriter for ZarrFilterCandidateBuilder<'_> {
                 // TODO handle cases where a filter contains a column that doesn't exist (not even
                 // as a partition).
                 self.projected_columns = true;
-                return Ok(RewriteRecursion::Stop);
+                return Ok(datafusion_common::tree_node::Transformed::new(
+                    node, false, true,
+                ));
             }
         }
 
-        Ok(RewriteRecursion::Continue)
-    }
-
-    fn mutate(&mut self, expr: Arc<dyn PhysicalExpr>) -> DataFusionResult<Arc<dyn PhysicalExpr>> {
-        Ok(expr)
+        Ok(datafusion_common::tree_node::Transformed::new(
+            node, false, false,
+        ))
     }
 }
 

@@ -22,8 +22,9 @@ use datafusion::{
     common::Statistics,
     datasource::physical_plan::{FileScanConfig, FileStream},
     physical_plan::{
-        metrics::ExecutionPlanMetricsSet, DisplayAs, DisplayFormatType, ExecutionPlan,
-        Partitioning, PhysicalExpr, SendableRecordBatchStream,
+        metrics::ExecutionPlanMetricsSet, DisplayAs, DisplayFormatType, EquivalenceProperties,
+        ExecutionMode, ExecutionPlan, Partitioning, PhysicalExpr, PlanProperties,
+        SendableRecordBatchStream,
     },
 };
 
@@ -46,12 +47,22 @@ pub struct ZarrScan {
 
     /// Filters that will be pushed down to the Zarr stream reader.
     filters: Option<Arc<dyn PhysicalExpr>>,
+
+    /// Properties for the execution plan.
+    properties: PlanProperties,
 }
 
 impl ZarrScan {
     /// Create a new Zarr scan.
     pub fn new(base_config: FileScanConfig, filters: Option<Arc<dyn PhysicalExpr>>) -> Self {
         let (projected_schema, statistics, _lex_sorting) = base_config.project();
+        let partitioning = Partitioning::UnknownPartitioning(base_config.file_groups.len());
+
+        let properties = PlanProperties::new(
+            EquivalenceProperties::new(projected_schema.clone()),
+            partitioning,
+            ExecutionMode::Bounded,
+        );
 
         Self {
             base_config,
@@ -59,6 +70,7 @@ impl ZarrScan {
             metrics: ExecutionPlanMetricsSet::new(),
             statistics,
             filters,
+            properties,
         }
     }
 }
@@ -70,15 +82,19 @@ impl DisplayAs for ZarrScan {
 }
 
 impl ExecutionPlan for ZarrScan {
+    fn name(&self) -> &str {
+        "ZarrScan"
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }
 
-    fn schema(&self) -> SchemaRef {
-        self.projected_schema.clone()
+    fn properties(&self) -> &datafusion::physical_plan::PlanProperties {
+        &self.properties
     }
 
-    fn children(&self) -> Vec<Arc<dyn ExecutionPlan>> {
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
         vec![]
     }
 
@@ -118,14 +134,6 @@ impl ExecutionPlan for ZarrScan {
         let stream = FileStream::new(&self.base_config, partition, opener, &self.metrics)?;
 
         Ok(Box::pin(stream) as SendableRecordBatchStream)
-    }
-
-    fn output_partitioning(&self) -> datafusion::physical_plan::Partitioning {
-        Partitioning::UnknownPartitioning(self.base_config.file_groups.len())
-    }
-
-    fn output_ordering(&self) -> Option<&[datafusion::physical_expr::PhysicalSortExpr]> {
-        None
     }
 }
 
@@ -172,16 +180,13 @@ mod tests {
         let schema = zarr_path.get_zarr_metadata().await?.arrow_schema()?;
 
         let test_file = Path::from_filesystem_path(test_data)?;
-        let scan_config = FileScanConfig {
-            object_store_url: ObjectStoreUrl::local_filesystem(),
-            file_schema: Arc::new(schema.clone()),
-            file_groups: vec![vec![PartitionedFile::new(test_file.to_string(), 10)]],
-            statistics: Statistics::new_unknown(&schema),
-            projection: Some(vec![1, 2]),
-            limit: Some(10),
-            table_partition_cols: vec![],
-            output_ordering: vec![],
-        };
+        let scan_config =
+            FileScanConfig::new(ObjectStoreUrl::local_filesystem(), Arc::new(schema.clone()))
+                .with_file_groups(vec![
+                    vec![PartitionedFile::new(test_file.to_string(), 10)].into()
+                ])
+                .with_projection(Some(vec![1, 2]))
+                .with_limit(Some(10));
 
         let scanner = ZarrScan::new(scan_config, None);
 
