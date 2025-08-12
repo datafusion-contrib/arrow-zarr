@@ -18,6 +18,7 @@
 use arrow_schema::ArrowError;
 #[cfg(feature = "datafusion")]
 use datafusion::error::DataFusionError;
+#[cfg(all(feature = "io-uring", target_os = "linux"))]
 use io_uring::squeue::PushError;
 use object_store::Error as ObjStoreError;
 use rayon::ThreadPoolBuildError;
@@ -40,6 +41,7 @@ pub enum ZarrError {
     Arrow(Box<dyn Error + Send + Sync>),
     DataFusion(Box<dyn Error + Send + Sync>),
     ObjectStore(Box<dyn Error + Send + Sync>),
+    #[cfg(all(feature = "io-uring", target_os = "linux"))]
     IoUring(Box<dyn Error + Send + Sync>),
     Rayon(Box<dyn Error + Send + Sync>),
     Ffi(Box<dyn Error + Send + Sync>),
@@ -67,6 +69,7 @@ impl std::fmt::Display for ZarrError {
             ZarrError::Arrow(e) => write!(fmt, "Arrow error: {e}"),
             ZarrError::ObjectStore(e) => write!(fmt, "ObjectStore error: {e}"),
             ZarrError::DataFusion(e) => write!(fmt, "DataFusion error: {e}"),
+            #[cfg(all(feature = "io-uring", target_os = "linux"))]
             ZarrError::IoUring(e) => write!(fmt, "IoUring error: {e}"),
             ZarrError::Rayon(e) => write!(fmt, "Rayon error: {e}"),
             ZarrError::Ffi(e) => write!(fmt, "Ffi error: {e}"),
@@ -94,6 +97,7 @@ impl From<ObjStoreError> for ZarrError {
     }
 }
 
+#[cfg(all(feature = "io-uring", target_os = "linux"))]
 impl From<PushError> for ZarrError {
     fn from(e: PushError) -> ZarrError {
         ZarrError::IoUring(Box::new(e))

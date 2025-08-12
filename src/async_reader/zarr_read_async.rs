@@ -221,7 +221,7 @@ mod zarr_read_async_tests {
             store_raw_bytes
                 .store_path()
                 .components()
-                .last()
+                .next_back()
                 .unwrap()
                 .as_os_str()
                 .to_str()
@@ -271,7 +271,7 @@ mod zarr_read_async_tests {
             store_raw_bytes
                 .store_path()
                 .components()
-                .last()
+                .next_back()
                 .unwrap()
                 .as_os_str()
                 .to_str()

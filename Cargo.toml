@@ -23,31 +23,35 @@ futures = { version = "0.3" }
 futures-util = { version = "0.3.30" }
 tokio = { version = "1.0", features = ["full"] }
 dyn-clone = { version = "1.0.16" }
-arrow = { version = "50.0.0" }
-arrow-array = { version = "50.0.0" }
-arrow-buffer = { version = "50.0.0" }
-arrow-cast = { version = "50.0.0" }
-arrow-schema = { version = "50.0.0" }
-arrow-data = { version = "50.0.0" }
-datafusion = { version = "36.0", optional = true }
-datafusion-expr = { version = "36.0", optional = true }
-datafusion-common = { version = "36.0", optional = true }
-datafusion-physical-expr = { version = "36.0", optional = true }
-io-uring = { version = "0.6.4" }
+arrow = { version = "55.2" }
+arrow-array = { version = "55.2" }
+arrow-buffer = { version = "55.2" }
+arrow-cast = { version = "55.2" }
+arrow-schema = { version = "55.2" }
+arrow-data = { version = "55.2" }
+datafusion = { version = "49.0.0", optional = true }
+datafusion-expr = { version = "49.0.0", optional = true }
+datafusion-common = { version = "49.0.0", optional = true }
+datafusion-physical-expr = { version = "49.0.0", optional = true }
 libc = { version = "0.2.153" }
 rayon = { version = "1.10.0" }
 
 [features]
+default = []
+io-uring = ["dep:io-uring"]
 datafusion = [
     "dep:datafusion",
     "dep:datafusion-physical-expr",
     "dep:datafusion-expr",
     "dep:datafusion-common",
 ]
-all = ["datafusion"]
+all = ["datafusion", "io-uring"]
+
+[target.'cfg(target_os = "linux")'.dependencies]
+io-uring = { version = "0.6.4", optional = true }
 
 [dev-dependencies]
-arrow-cast = { version = "50.0.0", features = ["prettyprint"] }
+arrow-cast = { version = "55.2", features = ["prettyprint"] }
 chrono = { version = "0.4" }
 zarrs = { version = "0.19.2" }
 zarrs_filesystem = { version = "0.2.0" }

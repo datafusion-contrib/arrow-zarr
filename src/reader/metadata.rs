@@ -891,8 +891,7 @@ impl ZarrStoreMetadata {
         self.array_params
             .get(column)
             .ok_or(ZarrError::InvalidMetadata(format!(
-                "Cannot find variable {} in metadata",
-                column
+                "Cannot find variable {column} in metadata"
             )))
     }
 
