@@ -4,7 +4,7 @@ use zarrs_storage::AsyncReadableListableStorageTraits;
 /// Configuration for Zarr DataFusion processing.
 pub struct ZarrConfig {
     /// The zarr store.
-    pub zarr_store: Arc<dyn AsyncReadableListableStorageTraits>,
+    pub zarr_store: Arc<dyn AsyncReadableListableStorageTraits + Unpin + Send>,
 
     /// The projection for the scan.
     pub projection: Option<Vec<usize>>,
@@ -20,7 +20,7 @@ impl fmt::Debug for ZarrConfig {
 
 impl ZarrConfig {
     /// Create a new ZarrConfig.
-    pub fn new(zarr_store: Arc<dyn AsyncReadableListableStorageTraits>) -> Self {
+    pub fn new(zarr_store: Arc<dyn AsyncReadableListableStorageTraits + Unpin + Send>) -> Self {
         Self {
             zarr_store,
             projection: None,

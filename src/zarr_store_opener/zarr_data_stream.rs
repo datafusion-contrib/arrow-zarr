@@ -3,9 +3,9 @@ use crate::errors::zarr_errors::{ZarrQueryError, ZarrQueryResult};
 use arrow::array::*;
 use arrow::datatypes::*;
 use arrow::record_batch::RecordBatch;
+use arrow_schema::ArrowError;
 use arrow_schema::{DataType, Field, Fields, Schema};
 use bytes::Bytes;
-use datafusion::error::{DataFusionError, Result as DfResult};
 use futures::stream::Stream;
 use futures::{ready, FutureExt};
 use futures_util::future::BoxFuture;
@@ -57,7 +57,7 @@ fn extract_chunk_size(meta: &ArrayMetadataV3) -> ZarrQueryResult<Vec<u64>> {
 
 // extract the coordinate names from the array. it is possible to
 // have an array with no coordinates.
-fn get_coord_names<T>(arr: &Array<T>) -> ZarrQueryResult<Option<Vec<String>>> {
+fn get_coord_names<T: ?Sized>(arr: &Array<T>) -> ZarrQueryResult<Option<Vec<String>>> {
     if let Some(coords) = arr.dimension_names() {
         let coords: Vec<_> = coords
             .iter()
@@ -98,7 +98,7 @@ fn extract_columns(prefix: &str, keys: Vec<StorePrefix>) -> ZarrQueryResult<Vec<
 }
 
 // extract the metadata from array. only V3 metadata is supported.
-fn extract_meta_from_array<T>(array: &Array<T>) -> ZarrQueryResult<&ArrayMetadataV3> {
+fn extract_meta_from_array<T: ?Sized>(array: &Array<T>) -> ZarrQueryResult<&ArrayMetadataV3> {
     let meta = match array.metadata() {
         ArrayMetadata::V3(meta) => Ok(meta),
         _ => Err(ZarrQueryError::InvalidMetadata(
@@ -133,7 +133,7 @@ fn get_schema_type(value: &DataTypeMetadataV3) -> ZarrQueryResult<DataType> {
 // produce an arrow schema given column names and arrays.
 // the schema will be ordered following the names in the input
 // vector of column names.
-fn create_schema<T>(
+fn create_schema<T: ?Sized>(
     cols: Vec<String>,
     arrays: &HashMap<String, Arc<Array<T>>>,
 ) -> ZarrQueryResult<Schema> {
@@ -208,7 +208,6 @@ fn resolve_vector(
 // a struct to handle coordinate variables, and "broadcasting" them
 // when reading multidimensional data.
 //********************************************
-
 #[derive(Debug)]
 struct ZarrCoordinates {
     // the position of each coordinate in the overall chunk shape.
@@ -218,7 +217,7 @@ struct ZarrCoordinates {
 }
 
 impl ZarrCoordinates {
-    fn new<T>(arrays: &HashMap<String, Array<T>>) -> ZarrQueryResult<Self> {
+    fn new<T: ?Sized>(arrays: &HashMap<String, Array<T>>) -> ZarrQueryResult<Self> {
         let mut coord_positions: HashMap<String, u64> = HashMap::new();
 
         // first pass, determine what the coordinates are and what the
@@ -361,7 +360,7 @@ impl ZarrCoordinates {
 // the chunk has some coordinate arrays, which are 1 dimensional, while
 // the non coordinate arrays can be multi dimensional. the full chunk
 // size is used to broadcast the coordinates to the full size.
-struct ArrayInterface<T: AsyncReadableListableStorageTraits> {
+struct ArrayInterface<T: AsyncReadableListableStorageTraits + ?Sized> {
     name: String,
     arr: Arc<Array<T>>,
     coords: Arc<ZarrCoordinates>,
@@ -371,7 +370,7 @@ struct ArrayInterface<T: AsyncReadableListableStorageTraits> {
 
 // T doesn't need to be Clone, but deriving apparently requires
 // that, so I have implement manually.
-impl<T: AsyncReadableListableStorageTraits> Clone for ArrayInterface<T> {
+impl<T: AsyncReadableListableStorageTraits + ?Sized> Clone for ArrayInterface<T> {
     fn clone(&self) -> Self {
         Self {
             name: self.name.to_string(),
@@ -392,7 +391,7 @@ enum BytesFromArray {
     Encoded(Option<Bytes>),
 }
 
-impl<T: AsyncReadableListableStorageTraits + 'static> ArrayInterface<T> {
+impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ArrayInterface<T> {
     fn new(
         name: String,
         arr: Arc<Array<T>>,
@@ -586,7 +585,7 @@ impl ZarrInMemoryChunk {
 // A wrapper for a map of arrays, which will handle interleaving
 // reading and decoding data from zarr storage.
 //********************************************
-struct ZarrStore<T: AsyncReadableListableStorageTraits> {
+struct ZarrStore<T: AsyncReadableListableStorageTraits + ?Sized> {
     arrays: HashMap<String, Arc<Array<T>>>,
     coordinates: Arc<ZarrCoordinates>,
     chunk_shape: Vec<u64>,
@@ -595,7 +594,7 @@ struct ZarrStore<T: AsyncReadableListableStorageTraits> {
     io_runtime: IoRuntime,
 }
 
-impl<T: AsyncReadableListableStorageTraits + 'static> ZarrStore<T> {
+impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrStore<T> {
     fn new(arrays: HashMap<String, Array<T>>) -> ZarrQueryResult<Self> {
         let coordinates = ZarrCoordinates::new(&arrays)?;
 
@@ -781,7 +780,7 @@ impl<T: AsyncReadableListableStorageTraits + 'static> ZarrStore<T> {
 //********************************************
 type ChunkFuture<T> =
     BoxFuture<'static, ZarrQueryResult<(ZarrStore<T>, ZarrInMemoryChunk, Vec<u64>)>>;
-enum ZarrStreamState<T: AsyncReadableListableStorageTraits> {
+enum ZarrStreamState<T: AsyncReadableListableStorageTraits + ?Sized> {
     Init,
     Reading(ChunkFuture<T>),
     ReadingForFilter(ChunkFuture<T>),
@@ -789,7 +788,7 @@ enum ZarrStreamState<T: AsyncReadableListableStorageTraits> {
     Done,
 }
 
-pub struct ZarrRecordBatchStream<T: AsyncReadableListableStorageTraits> {
+pub struct ZarrRecordBatchStream<T: AsyncReadableListableStorageTraits + ?Sized> {
     zarr_store: Option<ZarrStore<T>>,
     schema: Schema,
     filter: Option<ZarrChunkFilter>,
@@ -799,7 +798,7 @@ pub struct ZarrRecordBatchStream<T: AsyncReadableListableStorageTraits> {
     chunk_indices: VecDeque<Vec<u64>>,
 }
 
-impl<T: AsyncReadableListableStorageTraits + 'static> ZarrRecordBatchStream<T> {
+impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrRecordBatchStream<T> {
     pub(crate) async fn new(
         store: Arc<T>,
         group: Option<String>,
@@ -915,9 +914,9 @@ impl<T: AsyncReadableListableStorageTraits + 'static> ZarrRecordBatchStream<T> {
 
 impl<T> Stream for ZarrRecordBatchStream<T>
 where
-    T: AsyncReadableListableStorageTraits + Unpin + Send + 'static,
+    T: AsyncReadableListableStorageTraits + Unpin + Send + ?Sized + 'static,
 {
-    type Item = DfResult<RecordBatch>;
+    type Item = Result<RecordBatch, ArrowError>;
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         loop {
             let cols: Vec<_> = self
@@ -959,7 +958,7 @@ where
                     match res {
                         Err(e) => {
                             self.state = ZarrStreamState::Error;
-                            let e = DataFusionError::External(Box::new(e));
+                            let e = ArrowError::from_external_error(Box::new(e));
                             return Poll::Ready(Some(Err(e)));
                         }
                         Ok((store, chunk, _)) => {
@@ -968,7 +967,7 @@ where
                             return Poll::Ready(Some(
                                 chunk
                                     .into_record_batch(&self.schema)
-                                    .map_err(|e| DataFusionError::External(Box::new(e))),
+                                    .map_err(|e| ArrowError::from_external_error(Box::new(e))),
                             ));
                         }
                     }
@@ -978,7 +977,7 @@ where
                     match res {
                         Err(e) => {
                             self.state = ZarrStreamState::Error;
-                            let e = DataFusionError::External(Box::new(e));
+                            let e = ArrowError::from_external_error(Box::new(e));
                             return Poll::Ready(Some(Err(e)));
                         }
                         Ok((store, chunk, chk_idx)) => {
@@ -986,7 +985,7 @@ where
                             if let Some(filter_schema) = &self.filter_schema {
                                 chk_data = chunk
                                     .into_record_batch(filter_schema)
-                                    .map_err(|e| DataFusionError::External(Box::new(e)))?;
+                                    .map_err(|e| ArrowError::from_external_error(Box::new(e)))?;
                             } else {
                                 panic!("lost filter schema!");
                             }
