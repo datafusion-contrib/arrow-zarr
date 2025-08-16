@@ -1,10 +1,16 @@
+use arrow_schema::Schema;
 use std::fmt;
 use std::sync::Arc;
 use zarrs_storage::AsyncReadableListableStorageTraits;
+
 /// Configuration for Zarr DataFusion processing.
 pub struct ZarrConfig {
     /// The zarr store.
     pub zarr_store: Arc<dyn AsyncReadableListableStorageTraits + Unpin + Send>,
+
+    /// The schema for the entire table (regardless of what columns
+    /// are selected).
+    pub schema: Schema,
 
     /// The projection for the scan.
     pub projection: Option<Vec<usize>>,
@@ -20,9 +26,13 @@ impl fmt::Debug for ZarrConfig {
 
 impl ZarrConfig {
     /// Create a new ZarrConfig.
-    pub fn new(zarr_store: Arc<dyn AsyncReadableListableStorageTraits + Unpin + Send>) -> Self {
+    pub fn new(
+        zarr_store: Arc<dyn AsyncReadableListableStorageTraits + Unpin + Send>,
+        schema: Schema,
+    ) -> Self {
         Self {
             zarr_store,
+            schema,
             projection: None,
         }
     }

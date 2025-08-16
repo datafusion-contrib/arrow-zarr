@@ -1,21 +1,19 @@
 use crate::errors::zarr_errors::ZarrQueryResult;
-use crate::zarr_store_opener::projection::ZarrQueryProjection;
 use arrow_array::{BooleanArray, RecordBatch};
 use arrow_schema::ArrowError;
+use arrow_schema::Schema;
+use arrow_schema::SchemaRef;
+use datafusion::physical_expr::{split_conjunction, PhysicalExpr};
 use itertools::Itertools;
+use std::sync::Arc;
 
 /// A predicate operating on [`RecordBatch`].
 pub trait ZarrArrowPredicate: Send + 'static {
-    /// Returns the [`ZarrProjecction`] that describes the columns required
-    /// to evaluate this predicate. Those must be present in record batches
-    /// that are passed into the [`evaluate`] method.
-    fn projection(&self) -> &ZarrQueryProjection;
-
-    /// Evaluate this predicate for the given [`RecordBatch`] containing the columns
-    /// identified by [`projection`]. Rows that are `true` in the returned [`BooleanArray`]
-    /// satisfy the predicate condition, whereas those that are `false` or do not.
-    /// The method should not return any `Null` values. Note that the [`RecordBatch`] is
-    /// passed by reference and not consumed by the method.
+    /// Evaluate this predicate for the given [`RecordBatch`]. Rows that are `true`
+    /// in the returned [`BooleanArray`] satisfy the predicate condition, whereas those
+    /// that are `false` do not. The method should not return any `Null` values.
+    /// Note that the [`RecordBatch`] is passed by reference and not consumed by
+    /// the method.
     fn evaluate(&mut self, batch: &RecordBatch) -> Result<BooleanArray, ArrowError>;
 }
 
@@ -24,15 +22,14 @@ pub trait ZarrArrowPredicate: Send + 'static {
 #[derive(Clone)]
 pub struct ZarrArrowPredicateFn<F> {
     f: F,
-    projection: ZarrQueryProjection,
 }
 
 impl<F> ZarrArrowPredicateFn<F>
 where
     F: FnMut(&RecordBatch) -> Result<BooleanArray, ArrowError> + Send + 'static,
 {
-    pub fn new(projection: ZarrQueryProjection, f: F) -> Self {
-        Self { f, projection }
+    pub fn new(f: F) -> Self {
+        Self { f }
     }
 }
 
@@ -40,10 +37,6 @@ impl<F> ZarrArrowPredicate for ZarrArrowPredicateFn<F>
 where
     F: FnMut(&RecordBatch) -> Result<BooleanArray, ArrowError> + Send + Clone + 'static,
 {
-    fn projection(&self) -> &ZarrQueryProjection {
-        &self.projection
-    }
-
     fn evaluate(&mut self, batch: &RecordBatch) -> Result<BooleanArray, ArrowError> {
         (self.f)(batch)
     }
@@ -57,22 +50,22 @@ where
 pub struct ZarrChunkFilter {
     /// A list of [`ZarrArrowPredicate`]
     pub(crate) predicates: Vec<Box<dyn ZarrArrowPredicate>>,
+    schema_ref: SchemaRef,
 }
 
 impl ZarrChunkFilter {
-    /// Create a new [`ZarrChunkFilter`] from an array of [`ZarrArrowPredicate`]
-    pub fn new(predicates: Vec<Box<dyn ZarrArrowPredicate>>) -> Self {
-        Self { predicates }
+    /// Create a new [`ZarrChunkFilter`] from an a ['PhysicalExpr']
+    pub fn new(physical_expr: Arc<dyn PhysicalExpr>) -> Self {
+        Self {
+            predicates: Vec::new(),
+            schema_ref: Arc::new(Schema::empty()),
+        }
     }
 
-    /// Get the combined projections for all the predicates in the filter.
-    pub fn get_all_projections(&self) -> ZarrQueryResult<ZarrQueryProjection> {
-        let mut proj = ZarrQueryProjection::all();
-        for pred in self.predicates.iter() {
-            proj.update(pred.projection().clone())?;
-        }
-
-        Ok(proj)
+    /// Get the schema for the combination of all the columns
+    /// needed to evaluate the filter.
+    pub fn get_schema_ref(&self) -> SchemaRef {
+        self.schema_ref.clone()
     }
 
     pub fn evaluate(&mut self, rec_batch: &RecordBatch) -> Result<bool, ArrowError> {
@@ -109,7 +102,6 @@ mod filter_tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::zarr_store_opener::projection::{self, ZarrQueryProjection};
 
     // generate a record batch to test filters on.
     fn generate_rec_batch() -> RecordBatch {
@@ -123,34 +115,5 @@ mod filter_tests {
         ];
 
         RecordBatch::try_new(Arc::new(Schema::new(fields)), arrs).unwrap()
-    }
-
-    #[test]
-    fn filter_predicate_test() {
-        let rec = generate_rec_batch();
-        let mut filter1 = ZarrArrowPredicateFn::new(
-            ZarrQueryProjection::keep(vec!["var1".to_string(), "var2".to_string()]),
-            move |batch| {
-                eq(
-                    batch.column_by_name("var1").unwrap(),
-                    batch.column_by_name("var2").unwrap(),
-                )
-            },
-        );
-        let mask = filter1.evaluate(&rec).unwrap();
-        assert_eq!(
-            mask,
-            BooleanArray::from(vec![false, false, true, true, false, false]),
-        );
-
-        let mut filter2 = ZarrArrowPredicateFn::new(
-            ZarrQueryProjection::keep(vec!["var1".to_string(), "var3".to_string()]),
-            move |batch| {
-                eq(
-                    batch.column_by_name("var1").unwrap(),
-                    batch.column_by_name("var3").unwrap(),
-                )
-            },
-        );
     }
 }

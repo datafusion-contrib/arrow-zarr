@@ -78,19 +78,15 @@ impl RecordBatchStream for StreamWrapper {
 #[derive(Debug)]
 pub struct ZarrScan {
     zarr_config: ZarrConfig,
-    projected_schema: SchemaRef,
     filters: Option<Arc<dyn PhysicalExpr>>,
     plan_properties: PlanProperties,
 }
 
 impl ZarrScan {
-    fn new(
-        zarr_config: ZarrConfig,
-        filters: Option<Arc<dyn PhysicalExpr>>,
-        schema_ref: SchemaRef,
-    ) -> Self {
+    pub(crate) fn new(zarr_config: ZarrConfig, filters: Option<Arc<dyn PhysicalExpr>>) -> Self {
+        let schema_ref = Arc::new(zarr_config.schema.clone());
         let plan_properties = PlanProperties::new(
-            EquivalenceProperties::new(schema_ref.clone()),
+            EquivalenceProperties::new(schema_ref),
             Partitioning::UnknownPartitioning(1),
             EmissionType::Incremental,
             Boundedness::Bounded,
@@ -98,7 +94,6 @@ impl ZarrScan {
 
         Self {
             zarr_config,
-            projected_schema: schema_ref,
             filters,
             plan_properties,
         }
@@ -141,13 +136,16 @@ impl ExecutionPlan for ZarrScan {
         context: Arc<datafusion::execution::TaskContext>,
     ) -> datafusion::error::Result<SendableRecordBatchStream> {
         let zarr_store = self.zarr_config.zarr_store.clone();
+        let schema_ref = Arc::new(self.zarr_config.schema.clone());
+        let schema_ref_for_future = schema_ref.clone();
         let stream: FileOpenFuture = Box::pin(async move {
-            let inner_stream = ZarrRecordBatchStream::new(zarr_store, None, None)
-                .await
-                .map_err(|e| DataFusionError::External(Box::new(e)))?;
+            let inner_stream =
+                ZarrRecordBatchStream::new(zarr_store, schema_ref_for_future, None, None)
+                    .await
+                    .map_err(|e| DataFusionError::External(Box::new(e)))?;
             Ok(inner_stream.boxed())
         });
-        let stream = StreamWrapper::new(stream, self.projected_schema.clone());
+        let stream = StreamWrapper::new(stream, schema_ref);
 
         Ok(Box::pin(stream))
     }
@@ -155,84 +153,58 @@ impl ExecutionPlan for ZarrScan {
 
 #[cfg(test)]
 mod scanner_tests {
-    use arrow_schema::{DataType, Field, Schema};
+    use std::collections::HashMap;
+
+    use arrow::datatypes::Float64Type;
+    use arrow_schema::DataType;
     use datafusion::prelude::SessionContext;
+    use futures_util::TryStreamExt;
 
     use super::*;
     use crate::test_utils::{
-        validate_names_and_types, validate_primitive_column, write_1D_float_array,
-        write_2D_float_array, StoreWrapper,
+        get_lat_lon_data_store, validate_names_and_types, validate_primitive_column,
     };
-
-    async fn get_lat_lon_data_store(
-        write_data: bool,
-        fillvalue: f64,
-        dir_name: &str,
-    ) -> StoreWrapper {
-        let wrapper = StoreWrapper::new(dir_name.into());
-        let store = wrapper.get_store();
-
-        let lats = vec![35.0, 36.0, 37.0, 38.0, 39.0, 40.0, 41.0, 42.0];
-        write_1D_float_array(
-            lats,
-            8,
-            3,
-            store.clone(),
-            "/lat",
-            Some(["lat".into()].to_vec()),
-            true,
-        )
-        .await;
-
-        let lons = vec![
-            -120.0, -119.0, -118.0, -117.0, -116.0, -115.0, -114.0, -113.0,
-        ];
-        write_1D_float_array(
-            lons,
-            8,
-            3,
-            store.clone(),
-            "/lon",
-            Some(["lon".into()].to_vec()),
-            true,
-        )
-        .await;
-
-        let data: Option<Vec<_>> = if write_data {
-            Some((0..64).map(|i| i as f64).collect())
-        } else {
-            None
-        };
-        write_2D_float_array(
-            data,
-            fillvalue,
-            (8, 8),
-            (3, 3),
-            store.clone(),
-            "/data",
-            Some(["lat".into(), "lon".into()].to_vec()),
-            true,
-        )
-        .await;
-
-        wrapper
-    }
 
     #[tokio::test]
     async fn read_data_test() {
-        let wrapper = get_lat_lon_data_store(true, 0.0, "lat_lon_data").await;
+        let (wrapper, schema) = get_lat_lon_data_store(true, 0.0, "lat_lon_data_for_scan").await;
         let store = wrapper.get_store();
-        let config = ZarrConfig::new(store);
-        let schema_ref = Arc::new(Schema::new(vec![
-            Field::new("lat", DataType::Float64, false),
-            Field::new("lon", DataType::Float64, false),
-            Field::new("data", DataType::Float64, false),
-        ]));
+        let config = ZarrConfig::new(store, schema);
 
         let session = SessionContext::new();
-        let scan = ZarrScan::new(config, None, schema_ref);
-        let records: Vec<_> = scan.execute(0, session.task_ctx()).unwrap().collect().await;
+        let scan = ZarrScan::new(config, None);
+        let records: Vec<_> = scan
+            .execute(0, session.task_ctx())
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
 
-        println!("{:?}", records);
+        let target_types = HashMap::from([
+            ("lat".to_string(), DataType::Float64),
+            ("lon".to_string(), DataType::Float64),
+            ("data".to_string(), DataType::Float64),
+        ]);
+        validate_names_and_types(&target_types, &records[0]);
+        assert_eq!(records.len(), 9);
+
+        // the top left chunk, full 3x3
+        validate_primitive_column::<Float64Type, f64>(
+            "lat",
+            &records[0],
+            &[35., 35., 35., 36., 36., 36., 37., 37., 37.],
+        );
+        validate_primitive_column::<Float64Type, f64>(
+            "lon",
+            &records[0],
+            &[
+                -120.0, -119.0, -118.0, -120.0, -119.0, -118.0, -120.0, -119.0, -118.0,
+            ],
+        );
+        validate_primitive_column::<Float64Type, f64>(
+            "data",
+            &records[0],
+            &[0.0, 1.0, 2.0, 8.0, 9.0, 10.0, 16.0, 17.0, 18.0],
+        );
     }
 }

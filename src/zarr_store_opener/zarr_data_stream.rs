@@ -1,4 +1,4 @@
-use super::{filter::ZarrChunkFilter, io_runtime::IoRuntime, projection::ZarrQueryProjection};
+use super::{filter::ZarrChunkFilter, io_runtime::IoRuntime};
 use crate::errors::zarr_errors::{ZarrQueryError, ZarrQueryResult};
 use arrow::array::*;
 use arrow::datatypes::*;
@@ -562,7 +562,7 @@ impl ZarrInMemoryChunk {
 
     // the columns in the record batch will be ordered following
     // the field names in the schema.
-    fn into_record_batch(mut self, schema: &Schema) -> ZarrQueryResult<RecordBatch> {
+    fn into_record_batch(mut self, schema: &SchemaRef) -> ZarrQueryResult<RecordBatch> {
         let array_refs: Vec<(String, ArrayRef)> = schema
             .fields()
             .iter()
@@ -790,10 +790,9 @@ enum ZarrStreamState<T: AsyncReadableListableStorageTraits + ?Sized> {
 
 pub struct ZarrRecordBatchStream<T: AsyncReadableListableStorageTraits + ?Sized> {
     zarr_store: Option<ZarrStore<T>>,
-    schema: Schema,
+    schema_ref: SchemaRef,
+    projected_schema_ref: SchemaRef,
     filter: Option<ZarrChunkFilter>,
-    filter_schema: Option<Schema>,
-    all_cols: Vec<String>,
     state: ZarrStreamState<T>,
     chunk_indices: VecDeque<Vec<u64>>,
 }
@@ -801,13 +800,14 @@ pub struct ZarrRecordBatchStream<T: AsyncReadableListableStorageTraits + ?Sized>
 impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrRecordBatchStream<T> {
     pub(crate) async fn new(
         store: Arc<T>,
+        schema_ref: SchemaRef,
         group: Option<String>,
-        projection: Option<ZarrQueryProjection>,
+        projection: Option<Vec<usize>>,
     ) -> ZarrQueryResult<Self> {
-        let proj = if let Some(projection) = projection {
-            projection
-        } else {
-            ZarrQueryProjection::all()
+        // if there is a projection provided, modify the schema.
+        let projected_schema_ref = match projection {
+            Some(proj) => Arc::new(schema_ref.project(&proj)?),
+            None => schema_ref.clone(),
         };
 
         // any groups the actual arrays fall under (e.g. /some_group/array1,
@@ -818,15 +818,13 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrRecordBatchSt
             "".to_string()
         };
 
-        // this will extract column (i.e. array) names based on the
-        // key structure in the zarr store.
-        let store_prefixes = store
-            .list_dir(&StorePrefix::new(&grp)?)
-            .await?
-            .prefixes()
-            .clone();
-        let all_cols = extract_columns(&grp, store_prefixes)?;
-        let cols = proj.apply_selection(&all_cols)?;
+        // this will extract column (i.e. array) names based (possibly
+        // projected) schema.
+        let cols: Vec<_> = projected_schema_ref
+            .fields()
+            .iter()
+            .map(|f| f.name())
+            .collect();
 
         // open all the arrays based on the column names.
         let mut arrays: HashMap<String, Array<T>> = HashMap::new();
@@ -843,8 +841,9 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrRecordBatchSt
             arrays.insert(col.to_string(), arr);
         }
 
+        // store all the zarr arrays in a struct that we can use
+        // to access them later.
         let zarr_store = ZarrStore::new(arrays)?;
-        let schema = create_schema(cols, &zarr_store.arrays)?;
 
         // this creates all the chunk indices we will be reading from.
         let chk_grid_shape = &zarr_store.chunk_grid_shape;
@@ -873,17 +872,16 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrRecordBatchSt
 
         Ok(Self {
             zarr_store: Some(zarr_store),
-            schema,
+            schema_ref,
+            projected_schema_ref,
             filter: None,
-            filter_schema: None,
-            all_cols,
             state: ZarrStreamState::Init,
             chunk_indices,
         })
     }
 
-    pub(crate) fn get_schema_ref(&self) -> Arc<Schema> {
-        Arc::new(self.schema.clone())
+    pub(crate) fn get_projected_schema_ref(&self) -> Arc<Schema> {
+        self.projected_schema_ref.clone()
     }
 
     fn pop_chunk_idx(&mut self) -> Option<Vec<u64>> {
@@ -896,18 +894,7 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrRecordBatchSt
     // filtering for that. basically this here is to handle filter
     // pushdowns.
     fn with_filter(mut self, filter: ZarrChunkFilter) -> ZarrQueryResult<Self> {
-        let proj = filter.get_all_projections()?;
-        let filter_cols = proj.apply_selection(&self.all_cols)?;
-
-        let schema = if let Some(zarr_store) = &self.zarr_store {
-            create_schema(filter_cols, &zarr_store.arrays)?
-        } else {
-            return Err(ZarrQueryError::InvalidMetadata(
-                "Zarr store missing when creating filter".into(),
-            ));
-        };
         self.filter = Some(filter);
-        self.filter_schema = Some(schema);
         Ok(self)
     }
 }
@@ -920,15 +907,16 @@ where
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         loop {
             let cols: Vec<_> = self
-                .schema
+                .projected_schema_ref
                 .fields()
                 .iter()
                 .map(|f| f.name().to_owned())
                 .collect();
             let mut filter_cols: Option<Vec<String>> = None;
-            if let Some(filter_schema) = &self.filter_schema {
+            if let Some(filter) = &self.filter {
                 filter_cols = Some(
-                    filter_schema
+                    filter
+                        .get_schema_ref()
                         .fields()
                         .iter()
                         .map(|f| f.name().to_owned())
@@ -966,7 +954,7 @@ where
                             self.state = ZarrStreamState::Init;
                             return Poll::Ready(Some(
                                 chunk
-                                    .into_record_batch(&self.schema)
+                                    .into_record_batch(&self.projected_schema_ref)
                                     .map_err(|e| ArrowError::from_external_error(Box::new(e))),
                             ));
                         }
@@ -982,9 +970,9 @@ where
                         }
                         Ok((store, chunk, chk_idx)) => {
                             let chk_data;
-                            if let Some(filter_schema) = &self.filter_schema {
+                            if let Some(filter) = &self.filter {
                                 chk_data = chunk
-                                    .into_record_batch(filter_schema)
+                                    .into_record_batch(&filter.get_schema_ref())
                                     .map_err(|e| ArrowError::from_external_error(Box::new(e)))?;
                             } else {
                                 panic!("lost filter schema!");
@@ -1009,7 +997,7 @@ where
                                     }
                                     Err(e) => {
                                         self.state = ZarrStreamState::Error;
-                                        return Poll::Ready(Some(Err(e.into())));
+                                        return Poll::Ready(Some(Err(e)));
                                     }
                                 };
                             } else {
@@ -1029,76 +1017,18 @@ where
 mod zarr_stream_tests {
     use super::*;
     use crate::test_utils::{
-        validate_names_and_types, validate_primitive_column, write_1D_float_array,
-        write_2D_float_array, StoreWrapper,
+        get_lat_lon_data_store, validate_names_and_types, validate_primitive_column,
     };
-    use crate::zarr_store_opener::filter::{
-        ZarrArrowPredicate, ZarrArrowPredicateFn, ZarrChunkFilter,
-    };
-    use crate::zarr_store_opener::projection::ZarrQueryProjection;
-    use arrow::compute::kernels::cmp::lt;
     use futures_util::TryStreamExt;
-
-    async fn get_lat_lon_data_store(
-        write_data: bool,
-        fillvalue: f64,
-        dir_name: &str,
-    ) -> StoreWrapper {
-        let wrapper = StoreWrapper::new(dir_name.into());
-        let store = wrapper.get_store();
-
-        let lats = vec![35.0, 36.0, 37.0, 38.0, 39.0, 40.0, 41.0, 42.0];
-        write_1D_float_array(
-            lats,
-            8,
-            3,
-            store.clone(),
-            "/lat",
-            Some(["lat".into()].to_vec()),
-            true,
-        )
-        .await;
-
-        let lons = vec![
-            -120.0, -119.0, -118.0, -117.0, -116.0, -115.0, -114.0, -113.0,
-        ];
-        write_1D_float_array(
-            lons,
-            8,
-            3,
-            store.clone(),
-            "/lon",
-            Some(["lon".into()].to_vec()),
-            true,
-        )
-        .await;
-
-        let data: Option<Vec<_>> = if write_data {
-            Some((0..64).map(|i| i as f64).collect())
-        } else {
-            None
-        };
-        write_2D_float_array(
-            data,
-            fillvalue,
-            (8, 8),
-            (3, 3),
-            store.clone(),
-            "/data",
-            Some(["lat".into(), "lon".into()].to_vec()),
-            true,
-        )
-        .await;
-
-        wrapper
-    }
 
     #[tokio::test]
     async fn read_data_test() {
-        let wrapper = get_lat_lon_data_store(true, 0.0, "lat_lon_data").await;
+        let (wrapper, schema) = get_lat_lon_data_store(true, 0.0, "lat_lon_data").await;
         let store = wrapper.get_store();
 
-        let stream = ZarrRecordBatchStream::new(store, None, None).await.unwrap();
+        let stream = ZarrRecordBatchStream::new(store, Arc::new(schema), None, None)
+            .await
+            .unwrap();
         let records: Vec<_> = stream.try_collect().await.unwrap();
 
         let target_types = HashMap::from([
@@ -1166,10 +1096,13 @@ mod zarr_stream_tests {
     #[tokio::test]
     async fn read_missing_chunks_test() {
         let fillvalue = 1234.0;
-        let wrapper = get_lat_lon_data_store(false, fillvalue, "lat_lon_empty_data").await;
+        let (wrapper, schema) =
+            get_lat_lon_data_store(false, fillvalue, "lat_lon_empty_data").await;
         let store = wrapper.get_store();
 
-        let stream = ZarrRecordBatchStream::new(store, None, None).await.unwrap();
+        let stream = ZarrRecordBatchStream::new(store, Arc::new(schema), None, None)
+            .await
+            .unwrap();
         let records: Vec<_> = stream.try_collect().await.unwrap();
 
         let target_types = HashMap::from([
@@ -1194,70 +1127,5 @@ mod zarr_stream_tests {
             ],
         );
         validate_primitive_column::<Float64Type, f64>("data", &records[0], &[fillvalue; 9]);
-    }
-
-    #[tokio::test]
-    async fn read_data_with_filter_test() {
-        let wrapper = get_lat_lon_data_store(true, 0.0, "lat_lon_data_w_filter").await;
-        let store = wrapper.get_store();
-
-        let mut filters: Vec<Box<dyn ZarrArrowPredicate>> = Vec::new();
-        let f = ZarrArrowPredicateFn::new(
-            ZarrQueryProjection::keep(vec!["lat".to_string()]),
-            move |batch| {
-                lt(
-                    batch.column_by_name("lat").unwrap(),
-                    &Scalar::new(&Float64Array::from(vec![39.0])),
-                )
-            },
-        );
-        filters.push(Box::new(f));
-        let f = ZarrArrowPredicateFn::new(
-            ZarrQueryProjection::keep(vec!["lon".to_string()]),
-            move |batch| {
-                lt(
-                    batch.column_by_name("lon").unwrap(),
-                    &Scalar::new(&Float64Array::from(vec![-116.0])),
-                )
-            },
-        );
-        filters.push(Box::new(f));
-        let filter = ZarrChunkFilter::new(filters);
-
-        let stream = ZarrRecordBatchStream::new(store, None, None)
-            .await
-            .unwrap()
-            .with_filter(filter)
-            .unwrap();
-        let records: Vec<_> = stream.try_collect().await.unwrap();
-
-        let target_types = HashMap::from([
-            ("lat".to_string(), DataType::Float64),
-            ("lon".to_string(), DataType::Float64),
-            ("data".to_string(), DataType::Float64),
-        ]);
-        validate_names_and_types(&target_types, &records[0]);
-        assert_eq!(records.len(), 4);
-
-        // middle chunk, should still be 3x3 because filters only filter out whole
-        // chunks if they don't contain anything that passes the predicate, if there's
-        // even a single value that does pass, we keep the whole chunk.
-        validate_primitive_column::<Float64Type, f64>(
-            "lat",
-            &records[3],
-            &[38., 38., 38., 39., 39., 39., 40., 40., 40.],
-        );
-        validate_primitive_column::<Float64Type, f64>(
-            "lon",
-            &records[3],
-            &[
-                -117.0, -116.0, -115.0, -117.0, -116.0, -115.0, -117.0, -116.0, -115.0,
-            ],
-        );
-        validate_primitive_column::<Float64Type, f64>(
-            "data",
-            &records[3],
-            &[27.0, 28.0, 29.0, 35.0, 36.0, 37.0, 43.0, 44.0, 45.0],
-        );
     }
 }

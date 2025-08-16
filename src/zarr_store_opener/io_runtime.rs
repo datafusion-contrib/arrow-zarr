@@ -1,4 +1,4 @@
-use crate::errors::zarr_errors::{ZarrQueryError, ZarrQueryResult};
+use crate::errors::zarr_errors::ZarrQueryResult;
 use std::sync::Arc;
 use tokio::runtime::Handle;
 use tokio::sync::Notify;

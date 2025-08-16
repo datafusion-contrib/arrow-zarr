@@ -13,6 +13,7 @@ rust-version = "1.85"
 arrow = { version = "55.2.0" }
 arrow-array = { version = "55.2.0" }
 arrow-schema = { version = "55.2.0" }
+async-trait = { version = "0.1.89" }
 bytes = { version = "1.10.1" }
 datafusion = { version = "49.0.0" }
 futures = { version = "0.3.31" }
