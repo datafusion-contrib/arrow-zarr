@@ -94,6 +94,7 @@ impl ZarrChunkFilter {
 }
 
 #[cfg(test)]
+#[allow(unused_imports)]
 mod filter_tests {
     use arrow::compute::kernels::cmp::eq;
     use arrow_array::RecordBatch;

@@ -132,8 +132,8 @@ impl ExecutionPlan for ZarrScan {
 
     fn execute(
         &self,
-        partition: usize,
-        context: Arc<datafusion::execution::TaskContext>,
+        _partition: usize,
+        _context: Arc<datafusion::execution::TaskContext>,
     ) -> datafusion::error::Result<SendableRecordBatchStream> {
         let zarr_store = self.zarr_config.zarr_store.clone();
         let schema_ref = Arc::new(self.zarr_config.schema.clone());

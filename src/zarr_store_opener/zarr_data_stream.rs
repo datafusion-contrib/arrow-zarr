@@ -323,19 +323,19 @@ impl ZarrCoordinates {
         match (full_chunk_shape.len(), dim_idx) {
             (2, 0) => Ok(data
                 .into_iter()
-                .flat_map(|v| std::iter::repeat(v).take(full_chunk_shape[1] as usize))
+                .flat_map(|v| std::iter::repeat_n(v, full_chunk_shape[1] as usize))
                 .collect()),
             (2, 1) => Ok(vec![&data[..]; full_chunk_shape[0] as usize].concat()),
             (3, 0) => Ok(data
                 .into_iter()
                 .flat_map(|v| {
-                    std::iter::repeat(v).take((full_chunk_shape[1] * full_chunk_shape[2]) as usize)
+                    std::iter::repeat_n(v, (full_chunk_shape[1] * full_chunk_shape[2]) as usize)
                 })
                 .collect()),
             (3, 1) => {
                 let v: Vec<_> = data
                     .into_iter()
-                    .flat_map(|v| std::iter::repeat(v).take(full_chunk_shape[2] as usize))
+                    .flat_map(|v| std::iter::repeat_n(v, full_chunk_shape[2] as usize))
                     .collect();
                 Ok(vec![&v[..]; full_chunk_shape[0] as usize].concat())
             }
