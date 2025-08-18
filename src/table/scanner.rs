@@ -78,6 +78,7 @@ impl RecordBatchStream for StreamWrapper {
 #[derive(Debug)]
 pub struct ZarrScan {
     zarr_config: ZarrConfig,
+    #[allow(dead_code)]
     filters: Option<Arc<dyn PhysicalExpr>>,
     plan_properties: PlanProperties,
 }

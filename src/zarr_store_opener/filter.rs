@@ -1,9 +1,8 @@
-use crate::errors::zarr_errors::ZarrQueryResult;
 use arrow_array::{BooleanArray, RecordBatch};
 use arrow_schema::ArrowError;
 use arrow_schema::Schema;
 use arrow_schema::SchemaRef;
-use datafusion::physical_expr::{split_conjunction, PhysicalExpr};
+use datafusion::physical_expr::PhysicalExpr;
 use itertools::Itertools;
 use std::sync::Arc;
 
@@ -55,7 +54,7 @@ pub struct ZarrChunkFilter {
 
 impl ZarrChunkFilter {
     /// Create a new [`ZarrChunkFilter`] from an a ['PhysicalExpr']
-    pub fn new(physical_expr: Arc<dyn PhysicalExpr>) -> Self {
+    pub fn new(_physical_expr: Arc<dyn PhysicalExpr>) -> Self {
         Self {
             predicates: Vec::new(),
             schema_ref: Arc::new(Schema::empty()),
@@ -105,7 +104,7 @@ mod filter_tests {
     use super::*;
 
     // generate a record batch to test filters on.
-    fn generate_rec_batch() -> RecordBatch {
+    fn _generate_rec_batch() -> RecordBatch {
         let fields = vec![
             Arc::new(Field::new("var1".to_string(), DataType::Float64, false)),
             Arc::new(Field::new("var2".to_string(), DataType::Float64, false)),

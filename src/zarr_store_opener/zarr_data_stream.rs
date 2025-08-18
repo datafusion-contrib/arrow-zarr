@@ -33,6 +33,7 @@ use zarrs_storage::{AsyncReadableListableStorageTraits, StorePrefix};
 //********************************************
 
 // extract the chunk size from the metadata.
+#[allow(dead_code)]
 fn extract_chunk_size(meta: &ArrayMetadataV3) -> ZarrQueryResult<Vec<u64>> {
     let chunks = meta
         .chunk_grid
@@ -79,6 +80,7 @@ fn get_coord_names<T: ?Sized>(arr: &Array<T>) -> ZarrQueryResult<Option<Vec<Stri
 // extract the column (or array) names from the prefixes in the
 // zarr store. a parent prefix can be provided, for example in the case
 // where groups are used in the zarr store.
+#[allow(dead_code)]
 fn extract_columns(prefix: &str, keys: Vec<StorePrefix>) -> ZarrQueryResult<Vec<String>> {
     let cols: Vec<_> = keys
         .iter()
@@ -98,6 +100,7 @@ fn extract_columns(prefix: &str, keys: Vec<StorePrefix>) -> ZarrQueryResult<Vec<
 }
 
 // extract the metadata from array. only V3 metadata is supported.
+#[allow(dead_code)]
 fn extract_meta_from_array<T: ?Sized>(array: &Array<T>) -> ZarrQueryResult<&ArrayMetadataV3> {
     let meta = match array.metadata() {
         ArrayMetadata::V3(meta) => Ok(meta),
@@ -110,6 +113,7 @@ fn extract_meta_from_array<T: ?Sized>(array: &Array<T>) -> ZarrQueryResult<&Arra
 }
 
 // convert the data type from the zarrs metadata to an arrow type.
+#[allow(dead_code)]
 fn get_schema_type(value: &DataTypeMetadataV3) -> ZarrQueryResult<DataType> {
     match value {
         DataTypeMetadataV3::Bool => Ok(DataType::Boolean),
@@ -133,6 +137,7 @@ fn get_schema_type(value: &DataTypeMetadataV3) -> ZarrQueryResult<DataType> {
 // produce an arrow schema given column names and arrays.
 // the schema will be ordered following the names in the input
 // vector of column names.
+#[allow(dead_code)]
 fn create_schema<T: ?Sized>(
     cols: Vec<String>,
     arrays: &HashMap<String, Arc<Array<T>>>,
@@ -790,6 +795,7 @@ enum ZarrStreamState<T: AsyncReadableListableStorageTraits + ?Sized> {
 
 pub struct ZarrRecordBatchStream<T: AsyncReadableListableStorageTraits + ?Sized> {
     zarr_store: Option<ZarrStore<T>>,
+    #[allow(dead_code)]
     schema_ref: SchemaRef,
     projected_schema_ref: SchemaRef,
     filter: Option<ZarrChunkFilter>,
@@ -880,6 +886,7 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrRecordBatchSt
         })
     }
 
+    #[allow(dead_code)]
     pub(crate) fn get_projected_schema_ref(&self) -> Arc<Schema> {
         self.projected_schema_ref.clone()
     }
@@ -893,6 +900,7 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrRecordBatchSt
     // out values within a chunk, we rely on datafusion's default
     // filtering for that. basically this here is to handle filter
     // pushdowns.
+    #[allow(dead_code)]
     fn with_filter(mut self, filter: ZarrChunkFilter) -> ZarrQueryResult<Self> {
         self.filter = Some(filter);
         Ok(self)

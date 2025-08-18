@@ -17,7 +17,7 @@
 
 pub mod errors;
 pub mod table;
-pub(crate) mod zarr_store_opener;
+pub mod zarr_store_opener;
 
 pub use zarr_store_opener::ZarrRecordBatchStream;
 
