@@ -814,7 +814,7 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrRecordBatchSt
         partition: usize,
     ) -> ZarrQueryResult<Self> {
         // quick check to make sure the partition we're reading from does
-        // not exceed the number of partition.
+        // not exceed the number of partitions.
         if partition >= n_partitions {
             return Err(ZarrQueryError::InvalidCompute(
                 "Parition number exceeds number of partition in zarr stream".into(),
@@ -1182,7 +1182,7 @@ mod zarr_stream_tests {
 
         // the full data has 3x3 chunks, the first partition would
         // read the first 5, the second one the last 4, so the first
-        // chunk of the second stream would effectivelt be the middle
+        // chunk of the second stream would effectively be the middle
         // right chunk of the full data.
         validate_primitive_column::<Float64Type, f64>(
             "lat",
