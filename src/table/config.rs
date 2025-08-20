@@ -4,6 +4,7 @@ use std::sync::Arc;
 use zarrs_storage::AsyncReadableListableStorageTraits;
 
 /// Configuration for Zarr DataFusion processing.
+#[derive(Clone)]
 pub struct ZarrConfig {
     /// The zarr store.
     pub zarr_store: Arc<dyn AsyncReadableListableStorageTraits + Unpin + Send>,
@@ -38,8 +39,8 @@ impl ZarrConfig {
     }
 
     /// Set the projection for the scan.
-    pub fn with_projection(mut self, projection: Option<Vec<usize>>) -> Self {
-        self.projection = projection;
+    pub fn with_projection(mut self, projection: Vec<usize>) -> Self {
+        self.projection = Some(projection);
         self
     }
 }

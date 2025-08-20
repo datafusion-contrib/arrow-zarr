@@ -49,11 +49,14 @@ impl TableProvider for ZarrTable {
     async fn scan(
         &self,
         _state: &dyn Session,
-        _projection: Option<&Vec<usize>>,
+        projection: Option<&Vec<usize>>,
         _filters: &[Expr],
         _limit: Option<usize>,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
-        let config = ZarrConfig::new(self.zarr_storage.clone(), self.table_schema.clone());
+        let mut config = ZarrConfig::new(self.zarr_storage.clone(), self.table_schema.clone());
+        if let Some(proj) = projection {
+            config = config.with_projection(proj.to_vec());
+        }
         let scanner = ZarrScan::new(config, None);
 
         Ok(Arc::new(scanner))

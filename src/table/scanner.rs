@@ -75,7 +75,7 @@ impl RecordBatchStream for StreamWrapper {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ZarrScan {
     zarr_config: ZarrConfig,
     #[allow(dead_code)]
@@ -131,19 +131,47 @@ impl ExecutionPlan for ZarrScan {
         &self.plan_properties
     }
 
+    fn repartitioned(
+        &self,
+        target_partitions: usize,
+        _config: &datafusion::config::ConfigOptions,
+    ) -> datafusion::error::Result<Option<Arc<dyn ExecutionPlan>>> {
+        let mut new_plan = self.clone();
+        new_plan.plan_properties = new_plan
+            .plan_properties
+            .with_partitioning(Partitioning::UnknownPartitioning(target_partitions));
+        Ok(Some(Arc::new(new_plan)))
+    }
+
     fn execute(
         &self,
-        _partition: usize,
+        partition: usize,
         _context: Arc<datafusion::execution::TaskContext>,
     ) -> datafusion::error::Result<SendableRecordBatchStream> {
         let zarr_store = self.zarr_config.zarr_store.clone();
         let schema_ref = Arc::new(self.zarr_config.schema.clone());
         let schema_ref_for_future = schema_ref.clone();
+        let n_partitions = match self.plan_properties.partitioning {
+            Partitioning::UnknownPartitioning(n) => n,
+            _ => {
+                return Err(datafusion::error::DataFusionError::Execution(
+                    "Only Unknown partitioning support for zarr scans".into(),
+                ));
+            }
+        };
+
+        let projection = self.zarr_config.projection.clone();
         let stream: FileOpenFuture = Box::pin(async move {
-            let inner_stream =
-                ZarrRecordBatchStream::new(zarr_store, schema_ref_for_future, None, None)
-                    .await
-                    .map_err(|e| DataFusionError::External(Box::new(e)))?;
+            let inner_stream = ZarrRecordBatchStream::new(
+                zarr_store,
+                schema_ref_for_future,
+                None,
+                projection,
+                n_partitions,
+                partition,
+            )
+            .await
+            .map_err(|e| DataFusionError::External(Box::new(e)))?;
             Ok(inner_stream.boxed())
         });
         let stream = StreamWrapper::new(stream, schema_ref);
@@ -158,7 +186,7 @@ mod scanner_tests {
 
     use arrow::datatypes::Float64Type;
     use arrow_schema::DataType;
-    use datafusion::prelude::SessionContext;
+    use datafusion::{config::ConfigOptions, prelude::SessionContext};
     use futures_util::TryStreamExt;
 
     use super::*;
@@ -207,5 +235,35 @@ mod scanner_tests {
             &records[0],
             &[0.0, 1.0, 2.0, 8.0, 9.0, 10.0, 16.0, 17.0, 18.0],
         );
+    }
+
+    #[tokio::test]
+    async fn read_partition_test() {
+        let (wrapper, schema) =
+            get_lat_lon_data_store(true, 0.0, "lat_lon_data_for_scan_with_partition").await;
+        let store = wrapper.get_store();
+        let config = ZarrConfig::new(store, schema);
+
+        let session = SessionContext::new();
+        let scan = ZarrScan::new(config, None);
+        let scan = scan
+            .repartitioned(2, &ConfigOptions::default())
+            .unwrap()
+            .unwrap();
+
+        let records: Vec<_> = scan
+            .execute(1, session.task_ctx())
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+
+        let target_types = HashMap::from([
+            ("lat".to_string(), DataType::Float64),
+            ("lon".to_string(), DataType::Float64),
+            ("data".to_string(), DataType::Float64),
+        ]);
+        validate_names_and_types(&target_types, &records[0]);
+        assert_eq!(records.len(), 4);
     }
 }
