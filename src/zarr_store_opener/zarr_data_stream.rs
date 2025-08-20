@@ -889,7 +889,14 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrRecordBatchSt
         let max_idx = chunk_indices.len();
         let start = chunks_per_partitions * partition;
         let end = min(chunks_per_partitions * (partition + 1), max_idx);
-        chunk_indices = chunk_indices[start..end].to_vec();
+
+        // this is to handle cases where more partitions than there are
+        // chunks to read were requested.
+        if end <= start {
+            chunk_indices = Vec::new();
+        } else {
+            chunk_indices = chunk_indices[start..end].to_vec();
+        }
         let chunk_indices = VecDeque::from(chunk_indices);
 
         Ok(Self {
@@ -1199,5 +1206,42 @@ mod zarr_stream_tests {
             &records[0],
             &[30.0, 31.0, 38.0, 39.0, 46.0, 47.0],
         );
+    }
+
+    #[tokio::test]
+    async fn read_too_many_partitions_test() {
+        let (wrapper, schema) =
+            get_lat_lon_data_store(true, 0.0, "lat_lon_data_too_many_partitions").await;
+        let store = wrapper.get_store();
+
+        // there are only 9 chunks, asking for 20 partitions, so each partition up to
+        // the 9th parittion should have one batch in them, after that there should be
+        // no data returned by the streams.
+        let stream =
+            ZarrRecordBatchStream::new(store.clone(), Arc::new(schema.clone()), None, None, 20, 0)
+                .await
+                .unwrap();
+        let records: Vec<_> = stream.try_collect().await.unwrap();
+        assert_eq!(records.len(), 1);
+
+        let stream =
+            ZarrRecordBatchStream::new(store.clone(), Arc::new(schema.clone()), None, None, 20, 8)
+                .await
+                .unwrap();
+        let records: Vec<_> = stream.try_collect().await.unwrap();
+        assert_eq!(records.len(), 1);
+
+        let stream =
+            ZarrRecordBatchStream::new(store.clone(), Arc::new(schema.clone()), None, None, 20, 10)
+                .await
+                .unwrap();
+        let records: Vec<_> = stream.try_collect().await.unwrap();
+        assert_eq!(records.len(), 0);
+
+        let stream = ZarrRecordBatchStream::new(store, Arc::new(schema), None, None, 20, 19)
+            .await
+            .unwrap();
+        let records: Vec<_> = stream.try_collect().await.unwrap();
+        assert_eq!(records.len(), 0);
     }
 }
