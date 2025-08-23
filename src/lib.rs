@@ -65,6 +65,10 @@ mod test_utils {
         pub(crate) fn get_store(&self) -> Arc<AsyncObjectStore<LocalFileSystem>> {
             self.store.clone()
         }
+
+        pub(crate) fn get_store_path(&self) -> String {
+            self.path.as_os_str().to_str().unwrap().into()
+        }
     }
 
     impl Drop for StoreWrapper {
