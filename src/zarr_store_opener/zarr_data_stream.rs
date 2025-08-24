@@ -4,7 +4,7 @@ use arrow::array::*;
 use arrow::datatypes::*;
 use arrow::record_batch::RecordBatch;
 use arrow_schema::ArrowError;
-use arrow_schema::{DataType, Field, Fields, Schema};
+use arrow_schema::Schema;
 use bytes::Bytes;
 use futures::stream::Stream;
 use futures::{ready, FutureExt};
@@ -20,42 +20,14 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use tokio::task::JoinSet;
 use zarrs::array::codec::{ArrayToBytesCodecTraits, CodecOptions};
-use zarrs::array::{
-    Array, ArrayBytes, ArrayMetadata, ArrayMetadataV3, ArraySize, DataType as zDataType,
-    ElementOwned,
-};
+use zarrs::array::{Array, ArrayBytes, ArraySize, DataType as zDataType, ElementOwned};
 use zarrs::array_subset::ArraySubset;
-use zarrs_metadata::v3::array::data_type::DataTypeMetadataV3;
-use zarrs_storage::{AsyncReadableListableStorageTraits, StorePrefix};
+use zarrs_storage::AsyncReadableListableStorageTraits;
 
 //********************************************
 // various utils to handle metadata from the zarr array, data types,
 // schemas, etc...
 //********************************************
-
-// extract the chunk size from the metadata.
-#[allow(dead_code)]
-fn extract_chunk_size(meta: &ArrayMetadataV3) -> ZarrQueryResult<Vec<u64>> {
-    let chunks = meta
-        .chunk_grid
-        .configuration()
-        .ok_or(ZarrQueryError::InvalidMetadata(
-            "Could not find chunk grid configuration".into(),
-        ))?
-        .get("chunk_shape")
-        .ok_or(ZarrQueryError::InvalidMetadata(
-            "Could not find chunk_shape in configuration".into(),
-        ))?
-        .as_array()
-        .ok_or(ZarrQueryError::InvalidMetadata(
-            "Could not convert chunk shape to array".into(),
-        ))?
-        .iter()
-        .map(|v| v.as_u64().unwrap())
-        .collect();
-
-    Ok(chunks)
-}
 
 // extract the coordinate names from the array. it is possible to
 // have an array with no coordinates.
@@ -76,92 +48,6 @@ fn get_coord_names<T: ?Sized>(arr: &Array<T>) -> ZarrQueryResult<Option<Vec<Stri
     }
 
     Ok(None)
-}
-
-// extract the column (or array) names from the prefixes in the
-// zarr store. a parent prefix can be provided, for example in the case
-// where groups are used in the zarr store.
-#[allow(dead_code)]
-fn extract_columns(prefix: &str, keys: Vec<StorePrefix>) -> ZarrQueryResult<Vec<String>> {
-    let cols: Vec<_> = keys
-        .iter()
-        .map(|k| {
-            k.as_str()
-                .replace(prefix, "")
-                .split("/")
-                .next()
-                .map(|s| s.to_string())
-        })
-        .collect::<Option<Vec<_>>>()
-        .ok_or(ZarrQueryError::InvalidMetadata(
-            "Could not extract column name from store key".into(),
-        ))?;
-
-    Ok(cols.into_iter().collect())
-}
-
-// extract the metadata from array. only V3 metadata is supported.
-#[allow(dead_code)]
-fn extract_meta_from_array<T: ?Sized>(array: &Array<T>) -> ZarrQueryResult<&ArrayMetadataV3> {
-    let meta = match array.metadata() {
-        ArrayMetadata::V3(meta) => Ok(meta),
-        _ => Err(ZarrQueryError::InvalidMetadata(
-            "Only v3 metadata is supported".into(),
-        )),
-    }?;
-
-    Ok(meta)
-}
-
-// convert the data type from the zarrs metadata to an arrow type.
-#[allow(dead_code)]
-fn get_schema_type(value: &DataTypeMetadataV3) -> ZarrQueryResult<DataType> {
-    match value {
-        DataTypeMetadataV3::Bool => Ok(DataType::Boolean),
-        DataTypeMetadataV3::UInt8 => Ok(DataType::UInt8),
-        DataTypeMetadataV3::UInt16 => Ok(DataType::UInt16),
-        DataTypeMetadataV3::UInt32 => Ok(DataType::UInt32),
-        DataTypeMetadataV3::UInt64 => Ok(DataType::UInt64),
-        DataTypeMetadataV3::Int8 => Ok(DataType::Int8),
-        DataTypeMetadataV3::Int16 => Ok(DataType::Int16),
-        DataTypeMetadataV3::Int32 => Ok(DataType::Int32),
-        DataTypeMetadataV3::Int64 => Ok(DataType::Int64),
-        DataTypeMetadataV3::Float32 => Ok(DataType::Float32),
-        DataTypeMetadataV3::Float64 => Ok(DataType::Float64),
-        DataTypeMetadataV3::String => Ok(DataType::Utf8),
-        _ => Err(ZarrQueryError::InvalidType(format!(
-            "Unsupported type {value} from zarr metadata"
-        ))),
-    }
-}
-
-// produce an arrow schema given column names and arrays.
-// the schema will be ordered following the names in the input
-// vector of column names.
-#[allow(dead_code)]
-fn create_schema<T: ?Sized>(
-    cols: Vec<String>,
-    arrays: &HashMap<String, Arc<Array<T>>>,
-) -> ZarrQueryResult<Schema> {
-    let fields: Fields = cols
-        .iter()
-        .map(|c| arrays.get(c))
-        .collect::<Option<Vec<_>>>()
-        .ok_or(ZarrQueryError::InvalidMetadata(
-            "Array missing from array map".into(),
-        ))?
-        .iter()
-        .map(|a| extract_meta_from_array(a))
-        .collect::<ZarrQueryResult<Vec<_>>>()?
-        .iter()
-        .map(|m| get_schema_type(&m.data_type))
-        .collect::<ZarrQueryResult<Vec<_>>>()?
-        .into_iter()
-        .zip(cols)
-        .map(|(d, c)| Arc::new(Field::new(c, d, false)))
-        .collect();
-
-    Ok(Schema::new(fields))
 }
 
 // this function handles having multiple values for a given vector,
