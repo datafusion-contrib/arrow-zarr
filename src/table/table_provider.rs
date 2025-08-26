@@ -197,7 +197,7 @@ async fn infer_schema(store: Arc<dyn AsyncReadableListableStorageTraits>) -> DfR
         let meta = match arr.metadata() {
             ArrayMetadata::V3(meta) => Ok(meta),
             _ => Err(DataFusionError::Execution(
-                "Only v3 metadata is supported".into(),
+                "Only Zarr v3 metadata is supported".into(),
             )),
         }?;
 
