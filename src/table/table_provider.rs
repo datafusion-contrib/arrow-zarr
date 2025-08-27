@@ -152,9 +152,9 @@ impl TableProviderFactory for ZarrTableFactory {
     }
 }
 
-// helpers to infer the schema from a zarr store, which involves reading
-// directory names and reading some metadata, so it's a bit trickier than
-// e.g. get a schema from a parquet file.
+/// helpers to infer the schema from a zarr store, which involves reading
+/// directory names and reading some metadata, so it's a bit trickier than
+/// e.g. get a schema from a parquet file.
 fn get_schema_type(value: &DataTypeMetadataV3) -> DfResult<DataType> {
     match value {
         DataTypeMetadataV3::Bool => Ok(DataType::Boolean),
