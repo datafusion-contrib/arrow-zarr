@@ -94,3 +94,9 @@ impl From<std::io::Error> for ZarrQueryError {
 
 /// A specialized [`Result`] for [`ZarrError`]s.
 pub type ZarrQueryResult<T, E = ZarrQueryError> = Result<T, E>;
+
+impl From<ZarrQueryError> for ArrowError {
+    fn from(e: ZarrQueryError) -> ArrowError {
+        ArrowError::ExternalError(Box::new(e))
+    }
+}

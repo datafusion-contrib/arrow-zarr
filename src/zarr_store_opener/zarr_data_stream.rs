@@ -4,11 +4,9 @@ use arrow::array::*;
 use arrow::datatypes::*;
 use arrow::record_batch::RecordBatch;
 use arrow_schema::ArrowError;
-use arrow_schema::Schema;
+use async_stream::try_stream;
 use bytes::Bytes;
-use futures::stream::Stream;
-use futures::{ready, FutureExt};
-use futures_util::future::BoxFuture;
+use futures::stream::{BoxStream, Stream};
 use itertools::iproduct;
 use std::borrow::Cow;
 use std::cmp::min;
@@ -561,10 +559,10 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrStore<T> {
     // this is the main function that does the heavy lifting, getting
     // the data from the zarr store and decoding it.
     async fn get_chunk(
-        self,
+        &self,
         cols: Vec<String>,
         chk_idx: Vec<u64>,
-    ) -> ZarrQueryResult<(Self, ZarrInMemoryChunk, Vec<u64>)> {
+    ) -> ZarrQueryResult<ZarrInMemoryChunk> {
         if cols.is_empty() {
             return Err(ZarrQueryError::InvalidProjection(
                 "No columns when polling zarr store for chunks".into(),
@@ -662,36 +660,30 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrStore<T> {
         let array_ref = last_arr.decode_data(data)?;
         chk_data.add_data(last_arr.name, array_ref);
 
-        Ok((self, chk_data, chk_idx))
+        Ok(chk_data)
     }
 }
 
-//********************************************
-// the stucture that will be used to stream data from the zarr
-// store as it gets read.
-//********************************************
-type ChunkFuture<T> =
-    BoxFuture<'static, ZarrQueryResult<(ZarrStore<T>, ZarrInMemoryChunk, Vec<u64>)>>;
-enum ZarrStreamState<T: AsyncReadableListableStorageTraits + ?Sized> {
-    Init,
-    Reading(ChunkFuture<T>),
-    ReadingForFilter(ChunkFuture<T>),
-    Error,
-    Done,
-}
-
-pub struct ZarrRecordBatchStream<T: AsyncReadableListableStorageTraits + ?Sized> {
-    zarr_store: Option<ZarrStore<T>>,
+/// A stream of RecordBatches read from a Zarr store.
+///
+/// This struct is separate from `ZarrRecordBatchStream`, so that we can avoid manually
+/// implementing [`Stream`]. Instead, we use the `async-stream` crate to convert an async iterable
+/// into a stream.
+struct ZarrRecordBatchStreamInner<T: AsyncReadableListableStorageTraits + ?Sized> {
+    zarr_store: Arc<ZarrStore<T>>,
     #[allow(dead_code)]
     schema_ref: SchemaRef,
     projected_schema_ref: SchemaRef,
     filter: Option<ZarrChunkFilter>,
-    state: ZarrStreamState<T>,
     chunk_indices: VecDeque<Vec<u64>>,
 }
 
-impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrRecordBatchStream<T> {
-    pub(crate) async fn new(
+impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrRecordBatchStreamInner<T> {
+    /// Create a new ZarrRecordBatchStreamInner.
+    ///
+    /// This function is intentionally private, as all users should call
+    /// [`ZarrRecordBatchStream::new`] instead.
+    async fn new(
         store: Arc<T>,
         schema_ref: SchemaRef,
         group: Option<String>,
@@ -746,7 +738,7 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrRecordBatchSt
 
         // store all the zarr arrays in a struct that we can use
         // to access them later.
-        let zarr_store = ZarrStore::new(arrays)?;
+        let zarr_store = Arc::new(ZarrStore::new(arrays)?);
 
         // this creates all the chunk indices we will be reading from.
         let chk_grid_shape = &zarr_store.chunk_grid_shape;
@@ -786,18 +778,54 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrRecordBatchSt
         let chunk_indices = VecDeque::from(chunk_indices);
 
         Ok(Self {
-            zarr_store: Some(zarr_store),
+            zarr_store,
             schema_ref,
             projected_schema_ref,
             filter: None,
-            state: ZarrStreamState::Init,
             chunk_indices,
         })
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn get_projected_schema_ref(&self) -> Arc<Schema> {
-        self.projected_schema_ref.clone()
+    /// Fetch the next chunk, returning None if there are no more chunks.
+    pub(crate) async fn next_chunk(&mut self) -> Result<Option<RecordBatch>, ArrowError> {
+        if let Some(chunk_index) = self.pop_chunk_idx() {
+            let schema = if let Some(filter) = &self.filter {
+                filter.schema_ref()
+            } else {
+                &self.projected_schema_ref
+            };
+            let column_names: Vec<_> = schema
+                .fields()
+                .iter()
+                .map(|f| f.name().to_owned())
+                .collect();
+
+            let zarr_chunk = self.zarr_store.get_chunk(column_names, chunk_index).await?;
+            let record_batch = zarr_chunk.into_record_batch(&self.projected_schema_ref)?;
+            Ok(Some(record_batch))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Convert this into a `ZarrRecordBatchStream`, using the `async-stream` crate to handle the
+    /// low-level specifics of stream polling.
+    fn into_stream(mut self) -> ZarrRecordBatchStream {
+        let schema = self.projected_schema_ref.clone();
+        let stream = Box::pin(try_stream! {
+            loop {
+                let maybe_batch = self.next_chunk().await.map_err(|e| {
+                    ArrowError::ExternalError(Box::new(e))
+                })?;
+
+                if let Some(batch) = maybe_batch {
+                    yield batch;
+                } else {
+                    break;
+                }
+            }
+        });
+        ZarrRecordBatchStream { stream, schema }
     }
 
     fn pop_chunk_idx(&mut self) -> Option<Vec<u64>> {
@@ -816,117 +844,57 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrRecordBatchSt
     }
 }
 
-impl<T> Stream for ZarrRecordBatchStream<T>
-where
-    T: AsyncReadableListableStorageTraits + Unpin + Send + ?Sized + 'static,
-{
+/// An async stream of record batches read from the Zarr store.
+///
+/// This implementation is modeled to be used with the DataFusion [`RecordBatchStream`] trait.
+///
+/// [`RecordBatchStream`]: https://docs.rs/datafusion/latest/datafusion/execution/trait.RecordBatchStream.html
+pub struct ZarrRecordBatchStream {
+    stream: BoxStream<'static, Result<RecordBatch, ArrowError>>,
+    schema: SchemaRef,
+}
+
+impl ZarrRecordBatchStream {
+    /// Create a new ZarrRecordBatchStream.
+    pub async fn try_new<T: AsyncReadableListableStorageTraits + ?Sized + 'static>(
+        store: Arc<T>,
+        schema_ref: SchemaRef,
+        group: Option<String>,
+        projection: Option<Vec<usize>>,
+        n_partitions: usize,
+        partition: usize,
+    ) -> ZarrQueryResult<Self> {
+        let inner = ZarrRecordBatchStreamInner::new(
+            store,
+            schema_ref,
+            group,
+            projection,
+            n_partitions,
+            partition,
+        )
+        .await?;
+        Ok(Self {
+            schema: inner.projected_schema_ref.clone(),
+            stream: inner.into_stream().stream,
+        })
+    }
+
+    /// A reference to the schema of the record batches produced by this stream.
+    pub fn schema_ref(&self) -> &SchemaRef {
+        &self.schema
+    }
+
+    /// The schema of the record batches produced by this stream.
+    pub fn schema(&self) -> SchemaRef {
+        self.schema.clone()
+    }
+}
+
+impl Stream for ZarrRecordBatchStream {
     type Item = Result<RecordBatch, ArrowError>;
+
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        loop {
-            let cols: Vec<_> = self
-                .projected_schema_ref
-                .fields()
-                .iter()
-                .map(|f| f.name().to_owned())
-                .collect();
-            let mut filter_cols: Option<Vec<String>> = None;
-            if let Some(filter) = &self.filter {
-                filter_cols = Some(
-                    filter
-                        .get_schema_ref()
-                        .fields()
-                        .iter()
-                        .map(|f| f.name().to_owned())
-                        .collect(),
-                );
-            }
-            match &mut self.state {
-                ZarrStreamState::Init => {
-                    let chk_idx = self.pop_chunk_idx();
-                    if chk_idx.is_none() {
-                        self.state = ZarrStreamState::Done;
-                        return Poll::Ready(None);
-                    }
-                    let chk_idx = chk_idx.unwrap();
-
-                    let store = self.zarr_store.take().expect("lost zarr store!");
-                    if let Some(filter_cols) = filter_cols {
-                        let fut = store.get_chunk(filter_cols, chk_idx).boxed();
-                        self.state = ZarrStreamState::ReadingForFilter(fut);
-                    } else {
-                        let fut = store.get_chunk(cols, chk_idx).boxed();
-                        self.state = ZarrStreamState::Reading(fut);
-                    }
-                }
-                ZarrStreamState::Reading(f) => {
-                    let res = ready!(f.poll_unpin(cx));
-                    match res {
-                        Err(e) => {
-                            self.state = ZarrStreamState::Error;
-                            let e = ArrowError::from_external_error(Box::new(e));
-                            return Poll::Ready(Some(Err(e)));
-                        }
-                        Ok((store, chunk, _)) => {
-                            self.zarr_store = Some(store);
-                            self.state = ZarrStreamState::Init;
-                            return Poll::Ready(Some(
-                                chunk
-                                    .into_record_batch(&self.projected_schema_ref)
-                                    .map_err(|e| ArrowError::from_external_error(Box::new(e))),
-                            ));
-                        }
-                    }
-                }
-                ZarrStreamState::ReadingForFilter(f) => {
-                    let res = ready!(f.poll_unpin(cx));
-                    match res {
-                        Err(e) => {
-                            self.state = ZarrStreamState::Error;
-                            let e = ArrowError::from_external_error(Box::new(e));
-                            return Poll::Ready(Some(Err(e)));
-                        }
-                        Ok((store, chunk, chk_idx)) => {
-                            let chk_data;
-                            if let Some(filter) = &self.filter {
-                                chk_data = chunk
-                                    .into_record_batch(&filter.get_schema_ref())
-                                    .map_err(|e| ArrowError::from_external_error(Box::new(e)))?;
-                            } else {
-                                panic!("lost filter schema!");
-                            }
-
-                            if let Some(filter) = &mut self.filter {
-                                let filter_res = filter.evaluate(&chk_data);
-                                match filter_res {
-                                    Ok(filter_passed) => {
-                                        if filter_passed {
-                                            let fut = store.get_chunk(cols, chk_idx).boxed();
-                                            self.state = ZarrStreamState::Reading(fut);
-                                        // this is effectively the filtering mechanism. the evaluate
-                                        // method checks if any data in the chunk with just the filter
-                                        // columns pass the check, if not, we go back to the init
-                                        // state and simply don't read the full chunk for the current
-                                        // chunk index.
-                                        } else {
-                                            self.zarr_store = Some(store);
-                                            self.state = ZarrStreamState::Init;
-                                        }
-                                    }
-                                    Err(e) => {
-                                        self.state = ZarrStreamState::Error;
-                                        return Poll::Ready(Some(Err(e)));
-                                    }
-                                };
-                            } else {
-                                panic!("lost filter!");
-                            }
-                        }
-                    }
-                }
-                ZarrStreamState::Error => return Poll::Ready(None),
-                ZarrStreamState::Done => return Poll::Ready(None),
-            }
-        }
+        Pin::new(&mut self.stream).poll_next(cx)
     }
 }
 
@@ -943,7 +911,7 @@ mod zarr_stream_tests {
         let (wrapper, schema) = get_lat_lon_data_store(true, 0.0, "lat_lon_data").await;
         let store = wrapper.get_store();
 
-        let stream = ZarrRecordBatchStream::new(store, Arc::new(schema), None, None, 1, 0)
+        let stream = ZarrRecordBatchStream::try_new(store, Arc::new(schema), None, None, 1, 0)
             .await
             .unwrap();
         let records: Vec<_> = stream.try_collect().await.unwrap();
@@ -1017,7 +985,7 @@ mod zarr_stream_tests {
             get_lat_lon_data_store(false, fillvalue, "lat_lon_empty_data").await;
         let store = wrapper.get_store();
 
-        let stream = ZarrRecordBatchStream::new(store, Arc::new(schema), None, None, 1, 0)
+        let stream = ZarrRecordBatchStream::try_new(store, Arc::new(schema), None, None, 1, 0)
             .await
             .unwrap();
         let records: Vec<_> = stream.try_collect().await.unwrap();
@@ -1058,15 +1026,21 @@ mod zarr_stream_tests {
             ("data".to_string(), DataType::Float64),
         ]);
 
-        let stream =
-            ZarrRecordBatchStream::new(store.clone(), Arc::new(schema.clone()), None, None, 2, 0)
-                .await
-                .unwrap();
+        let stream = ZarrRecordBatchStream::try_new(
+            store.clone(),
+            Arc::new(schema.clone()),
+            None,
+            None,
+            2,
+            0,
+        )
+        .await
+        .unwrap();
         let records: Vec<_> = stream.try_collect().await.unwrap();
         validate_names_and_types(&target_types, &records[0]);
         assert_eq!(records.len(), 5);
 
-        let stream = ZarrRecordBatchStream::new(store, Arc::new(schema), None, None, 2, 1)
+        let stream = ZarrRecordBatchStream::try_new(store, Arc::new(schema), None, None, 2, 1)
             .await
             .unwrap();
         let records: Vec<_> = stream.try_collect().await.unwrap();
@@ -1103,28 +1077,46 @@ mod zarr_stream_tests {
         // there are only 9 chunks, asking for 20 partitions, so each partition up to
         // the 9th parittion should have one batch in them, after that there should be
         // no data returned by the streams.
-        let stream =
-            ZarrRecordBatchStream::new(store.clone(), Arc::new(schema.clone()), None, None, 20, 0)
-                .await
-                .unwrap();
+        let stream = ZarrRecordBatchStream::try_new(
+            store.clone(),
+            Arc::new(schema.clone()),
+            None,
+            None,
+            20,
+            0,
+        )
+        .await
+        .unwrap();
         let records: Vec<_> = stream.try_collect().await.unwrap();
         assert_eq!(records.len(), 1);
 
-        let stream =
-            ZarrRecordBatchStream::new(store.clone(), Arc::new(schema.clone()), None, None, 20, 8)
-                .await
-                .unwrap();
+        let stream = ZarrRecordBatchStream::try_new(
+            store.clone(),
+            Arc::new(schema.clone()),
+            None,
+            None,
+            20,
+            8,
+        )
+        .await
+        .unwrap();
         let records: Vec<_> = stream.try_collect().await.unwrap();
         assert_eq!(records.len(), 1);
 
-        let stream =
-            ZarrRecordBatchStream::new(store.clone(), Arc::new(schema.clone()), None, None, 20, 10)
-                .await
-                .unwrap();
+        let stream = ZarrRecordBatchStream::try_new(
+            store.clone(),
+            Arc::new(schema.clone()),
+            None,
+            None,
+            20,
+            10,
+        )
+        .await
+        .unwrap();
         let records: Vec<_> = stream.try_collect().await.unwrap();
         assert_eq!(records.len(), 0);
 
-        let stream = ZarrRecordBatchStream::new(store, Arc::new(schema), None, None, 20, 19)
+        let stream = ZarrRecordBatchStream::try_new(store, Arc::new(schema), None, None, 20, 19)
             .await
             .unwrap();
         let records: Vec<_> = stream.try_collect().await.unwrap();
