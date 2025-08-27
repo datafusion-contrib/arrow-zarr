@@ -943,7 +943,7 @@ mod zarr_stream_tests {
         let (wrapper, schema) = get_lat_lon_data_store(true, 0.0, "lat_lon_data").await;
         let store = wrapper.get_store();
 
-        let stream = ZarrRecordBatchStream::new(store, Arc::new(schema), None, None, 1, 0)
+        let stream = ZarrRecordBatchStream::new(store, schema, None, None, 1, 0)
             .await
             .unwrap();
         let records: Vec<_> = stream.try_collect().await.unwrap();
@@ -1017,7 +1017,7 @@ mod zarr_stream_tests {
             get_lat_lon_data_store(false, fillvalue, "lat_lon_empty_data").await;
         let store = wrapper.get_store();
 
-        let stream = ZarrRecordBatchStream::new(store, Arc::new(schema), None, None, 1, 0)
+        let stream = ZarrRecordBatchStream::new(store, schema, None, None, 1, 0)
             .await
             .unwrap();
         let records: Vec<_> = stream.try_collect().await.unwrap();
@@ -1058,15 +1058,14 @@ mod zarr_stream_tests {
             ("data".to_string(), DataType::Float64),
         ]);
 
-        let stream =
-            ZarrRecordBatchStream::new(store.clone(), Arc::new(schema.clone()), None, None, 2, 0)
-                .await
-                .unwrap();
+        let stream = ZarrRecordBatchStream::new(store.clone(), schema.clone(), None, None, 2, 0)
+            .await
+            .unwrap();
         let records: Vec<_> = stream.try_collect().await.unwrap();
         validate_names_and_types(&target_types, &records[0]);
         assert_eq!(records.len(), 5);
 
-        let stream = ZarrRecordBatchStream::new(store, Arc::new(schema), None, None, 2, 1)
+        let stream = ZarrRecordBatchStream::new(store, schema, None, None, 2, 1)
             .await
             .unwrap();
         let records: Vec<_> = stream.try_collect().await.unwrap();
@@ -1103,28 +1102,25 @@ mod zarr_stream_tests {
         // there are only 9 chunks, asking for 20 partitions, so each partition up to
         // the 9th parittion should have one batch in them, after that there should be
         // no data returned by the streams.
-        let stream =
-            ZarrRecordBatchStream::new(store.clone(), Arc::new(schema.clone()), None, None, 20, 0)
-                .await
-                .unwrap();
+        let stream = ZarrRecordBatchStream::new(store.clone(), schema.clone(), None, None, 20, 0)
+            .await
+            .unwrap();
         let records: Vec<_> = stream.try_collect().await.unwrap();
         assert_eq!(records.len(), 1);
 
-        let stream =
-            ZarrRecordBatchStream::new(store.clone(), Arc::new(schema.clone()), None, None, 20, 8)
-                .await
-                .unwrap();
+        let stream = ZarrRecordBatchStream::new(store.clone(), schema.clone(), None, None, 20, 8)
+            .await
+            .unwrap();
         let records: Vec<_> = stream.try_collect().await.unwrap();
         assert_eq!(records.len(), 1);
 
-        let stream =
-            ZarrRecordBatchStream::new(store.clone(), Arc::new(schema.clone()), None, None, 20, 10)
-                .await
-                .unwrap();
+        let stream = ZarrRecordBatchStream::new(store.clone(), schema.clone(), None, None, 20, 10)
+            .await
+            .unwrap();
         let records: Vec<_> = stream.try_collect().await.unwrap();
         assert_eq!(records.len(), 0);
 
-        let stream = ZarrRecordBatchStream::new(store, Arc::new(schema), None, None, 20, 19)
+        let stream = ZarrRecordBatchStream::new(store, schema, None, None, 20, 19)
             .await
             .unwrap();
         let records: Vec<_> = stream.try_collect().await.unwrap();

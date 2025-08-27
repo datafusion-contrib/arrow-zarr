@@ -26,9 +26,7 @@ mod test_utils {
     use arrow_array::cast::AsArray;
     use arrow_array::types::*;
     use arrow_array::RecordBatch;
-    use arrow_schema::DataType as ArrowDataType;
-    use arrow_schema::Field;
-    use arrow_schema::Schema;
+    use arrow_schema::{DataType as ArrowDataType, Field, Schema, SchemaRef};
     use futures::executor::block_on;
     use itertools::enumerate;
     use ndarray::{Array, Array1, Array2};
@@ -203,7 +201,7 @@ mod test_utils {
         write_data: bool,
         fillvalue: f64,
         dir_name: &str,
-    ) -> (StoreWrapper, Schema) {
+    ) -> (StoreWrapper, SchemaRef) {
         let wrapper = StoreWrapper::new(dir_name.into());
         let store = wrapper.get_store();
 
@@ -249,11 +247,11 @@ mod test_utils {
         )
         .await;
 
-        let schema = Schema::new(vec![
+        let schema = Arc::new(Schema::new(vec![
             Field::new("data", ArrowDataType::Float64, false),
             Field::new("lat", ArrowDataType::Float64, false),
             Field::new("lon", ArrowDataType::Float64, false),
-        ]);
+        ]));
 
         (wrapper, schema)
     }
