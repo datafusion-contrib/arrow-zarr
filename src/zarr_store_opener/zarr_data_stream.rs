@@ -813,16 +813,8 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrRecordBatchSt
     fn into_stream(mut self) -> ZarrRecordBatchStream {
         let schema = self.projected_schema_ref.clone();
         let stream = Box::pin(try_stream! {
-            loop {
-                let maybe_batch = self.next_chunk().await.map_err(|e| {
-                    ArrowError::ExternalError(Box::new(e))
-                })?;
-
-                if let Some(batch) = maybe_batch {
-                    yield batch;
-                } else {
-                    break;
-                }
+            while let Some(batch) = self.next_chunk().await? {
+                yield batch;
             }
         });
         ZarrRecordBatchStream { stream, schema }
