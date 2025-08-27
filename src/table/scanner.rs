@@ -162,7 +162,7 @@ impl ExecutionPlan for ZarrScan {
 
         let projection = self.zarr_config.projection.clone();
         let stream: FileOpenFuture = Box::pin(async move {
-            let inner_stream = ZarrRecordBatchStream::new(
+            let inner_stream = ZarrRecordBatchStream::try_new(
                 zarr_store,
                 schema_ref_for_future,
                 None,
@@ -174,9 +174,8 @@ impl ExecutionPlan for ZarrScan {
             .map_err(|e| DataFusionError::External(Box::new(e)))?;
             Ok(inner_stream.boxed())
         });
-        let stream = StreamWrapper::new(stream, schema_ref);
-
-        Ok(Box::pin(stream))
+        let adapter = StreamWrapper::new(stream, schema_ref);
+        Ok(Box::pin(adapter))
     }
 }
 

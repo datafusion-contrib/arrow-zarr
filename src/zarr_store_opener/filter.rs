@@ -61,10 +61,9 @@ impl ZarrChunkFilter {
         }
     }
 
-    /// Get the schema for the combination of all the columns
-    /// needed to evaluate the filter.
-    pub fn get_schema_ref(&self) -> SchemaRef {
-        self.schema_ref.clone()
+    /// A reference to the schema for the columns needed to evaluate the filter.
+    pub fn schema_ref(&self) -> &SchemaRef {
+        &self.schema_ref
     }
 
     pub fn evaluate(&mut self, rec_batch: &RecordBatch) -> Result<bool, ArrowError> {
