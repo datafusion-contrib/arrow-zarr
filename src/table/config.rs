@@ -1,4 +1,4 @@
-use arrow_schema::Schema;
+use arrow_schema::SchemaRef;
 use std::fmt;
 use std::sync::Arc;
 use zarrs_storage::AsyncReadableListableStorageTraits;
@@ -11,7 +11,7 @@ pub struct ZarrConfig {
 
     /// The schema for the entire table (regardless of what columns
     /// are selected).
-    pub schema: Schema,
+    pub schema: SchemaRef,
 
     /// The projection for the scan.
     pub projection: Option<Vec<usize>>,
@@ -29,7 +29,7 @@ impl ZarrConfig {
     /// Create a new ZarrConfig.
     pub fn new(
         zarr_store: Arc<dyn AsyncReadableListableStorageTraits + Unpin + Send>,
-        schema: Schema,
+        schema: SchemaRef,
     ) -> Self {
         Self {
             zarr_store,

@@ -11,6 +11,7 @@ use datafusion::logical_expr::CreateExternalTable;
 use datafusion::logical_expr::Expr;
 use datafusion::physical_plan::ExecutionPlan;
 use object_store::local::LocalFileSystem;
+use std::any::Any;
 use std::fmt::Debug;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -23,7 +24,7 @@ use zarrs_storage::{AsyncReadableListableStorageTraits, StorePrefix};
 
 /// The table provider for zarr stores.
 pub struct ZarrTable {
-    table_schema: Schema,
+    table_schema: SchemaRef,
     zarr_storage: Arc<dyn AsyncReadableListableStorageTraits + Unpin + Send>,
 }
 
@@ -35,7 +36,7 @@ impl Debug for ZarrTable {
 
 impl ZarrTable {
     pub fn new(
-        table_schema: Schema,
+        table_schema: SchemaRef,
         zarr_storage: Arc<dyn AsyncReadableListableStorageTraits + Unpin + Send>,
     ) -> Self {
         Self {
@@ -47,12 +48,12 @@ impl ZarrTable {
 
 #[async_trait]
 impl TableProvider for ZarrTable {
-    fn as_any(&self) -> &dyn std::any::Any {
+    fn as_any(&self) -> &dyn Any {
         self
     }
 
     fn schema(&self) -> SchemaRef {
-        Arc::new(self.table_schema.clone())
+        self.table_schema.clone()
     }
 
     fn table_type(&self) -> TableType {
@@ -127,15 +128,7 @@ impl TableProviderFactory for ZarrTableFactory {
         } else {
             let provided_schema: Schema = cmd.schema.as_ref().into();
             for field in provided_schema.fields() {
-                let target_type = inferred_schema
-                    .fields()
-                    .find(field.name())
-                    .ok_or(DataFusionError::Execution(format!(
-                        "Requested column {} is missing from store",
-                        field.name()
-                    )))?
-                    .1
-                    .data_type();
+                let target_type = inferred_schema.field_with_name(field.name())?.data_type();
                 if field.data_type() != target_type {
                     return Err(DataFusionError::Execution(format!(
                         "Requested column {}'s type does not match data from store",
@@ -147,14 +140,14 @@ impl TableProviderFactory for ZarrTableFactory {
             provided_schema
         };
 
-        let table_provider = ZarrTable::new(schema, store);
+        let table_provider = ZarrTable::new(Arc::new(schema), store);
         Ok(Arc::new(table_provider))
     }
 }
 
-// helpers to infer the schema from a zarr store, which involves reading
-// directory names and reading some metadata, so it's a bit trickier than
-// e.g. get a schema from a parquet file.
+/// helpers to infer the schema from a zarr store, which involves reading
+/// directory names and reading some metadata, so it's a bit trickier than
+/// e.g. get a schema from a parquet file.
 fn get_schema_type(value: &DataTypeMetadataV3) -> DfResult<DataType> {
     match value {
         DataTypeMetadataV3::Bool => Ok(DataType::Boolean),

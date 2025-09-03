@@ -85,9 +85,8 @@ pub struct ZarrScan {
 
 impl ZarrScan {
     pub(crate) fn new(zarr_config: ZarrConfig, filters: Option<Arc<dyn PhysicalExpr>>) -> Self {
-        let schema_ref = Arc::new(zarr_config.schema.clone());
         let plan_properties = PlanProperties::new(
-            EquivalenceProperties::new(schema_ref),
+            EquivalenceProperties::new(zarr_config.schema.clone()),
             Partitioning::UnknownPartitioning(1),
             EmissionType::Incremental,
             Boundedness::Bounded,
@@ -149,7 +148,7 @@ impl ExecutionPlan for ZarrScan {
         _context: Arc<datafusion::execution::TaskContext>,
     ) -> datafusion::error::Result<SendableRecordBatchStream> {
         let zarr_store = self.zarr_config.zarr_store.clone();
-        let schema_ref = Arc::new(self.zarr_config.schema.clone());
+        let schema_ref = self.zarr_config.schema.clone();
         let schema_ref_for_future = schema_ref.clone();
         let n_partitions = match self.plan_properties.partitioning {
             Partitioning::UnknownPartitioning(n) => n,

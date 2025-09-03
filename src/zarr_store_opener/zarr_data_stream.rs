@@ -27,8 +27,8 @@ use zarrs_storage::AsyncReadableListableStorageTraits;
 // schemas, etc...
 //********************************************
 
-// extract the coordinate names from the array. it is possible to
-// have an array with no coordinates.
+/// extract the coordinate names from the array. it is possible to
+/// have an array with no coordinates.
 fn get_coord_names<T: ?Sized>(arr: &Array<T>) -> ZarrQueryResult<Option<Vec<String>>> {
     if let Some(coords) = arr.dimension_names() {
         let coords: Vec<_> = coords
@@ -48,9 +48,9 @@ fn get_coord_names<T: ?Sized>(arr: &Array<T>) -> ZarrQueryResult<Option<Vec<Stri
     Ok(None)
 }
 
-// this function handles having multiple values for a given vector,
-// one per array, including some arrays that might be lower
-// dimension coordinates.
+/// this function handles having multiple values for a given vector,
+/// one per array, including some arrays that might be lower
+/// dimension coordinates.
 fn resolve_vector(
     coords: &ZarrCoordinates,
     vecs: HashMap<String, Vec<u64>>,
@@ -94,15 +94,13 @@ fn resolve_vector(
     }
 }
 
-//********************************************
-// a struct to handle coordinate variables, and "broadcasting" them
-// when reading multidimensional data.
-//********************************************
+/// A struct to handle coordinate variables, and "broadcasting" them when reading multidimensional
+/// data.
 #[derive(Debug)]
 struct ZarrCoordinates {
-    // the position of each coordinate in the overall chunk shape.
-    // the coordinates are arrays that contain data that characterises
-    // a dimension, such as time, or a longitude or latitude.
+    /// the position of each coordinate in the overall chunk shape.
+    /// the coordinates are arrays that contain data that characterises
+    /// a dimension, such as time, or a longitude or latitude.
     coord_positions: HashMap<String, u64>,
 }
 
@@ -172,20 +170,20 @@ impl ZarrCoordinates {
         Ok(Self { coord_positions })
     }
 
-    // checks if a column name corresponds to a coordinate.
+    /// checks if a column name corresponds to a coordinate.
     fn is_coordinate(&self, col: &str) -> bool {
         self.coord_positions.contains_key(col)
     }
 
-    // returns the position of a coordinate within the chunk
-    // dimensionality if the column is a coordinate, if not
-    // returns None.
+    /// returns the position of a coordinate within the chunk
+    /// dimensionality if the column is a coordinate, if not
+    /// returns None.
     fn get_coord_position(&self, col: &str) -> Option<u64> {
         self.coord_positions.get(col).cloned()
     }
 
-    // return the vector element that corresponds to a coordinate's
-    // position within the dimensionality (if the variable is a coordinate).
+    /// return the vector element that corresponds to a coordinate's
+    /// position within the dimensionality (if the variable is a coordinate).
     fn reduce_if_coord(&self, vec: Vec<u64>, col: &str) -> Vec<u64> {
         if let Some(pos) = self.coord_positions.get(col) {
             return vec![vec[*pos as usize]];
@@ -194,10 +192,10 @@ impl ZarrCoordinates {
         vec
     }
 
-    // broadacast a 1D array to a nD array if the variable is a coordinate.
-    // note that we return a 1D vector, but this is just because we map all
-    // the chunk to columnar data, so a m x n array gets mapped to a 1D
-    // vector of length m x n.
+    /// broadacast a 1D array to a nD array if the variable is a coordinate.
+    /// note that we return a 1D vector, but this is just because we map all
+    /// the chunk to columnar data, so a m x n array gets mapped to a 1D
+    /// vector of length m x n.
     fn broadcast_if_coord<T: Clone>(
         &self,
         coord_name: &str,
@@ -239,17 +237,15 @@ impl ZarrCoordinates {
     }
 }
 
-//********************************************
-// An interface to a zarr array that can be used to retrieve
-// data and then decode it.
-//********************************************
-
-// the chunk index corresponds to the chunk that is being read, the
-// coords to the coordinates for the full chunk (which can be made up
-// of one or more arrays) and the full chunk shape is relevant when
-// the chunk has some coordinate arrays, which are 1 dimensional, while
-// the non coordinate arrays can be multi dimensional. the full chunk
-// size is used to broadcast the coordinates to the full size.
+/// An interface to a zarr array that can be used to retrieve
+/// data and then decode it.
+///
+/// the chunk index corresponds to the chunk that is being read, the
+/// coords to the coordinates for the full chunk (which can be made up
+/// of one or more arrays) and the full chunk shape is relevant when
+/// the chunk has some coordinate arrays, which are 1 dimensional, while
+/// the non coordinate arrays can be multi dimensional. the full chunk
+/// size is used to broadcast the coordinates to the full size.
 struct ArrayInterface<T: AsyncReadableListableStorageTraits + ?Sized> {
     name: String,
     arr: Arc<Array<T>>,
@@ -272,10 +268,10 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized> Clone for ArrayInterface<T>
     }
 }
 
-// in most cases, we will read encoded bytes and decode them after,
-// but in the case of a missing chunk the result of the read operation
-// will be done.vin a few cases though we will read pre-decoded bytes,
-// hence why we have this enum.
+/// in most cases, we will read encoded bytes and decode them after,
+/// but in the case of a missing chunk the result of the read operation
+/// will be done.vin a few cases though we will read pre-decoded bytes,
+/// hence why we have this enum.
 enum BytesFromArray {
     Decoded(Bytes),
     Encoded(Option<Bytes>),
@@ -299,7 +295,7 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ArrayInterface<T>
         }
     }
 
-    // read the bytes from the chunk the interface was built for.
+    /// read the bytes from the chunk the interface was built for.
     async fn read_bytes(&self) -> ZarrQueryResult<BytesFromArray> {
         let chunk_grid = self.arr.chunk_grid_shape().ok_or_else(|| {
             ZarrQueryError::InvalidMetadata("Array is missing its chunk grid shape".into())
@@ -343,11 +339,11 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ArrayInterface<T>
         }
     }
 
-    // decode the chunk that was read previously read from this interface.
-    // the reason the 2 functionalities are separated is that we want to
-    // interleave the async part (reading data) with the compute part
-    // (decoding the data, creating the record batch) so that we can make
-    // progress on the latter while the former is running.
+    /// decode the chunk that was read previously read from this interface.
+    /// the reason the 2 functionalities are separated is that we want to
+    /// interleave the async part (reading data) with the compute part
+    /// (decoding the data, creating the record batch) so that we can make
+    /// progress on the latter while the former is running.
     fn decode_data(&self, bytes: BytesFromArray) -> ZarrQueryResult<ArrayRef> {
         let decoded_bytes = match bytes {
             BytesFromArray::Encoded(bytes) => {
@@ -374,7 +370,7 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ArrayInterface<T>
 
         let t = self.arr.data_type();
         macro_rules! return_array_ref {
-            ($array_t: ty, $prim_type: ty) => {
+            ($array_t: ty, $prim_type: ty) => {{
                 let arr_ref: $array_t = self
                     .coords
                     .broadcast_if_coord(
@@ -384,46 +380,22 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ArrayInterface<T>
                     )?
                     .into();
                 return Ok(Arc::new(arr_ref) as ArrayRef);
-            };
+            }};
         }
 
         match t {
-            zDataType::Bool => {
-                return_array_ref!(BooleanArray, bool);
-            }
-            zDataType::UInt8 => {
-                return_array_ref!(PrimitiveArray<UInt8Type>, u8);
-            }
-            zDataType::UInt16 => {
-                return_array_ref!(PrimitiveArray<UInt16Type>, u16);
-            }
-            zDataType::UInt32 => {
-                return_array_ref!(PrimitiveArray<UInt32Type>, u32);
-            }
-            zDataType::UInt64 => {
-                return_array_ref!(PrimitiveArray<UInt64Type>, u64);
-            }
-            zDataType::Int8 => {
-                return_array_ref!(PrimitiveArray<Int8Type>, i8);
-            }
-            zDataType::Int16 => {
-                return_array_ref!(PrimitiveArray<Int16Type>, i16);
-            }
-            zDataType::Int32 => {
-                return_array_ref!(PrimitiveArray<Int32Type>, i32);
-            }
-            zDataType::Int64 => {
-                return_array_ref!(PrimitiveArray<Int64Type>, i64);
-            }
-            zDataType::Float32 => {
-                return_array_ref!(PrimitiveArray<Float32Type>, f32);
-            }
-            zDataType::Float64 => {
-                return_array_ref!(PrimitiveArray<Float64Type>, f64);
-            }
-            zDataType::String => {
-                return_array_ref!(StringArray, String);
-            }
+            zDataType::Bool => return_array_ref!(BooleanArray, bool),
+            zDataType::UInt8 => return_array_ref!(PrimitiveArray<UInt8Type>, u8),
+            zDataType::UInt16 => return_array_ref!(PrimitiveArray<UInt16Type>, u16),
+            zDataType::UInt32 => return_array_ref!(PrimitiveArray<UInt32Type>, u32),
+            zDataType::UInt64 => return_array_ref!(PrimitiveArray<UInt64Type>, u64),
+            zDataType::Int8 => return_array_ref!(PrimitiveArray<Int8Type>, i8),
+            zDataType::Int16 => return_array_ref!(PrimitiveArray<Int16Type>, i16),
+            zDataType::Int32 => return_array_ref!(PrimitiveArray<Int32Type>, i32),
+            zDataType::Int64 => return_array_ref!(PrimitiveArray<Int64Type>, i64),
+            zDataType::Float32 => return_array_ref!(PrimitiveArray<Float32Type>, f32),
+            zDataType::Float64 => return_array_ref!(PrimitiveArray<Float64Type>, f64),
+            zDataType::String => return_array_ref!(StringArray, String),
             _ => Err(ZarrQueryError::InvalidType(format!(
                 "Unsupported type {t} from zarr metadata"
             ))),
@@ -431,10 +403,8 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ArrayInterface<T>
     }
 }
 
-//********************************************
-// A structure to accumulate zarr array data until we can output
-// the whole chunk as a record batch.
-//********************************************
+/// A structure to accumulate zarr array data until we can output
+/// the whole chunk as a record batch.
 struct ZarrInMemoryChunk {
     data: HashMap<String, ArrayRef>,
 }
@@ -450,8 +420,8 @@ impl ZarrInMemoryChunk {
         self.data.insert(arr_name, data);
     }
 
-    // the columns in the record batch will be ordered following
-    // the field names in the schema.
+    /// the columns in the record batch will be ordered following
+    /// the field names in the schema.
     fn into_record_batch(mut self, schema: &SchemaRef) -> ZarrQueryResult<RecordBatch> {
         let array_refs: Vec<(String, ArrayRef)> = schema
             .fields()
@@ -471,10 +441,8 @@ impl ZarrInMemoryChunk {
     }
 }
 
-//********************************************
-// A wrapper for a map of arrays, which will handle interleaving
-// reading and decoding data from zarr storage.
-//********************************************
+/// A wrapper for a map of arrays, which will handle interleaving
+/// reading and decoding data from zarr storage.
 struct ZarrStore<T: AsyncReadableListableStorageTraits + ?Sized> {
     arrays: HashMap<String, Arc<Array<T>>>,
     coordinates: Arc<ZarrCoordinates>,
@@ -534,9 +502,9 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrStore<T> {
         })
     }
 
-    // return the chunk shape for a given index, taking into account
-    // the array edges where the "real" chunk is smaller than the
-    // chunk size in the metadata.
+    /// return the chunk shape for a given index, taking into account
+    /// the array edges where the "real" chunk is smaller than the
+    /// chunk size in the metadata.
     fn get_chunk_shape(&self, chk_idx: &[u64]) -> ZarrQueryResult<Vec<u64>> {
         let is_edge_grid = chk_idx
             .iter()
@@ -556,8 +524,8 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrStore<T> {
         Ok(chunk_shape)
     }
 
-    // this is the main function that does the heavy lifting, getting
-    // the data from the zarr store and decoding it.
+    /// this is the main function that does the heavy lifting, getting
+    /// the data from the zarr store and decoding it.
     async fn get_chunk(
         &self,
         cols: Vec<String>,
@@ -824,11 +792,11 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrRecordBatchSt
         self.chunk_indices.pop_front()
     }
 
-    // adds a filter to avoid reading whole chunks if no values
-    // in the corresponding arrays pass the check. this not to filter
-    // out values within a chunk, we rely on datafusion's default
-    // filtering for that. basically this here is to handle filter
-    // pushdowns.
+    /// adds a filter to avoid reading whole chunks if no values
+    /// in the corresponding arrays pass the check. this not to filter
+    /// out values within a chunk, we rely on datafusion's default
+    /// filtering for that. basically this here is to handle filter
+    /// pushdowns.
     #[allow(dead_code)]
     fn with_filter(mut self, filter: ZarrChunkFilter) -> ZarrQueryResult<Self> {
         self.filter = Some(filter);
@@ -903,7 +871,8 @@ mod zarr_stream_tests {
         let (wrapper, schema) = get_lat_lon_data_store(true, 0.0, "lat_lon_data").await;
         let store = wrapper.get_store();
 
-        let stream = ZarrRecordBatchStream::try_new(store, Arc::new(schema), None, None, 1, 0)
+        let stream = ZarrRecordBatchStream::try_new(store, schema, None, None, 1, 0)
+            // let stream = ZarrRecordBatchStream::new(store, schema, None, None, 1, 0)
             .await
             .unwrap();
         let records: Vec<_> = stream.try_collect().await.unwrap();
@@ -977,7 +946,7 @@ mod zarr_stream_tests {
             get_lat_lon_data_store(false, fillvalue, "lat_lon_empty_data").await;
         let store = wrapper.get_store();
 
-        let stream = ZarrRecordBatchStream::try_new(store, Arc::new(schema), None, None, 1, 0)
+        let stream = ZarrRecordBatchStream::try_new(store, schema, None, None, 1, 0)
             .await
             .unwrap();
         let records: Vec<_> = stream.try_collect().await.unwrap();
@@ -1018,21 +987,15 @@ mod zarr_stream_tests {
             ("data".to_string(), DataType::Float64),
         ]);
 
-        let stream = ZarrRecordBatchStream::try_new(
-            store.clone(),
-            Arc::new(schema.clone()),
-            None,
-            None,
-            2,
-            0,
-        )
-        .await
-        .unwrap();
+        let stream =
+            ZarrRecordBatchStream::try_new(store.clone(), schema.clone(), None, None, 2, 0)
+                .await
+                .unwrap();
         let records: Vec<_> = stream.try_collect().await.unwrap();
         validate_names_and_types(&target_types, &records[0]);
         assert_eq!(records.len(), 5);
 
-        let stream = ZarrRecordBatchStream::try_new(store, Arc::new(schema), None, None, 2, 1)
+        let stream = ZarrRecordBatchStream::try_new(store, schema, None, None, 2, 1)
             .await
             .unwrap();
         let records: Vec<_> = stream.try_collect().await.unwrap();
@@ -1069,46 +1032,28 @@ mod zarr_stream_tests {
         // there are only 9 chunks, asking for 20 partitions, so each partition up to
         // the 9th parittion should have one batch in them, after that there should be
         // no data returned by the streams.
-        let stream = ZarrRecordBatchStream::try_new(
-            store.clone(),
-            Arc::new(schema.clone()),
-            None,
-            None,
-            20,
-            0,
-        )
-        .await
-        .unwrap();
+        let stream =
+            ZarrRecordBatchStream::try_new(store.clone(), schema.clone(), None, None, 20, 0)
+                .await
+                .unwrap();
         let records: Vec<_> = stream.try_collect().await.unwrap();
         assert_eq!(records.len(), 1);
 
-        let stream = ZarrRecordBatchStream::try_new(
-            store.clone(),
-            Arc::new(schema.clone()),
-            None,
-            None,
-            20,
-            8,
-        )
-        .await
-        .unwrap();
+        let stream =
+            ZarrRecordBatchStream::try_new(store.clone(), schema.clone(), None, None, 20, 8)
+                .await
+                .unwrap();
         let records: Vec<_> = stream.try_collect().await.unwrap();
         assert_eq!(records.len(), 1);
 
-        let stream = ZarrRecordBatchStream::try_new(
-            store.clone(),
-            Arc::new(schema.clone()),
-            None,
-            None,
-            20,
-            10,
-        )
-        .await
-        .unwrap();
+        let stream =
+            ZarrRecordBatchStream::try_new(store.clone(), schema.clone(), None, None, 20, 10)
+                .await
+                .unwrap();
         let records: Vec<_> = stream.try_collect().await.unwrap();
         assert_eq!(records.len(), 0);
 
-        let stream = ZarrRecordBatchStream::try_new(store, Arc::new(schema), None, None, 20, 19)
+        let stream = ZarrRecordBatchStream::try_new(store, schema, None, None, 20, 19)
             .await
             .unwrap();
         let records: Vec<_> = stream.try_collect().await.unwrap();

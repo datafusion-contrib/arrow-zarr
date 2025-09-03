@@ -3,8 +3,8 @@ use std::sync::Arc;
 use tokio::runtime::Handle;
 use tokio::sync::Notify;
 
-// More or less copied from here, https://github.com/apache/datafusion/blob/main/datafusion-examples/examples/thread_pools.rs
-// with a few tweaks to make this a runtime for non blockinng i/o.
+/// More or less copied from here, https://github.com/apache/datafusion/blob/main/datafusion-examples/examples/thread_pools.rs
+/// with a few tweaks to make this a runtime for non blockinng i/o.
 pub(crate) struct IoRuntime {
     /// Handle is the tokio structure for interacting with a Runtime.
     handle: Handle,
@@ -32,7 +32,7 @@ impl Drop for IoRuntime {
 }
 
 impl IoRuntime {
-    // Create a new Tokio Runtime for non-blocking tasks.
+    /// Create a new Tokio Runtime for non-blocking tasks.
     pub(crate) fn try_new() -> ZarrQueryResult<Self> {
         // So the way I'm thinking about this is I'm going to submit one
         // i/o task at a time, the point is for that task, which will be
