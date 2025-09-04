@@ -13,6 +13,7 @@ rust-version = "1.85"
 arrow = { version = "55.2.0" }
 arrow-array = { version = "55.2.0" }
 arrow-schema = { version = "55.2.0" }
+async-stream = "0.3"
 async-trait = { version = "0.1.89" }
 bytes = { version = "1.10.1" }
 datafusion = { version = "49.0.0" }
@@ -28,11 +29,7 @@ zarrs_metadata = { version = "0.3.4" }
 zarrs_object_store = { version = "0.4.0" }
 zarrs_storage = { version = "0.3.0", features = ["async"] }
 
-[features]
-
-all = []
 
 [dev-dependencies]
 ndarray = { version = "^0.16.1" }
 walkdir = { version = "2.5.0" }
-

@@ -16,6 +16,7 @@
 // under the License.
 
 use arrow::error::ArrowError;
+use datafusion::error::DataFusionError;
 use std::error::Error;
 use zarrs::array::codec::CodecError;
 use zarrs::array::{ArrayCreateError, ArrayError};
@@ -94,3 +95,15 @@ impl From<std::io::Error> for ZarrQueryError {
 
 /// A specialized [`Result`] for [`ZarrError`]s.
 pub type ZarrQueryResult<T, E = ZarrQueryError> = Result<T, E>;
+
+impl From<ZarrQueryError> for ArrowError {
+    fn from(e: ZarrQueryError) -> ArrowError {
+        ArrowError::ExternalError(Box::new(e))
+    }
+}
+
+impl From<ZarrQueryError> for DataFusionError {
+    fn from(e: ZarrQueryError) -> DataFusionError {
+        DataFusionError::External(Box::new(e))
+    }
+}
