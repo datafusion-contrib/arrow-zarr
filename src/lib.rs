@@ -43,9 +43,7 @@ mod test_utils {
     use zarrs_icechunk::AsyncIcechunkStore;
     use zarrs_object_store::AsyncObjectStore;
     use zarrs_storage::AsyncReadableWritableListableStorageTraits;
-    use zarrs_storage::{
-        AsyncReadableWritableListableStorage, AsyncWritableStorageTraits, StorePrefix,
-    };
+    use zarrs_storage::{AsyncWritableStorageTraits, StorePrefix};
 
     use walkdir::WalkDir;
 
@@ -91,6 +89,7 @@ mod test_utils {
 
     // convenience class to make sure the local icechunk repos get cleanup
     // after we're done running a test.
+    #[allow(dead_code)]
     pub(crate) struct LocalIcechunkRepoWrapper {
         store: Arc<AsyncIcechunkStore>,
         path: PathBuf,
@@ -118,6 +117,7 @@ mod test_utils {
             self.store.clone()
         }
 
+        #[allow(dead_code)]
         pub(crate) fn get_store_path(&self) -> String {
             self.path.as_os_str().to_str().unwrap().into()
         }
@@ -308,6 +308,7 @@ mod test_utils {
         (wrapper, schema)
     }
 
+    #[allow(dead_code)]
     pub(crate) async fn get_local_icechunk_repo(
         write_data: bool,
         fillvalue: f64,
