@@ -862,13 +862,13 @@ impl Stream for ZarrRecordBatchStream {
 mod zarr_stream_tests {
     use super::*;
     use crate::test_utils::{
-        get_lat_lon_data_store, validate_names_and_types, validate_primitive_column,
+        get_local_zarr_store, validate_names_and_types, validate_primitive_column,
     };
     use futures_util::TryStreamExt;
 
     #[tokio::test]
     async fn read_data_test() {
-        let (wrapper, schema) = get_lat_lon_data_store(true, 0.0, "lat_lon_data").await;
+        let (wrapper, schema) = get_local_zarr_store(true, 0.0, "lat_lon_data").await;
         let store = wrapper.get_store();
 
         let stream = ZarrRecordBatchStream::try_new(store, schema, None, None, 1, 0)
@@ -942,8 +942,7 @@ mod zarr_stream_tests {
     #[tokio::test]
     async fn read_missing_chunks_test() {
         let fillvalue = 1234.0;
-        let (wrapper, schema) =
-            get_lat_lon_data_store(false, fillvalue, "lat_lon_empty_data").await;
+        let (wrapper, schema) = get_local_zarr_store(false, fillvalue, "lat_lon_empty_data").await;
         let store = wrapper.get_store();
 
         let stream = ZarrRecordBatchStream::try_new(store, schema, None, None, 1, 0)
@@ -978,7 +977,7 @@ mod zarr_stream_tests {
     #[tokio::test]
     async fn read_with_partition_test() {
         let (wrapper, schema) =
-            get_lat_lon_data_store(true, 0.0, "lat_lon_data_with_partition").await;
+            get_local_zarr_store(true, 0.0, "lat_lon_data_with_partition").await;
         let store = wrapper.get_store();
 
         let target_types = HashMap::from([
@@ -1026,7 +1025,7 @@ mod zarr_stream_tests {
     #[tokio::test]
     async fn read_too_many_partitions_test() {
         let (wrapper, schema) =
-            get_lat_lon_data_store(true, 0.0, "lat_lon_data_too_many_partitions").await;
+            get_local_zarr_store(true, 0.0, "lat_lon_data_too_many_partition").await;
         let store = wrapper.get_store();
 
         // there are only 9 chunks, asking for 20 partitions, so each partition up to
