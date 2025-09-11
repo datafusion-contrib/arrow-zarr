@@ -23,29 +23,29 @@ pub use zarr_store_opener::ZarrRecordBatchStream;
 
 #[cfg(test)]
 mod test_utils {
+    use std::collections::HashMap;
+    use std::fmt::Debug;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
     use arrow_array::cast::AsArray;
     use arrow_array::types::*;
     use arrow_array::RecordBatch;
     use arrow_schema::{DataType as ArrowDataType, Field, Schema, SchemaRef};
     use futures::executor::block_on;
-    use icechunk::format::SnapshotId;
-    use icechunk::ObjectStorage;
-    use icechunk::Repository;
+    use icechunk::{ObjectStorage, Repository};
     use itertools::enumerate;
     use ndarray::{Array, Array1, Array2};
     use object_store::local::LocalFileSystem;
-    use std::fs;
-    use std::path::PathBuf;
-    use std::sync::Arc;
-    use std::{collections::HashMap, fmt::Debug};
+    use walkdir::WalkDir;
     use zarrs::array::{codec, ArrayBuilder, DataType, FillValue};
     use zarrs::array_subset::ArraySubset;
     use zarrs_icechunk::AsyncIcechunkStore;
     use zarrs_object_store::AsyncObjectStore;
-    use zarrs_storage::AsyncReadableWritableListableStorageTraits;
-    use zarrs_storage::{AsyncWritableStorageTraits, StorePrefix};
-
-    use walkdir::WalkDir;
+    use zarrs_storage::{
+        AsyncReadableWritableListableStorageTraits, AsyncWritableStorageTraits, StorePrefix,
+    };
 
     // convenience class to make sure the local zarr stores get cleanup
     // after we're done running a test.
@@ -56,6 +56,10 @@ mod test_utils {
 
     impl LocalZarrStoreWrapper {
         pub(crate) fn new(store_name: String) -> Self {
+            if store_name.is_empty() {
+                panic!("name for test zarr store cannot be empty!")
+            }
+
             let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(store_name);
             fs::create_dir(p.clone()).unwrap();
             let store = AsyncObjectStore::new(LocalFileSystem::new_with_prefix(p.clone()).unwrap());
@@ -97,6 +101,9 @@ mod test_utils {
 
     impl LocalIcechunkRepoWrapper {
         pub(crate) async fn new(store_name: String) -> Self {
+            if store_name.is_empty() {
+                panic!("name for test icechunk repo cannot be empty!")
+            }
             let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(store_name);
             fs::create_dir(p.clone()).unwrap();
             let repo = Repository::create(
@@ -119,11 +126,30 @@ mod test_utils {
 
         #[allow(dead_code)]
         pub(crate) fn get_store_path(&self) -> String {
-            self.path.as_os_str().to_str().unwrap().into()
+            self.path.to_str().unwrap().into()
         }
     }
 
     // TODO: Implement Drop. Just not sure how to do this cleanly yet.
+    impl Drop for LocalIcechunkRepoWrapper {
+        fn drop(&mut self) {
+            if !self
+                .path
+                .to_str()
+                .unwrap()
+                .contains(env!("CARGO_MANIFEST_DIR"))
+            {
+                panic!("should not be deleting this icechunk repo!")
+            }
+
+            //delete the different icechunk repo components one at a time.
+            fs::remove_dir_all(self.path.join("manifests")).unwrap();
+            fs::remove_dir_all(self.path.join("refs")).unwrap();
+            fs::remove_dir_all(self.path.join("snapshots")).unwrap();
+            fs::remove_dir_all(self.path.join("transactions")).unwrap();
+            fs::remove_dir(self.path.clone()).unwrap();
+        }
+    }
 
     // helpers to create some test data on the fly.
     fn get_lz4_compressor() -> codec::BloscCodec {
@@ -313,12 +339,12 @@ mod test_utils {
         write_data: bool,
         fillvalue: f64,
         dir_name: &str,
-    ) -> (LocalIcechunkRepoWrapper, SchemaRef, SnapshotId) {
+    ) -> (LocalIcechunkRepoWrapper, SchemaRef) {
         let wrapper = LocalIcechunkRepoWrapper::new(dir_name.into()).await;
         let store = wrapper.get_store();
 
         write_lat_lon_data_to_store(store.clone(), write_data, fillvalue).await;
-        let snapshot_id = store
+        let _ = store
             .session()
             .write()
             .await
@@ -331,7 +357,7 @@ mod test_utils {
             Field::new("lon", ArrowDataType::Float64, true),
         ]));
 
-        (wrapper, schema, snapshot_id)
+        (wrapper, schema)
     }
 
     pub(crate) async fn get_lat_lon_data_store(

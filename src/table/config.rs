@@ -1,12 +1,12 @@
-use arrow_schema::{DataType, Field, Fields, Schema, SchemaRef};
-use datafusion::datasource::listing::ListingTableUrl;
-use datafusion::error::{DataFusionError, Result as DfResult};
-use icechunk::format::SnapshotId;
-use icechunk::{ObjectStorage, Repository};
-use object_store::local::LocalFileSystem;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+
+use arrow_schema::{DataType, Field, Fields, Schema, SchemaRef};
+use datafusion::datasource::listing::ListingTableUrl;
+use datafusion::error::{DataFusionError, Result as DfResult};
+use icechunk::{ObjectStorage, Repository};
+use object_store::local::LocalFileSystem;
 use zarrs::array::Array;
 use zarrs_icechunk::AsyncIcechunkStore;
 use zarrs_metadata::v3::array::data_type::DataTypeMetadataV3;
@@ -56,14 +56,16 @@ impl ZarrTableConfig {
 #[derive(Clone, Debug)]
 pub(crate) enum ZarrTableUrl {
     ZarrStore(ListingTableUrl),
-    _IcechunkRepo(ListingTableUrl, SnapshotId),
+    IcechunkRepo(ListingTableUrl),
 }
 
 impl ZarrTableUrl {
     async fn get_store_pointer(
         &self,
     ) -> DfResult<Arc<dyn AsyncReadableListableStorageTraits + Unpin + Send>> {
+        // currently only local storage is supported.
         match self {
+            // this is for the case of a directory with a zarr file structure inside.
             Self::ZarrStore(table_url) => match table_url.scheme() {
                 "file" => {
                     let path = PathBuf::from("/".to_owned() + table_url.prefix().as_ref());
@@ -75,8 +77,10 @@ impl ZarrTableUrl {
                     table_url.scheme()
                 ))),
             },
-            // The below is not working currently, the repo is alawys empty.
-            Self::_IcechunkRepo(table_url, id) => match table_url.scheme() {
+
+            // this is for the case of an icechunk repo. note that here we hard code
+            // reading from the main branch, and "as of" now.
+            Self::IcechunkRepo(table_url) => match table_url.scheme() {
                 "file" => {
                     let path = PathBuf::from("/".to_owned() + table_url.prefix().as_ref());
                     let object_storage = ObjectStorage::new_local_filesystem(&path)
@@ -86,9 +90,10 @@ impl ZarrTableUrl {
                         .await
                         .map_err(|e| DataFusionError::External(Box::new(e)))?;
                     let session = repo
-                        .readonly_session(&icechunk::repository::VersionInfo::SnapshotId(
-                            id.clone(),
-                        ))
+                        .readonly_session(&icechunk::repository::VersionInfo::AsOf {
+                            branch: "main".into(),
+                            at: chrono::Utc::now(),
+                        })
                         .await
                         .map_err(|e| DataFusionError::External(Box::new(e)))?;
                     Ok(Arc::new(AsyncIcechunkStore::new(session)))
@@ -103,37 +108,39 @@ impl ZarrTableUrl {
 
     pub(crate) async fn infer_schema(&self) -> DfResult<SchemaRef> {
         let store = self.get_store_pointer().await?;
-        let dirs = store
-            .list_dir(&StorePrefix::new("").map_err(|e| DataFusionError::External(Box::new(e)))?)
+        let prefixes = store
+            .list_prefix(&StorePrefix::new("").map_err(|e| DataFusionError::External(Box::new(e)))?)
             .await
             .map_err(|e| DataFusionError::External(Box::new(e)))?;
-        let prefixes = dirs.prefixes();
         let mut fields = Vec::with_capacity(prefixes.len());
 
         for prefix in prefixes {
-            let field_name =
-                prefix
-                    .as_str()
-                    .strip_suffix("/")
-                    .ok_or(DataFusionError::Execution(
-                        "Invalid directory name in zarr store".into(),
-                    ))?;
+            if prefix.as_str().contains("zarr.json") {
+                let parent = prefix.parent();
+                let field_name =
+                    parent
+                        .as_str()
+                        .strip_suffix("/")
+                        .ok_or(DataFusionError::Execution(
+                            "Invalid directory name in zarr store".into(),
+                        ))?;
 
-            let arr = Array::async_open(store.clone(), &("/".to_owned() + field_name))
-                .await
-                .map_err(|e| DataFusionError::External(Box::new(e)))?;
-            let meta = match arr.metadata() {
-                ArrayMetadata::V3(meta) => Ok(meta),
-                _ => Err(DataFusionError::Execution(
-                    "Only Zarr v3 metadata is supported".into(),
-                )),
-            }?;
+                let arr = Array::async_open(store.clone(), &("/".to_owned() + field_name))
+                    .await
+                    .map_err(|e| DataFusionError::External(Box::new(e)))?;
+                let meta = match arr.metadata() {
+                    ArrayMetadata::V3(meta) => Ok(meta),
+                    _ => Err(DataFusionError::Execution(
+                        "Only Zarr v3 metadata is supported".into(),
+                    )),
+                }?;
 
-            fields.push(Field::new(
-                field_name,
-                get_schema_type(&meta.data_type)?,
-                true,
-            ));
+                fields.push(Field::new(
+                    field_name,
+                    get_schema_type(&meta.data_type)?,
+                    true,
+                ));
+            }
         }
 
         Ok(Arc::new(Schema::new(Fields::from(fields))))
@@ -163,7 +170,7 @@ fn get_schema_type(value: &DataTypeMetadataV3) -> DfResult<DataType> {
 #[cfg(test)]
 mod zarr_config_tests {
     use super::*;
-    use crate::test_utils::get_local_zarr_store;
+    use crate::test_utils::{get_local_icechunk_repo, get_local_zarr_store};
 
     #[tokio::test]
     async fn schema_inference_tests() {
@@ -173,6 +180,15 @@ mod zarr_config_tests {
 
         let table_url = ListingTableUrl::parse(path).unwrap();
         let zarr_table_url = ZarrTableUrl::ZarrStore(table_url);
+        let inferred_schema = zarr_table_url.infer_schema().await.unwrap();
+        assert_eq!(inferred_schema, schema);
+
+        // local icechunk repo.
+        let (wrapper, schema) = get_local_icechunk_repo(true, 0.0, "data_for_config_repo").await;
+        let path = wrapper.get_store_path();
+
+        let table_url = ListingTableUrl::parse(path).unwrap();
+        let zarr_table_url = ZarrTableUrl::IcechunkRepo(table_url);
         let inferred_schema = zarr_table_url.infer_schema().await.unwrap();
         assert_eq!(inferred_schema, schema);
     }

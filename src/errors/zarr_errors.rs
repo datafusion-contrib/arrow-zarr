@@ -15,9 +15,10 @@
 // specific language governing permissions and limitations
 // under the License.
 
+use std::error::Error;
+
 use arrow::error::ArrowError;
 use datafusion::error::DataFusionError;
-use std::error::Error;
 use zarrs::array::codec::CodecError;
 use zarrs::array::{ArrayCreateError, ArrayError};
 use zarrs_storage::{StorageError, StorePrefixError};

@@ -1,22 +1,22 @@
+use std::any::Any;
+use std::fmt;
+use std::fmt::Formatter;
+use std::sync::Arc;
+
 use arrow_schema::SchemaRef;
 use datafusion::common::Statistics;
-use datafusion::datasource::physical_plan::{FileOpener, FileScanConfig, FileSource};
-use datafusion::datasource::{
-    listing::PartitionedFile,
-    physical_plan::{FileMeta, FileOpenFuture},
+use datafusion::datasource::listing::PartitionedFile;
+use datafusion::datasource::physical_plan::{
+    FileMeta, FileOpenFuture, FileOpener, FileScanConfig, FileSource,
 };
 use datafusion::error::{DataFusionError, Result as DfResult};
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion::physical_plan::DisplayFormatType;
 use futures::StreamExt;
 use object_store::ObjectStore;
-use std::fmt;
-use std::fmt::Formatter;
-use std::sync::Arc;
 
 use super::config::ZarrTableConfig;
 use crate::ZarrRecordBatchStream;
-use std::any::Any;
 
 /// Implementation of [`FileOpener`] for zarr.
 pub(crate) struct ZarrOpener {
@@ -139,19 +139,19 @@ impl FileSource for ZarrSource {
 mod file_opener_tests {
     use std::collections::HashMap;
 
-    use super::*;
-    use crate::{
-        table::config::ZarrTableUrl,
-        test_utils::{get_local_zarr_store, validate_names_and_types, validate_primitive_column},
-    };
     use arrow::datatypes::Float64Type;
     use arrow_schema::DataType;
+    use datafusion::datasource::listing::ListingTableUrl;
     use datafusion::datasource::physical_plan::{FileGroup, FileScanConfigBuilder, FileStream};
-    use datafusion::{
-        datasource::listing::ListingTableUrl, execution::object_store::ObjectStoreUrl,
-    };
+    use datafusion::execution::object_store::ObjectStoreUrl;
     use futures_util::TryStreamExt;
     use object_store::local::LocalFileSystem;
+
+    use super::*;
+    use crate::table::config::ZarrTableUrl;
+    use crate::test_utils::{
+        get_local_zarr_store, validate_names_and_types, validate_primitive_column,
+    };
 
     #[tokio::test]
     async fn filestream_tests() {

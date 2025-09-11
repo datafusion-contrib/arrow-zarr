@@ -1,18 +1,19 @@
-use super::config::ZarrTableConfig;
-use super::scanner::ZarrScan;
-use crate::table::config::ZarrTableUrl;
-use async_trait::async_trait;
-use datafusion::arrow::datatypes::{Schema, SchemaRef};
-use datafusion::catalog::{Session, TableProviderFactory};
-use datafusion::common::not_impl_err;
-use datafusion::datasource::{listing::ListingTableUrl, TableProvider, TableType};
-use datafusion::error::{DataFusionError, Result as DfResult};
-use datafusion::logical_expr::CreateExternalTable;
-use datafusion::logical_expr::Expr;
-use datafusion::physical_plan::ExecutionPlan;
 use std::any::Any;
 use std::fmt::Debug;
 use std::sync::Arc;
+
+use async_trait::async_trait;
+use datafusion::arrow::datatypes::{Schema, SchemaRef};
+use datafusion::catalog::{Session, TableProviderFactory};
+use datafusion::datasource::listing::ListingTableUrl;
+use datafusion::datasource::{TableProvider, TableType};
+use datafusion::error::{DataFusionError, Result as DfResult};
+use datafusion::logical_expr::{CreateExternalTable, Expr};
+use datafusion::physical_plan::ExecutionPlan;
+
+use super::config::ZarrTableConfig;
+use super::scanner::ZarrScan;
+use crate::table::config::ZarrTableUrl;
 
 /// The table provider for zarr stores.
 pub struct ZarrTable {
@@ -75,9 +76,7 @@ impl TableProviderFactory for ZarrTableFactory {
     ) -> DfResult<Arc<dyn TableProvider>> {
         let table_url = match cmd.file_type.as_str() {
             "ZARR_STORE" => ZarrTableUrl::ZarrStore(ListingTableUrl::parse(&cmd.location)?),
-            "ICECHUNK_REPO" => {
-                return not_impl_err!("Support for icechunk repos not yet implemented")
-            }
+            "ICECHUNK_REPO" => ZarrTableUrl::IcechunkRepo(ListingTableUrl::parse(&cmd.location)?),
             _ => {
                 return Err(DataFusionError::Execution(format!(
                     "Unsupported file type {}",
@@ -112,14 +111,9 @@ impl TableProviderFactory for ZarrTableFactory {
 
 #[cfg(test)]
 mod table_provider_tests {
-    use arrow::array::AsArray;
     use std::collections::HashMap;
 
-    use super::*;
-    use crate::table::table_provider::ZarrTable;
-    use crate::test_utils::{
-        get_lat_lon_data_store, validate_names_and_types, validate_primitive_column,
-    };
+    use arrow::array::AsArray;
     use arrow::compute::concat_batches;
     use arrow::datatypes::Float64Type;
     use arrow_schema::DataType;
@@ -127,12 +121,14 @@ mod table_provider_tests {
     use datafusion::prelude::SessionContext;
     use futures_util::TryStreamExt;
 
-    #[tokio::test]
-    async fn read_data_test() {
-        let (wrapper, schema) =
-            get_lat_lon_data_store(true, 0.0, "lat_lon_data_for_provider").await;
-        let path = wrapper.get_store_path();
-        let table_url = ZarrTableUrl::ZarrStore(ListingTableUrl::parse(path).unwrap());
+    use super::*;
+    use crate::table::table_provider::ZarrTable;
+    use crate::test_utils::{
+        get_lat_lon_data_store, get_local_icechunk_repo, validate_names_and_types,
+        validate_primitive_column,
+    };
+
+    async fn read_and_validate(table_url: ZarrTableUrl, schema: SchemaRef) {
         let config = ZarrTableConfig::new(table_url, schema);
 
         let table_provider = ZarrTable::new(config);
@@ -176,6 +172,25 @@ mod table_provider_tests {
             &records[0],
             &[0.0, 1.0, 2.0, 8.0, 9.0, 10.0, 16.0, 17.0, 18.0],
         );
+    }
+
+    #[tokio::test]
+    async fn read_data_test() {
+        // a zarr store in a local directory.
+        let (wrapper, schema) =
+            get_lat_lon_data_store(true, 0.0, "lat_lon_data_for_provider").await;
+        let path = wrapper.get_store_path();
+        let table_url = ZarrTableUrl::ZarrStore(ListingTableUrl::parse(path).unwrap());
+
+        read_and_validate(table_url, schema).await;
+
+        // a local icechunk repo.
+        let (wrapper, schema) =
+            get_local_icechunk_repo(true, 0.0, "lat_lon_repo_for_provider").await;
+        let path = wrapper.get_store_path();
+        let table_url = ZarrTableUrl::IcechunkRepo(ListingTableUrl::parse(path).unwrap());
+
+        read_and_validate(table_url, schema).await;
     }
 
     #[tokio::test]
@@ -265,6 +280,30 @@ mod table_provider_tests {
             .values()
             .to_vec();
         assert_eq!(data1, data2);
+
+        // create a table from an icechunk repo.
+        let (wrapper, _) = get_local_icechunk_repo(true, 0.0, "lat_lon_repo_for_factory").await;
+        let table_path = wrapper.get_store_path();
+        state
+            .table_factories_mut()
+            .insert("ICECHUNK_REPO".into(), Arc::new(ZarrTableFactory {}));
+
+        let query = format!(
+            "CREATE EXTERNAL TABLE zarr_table_icechunk STORED AS ICECHUNK_REPO LOCATION '{}'",
+            table_path,
+        );
+
+        let session = SessionContext::new_with_state(state.clone());
+        session.sql(&query).await.unwrap();
+
+        let query = "SELECT lat, lon FROM zarr_table LIMIT 10";
+        let df = session.sql(query).await.unwrap();
+        let batches = df.collect().await.unwrap();
+
+        let schema = batches[0].schema();
+        let batch = concat_batches(&schema, &batches).unwrap();
+        assert_eq!(batch.num_columns(), 2);
+        assert_eq!(batch.num_rows(), 10);
     }
 
     #[tokio::test]

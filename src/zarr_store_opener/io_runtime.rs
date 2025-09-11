@@ -1,7 +1,9 @@
-use crate::errors::zarr_errors::ZarrQueryResult;
 use std::sync::Arc;
+
 use tokio::runtime::Handle;
 use tokio::sync::Notify;
+
+use crate::errors::zarr_errors::ZarrQueryResult;
 
 /// More or less copied from here, https://github.com/apache/datafusion/blob/main/datafusion-examples/examples/thread_pools.rs
 /// with a few tweaks to make this a runtime for non blockinng i/o.

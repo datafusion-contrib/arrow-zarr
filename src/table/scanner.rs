@@ -1,22 +1,22 @@
-use super::{config::ZarrTableConfig, opener::ZarrSource};
-use datafusion::datasource::{
-    listing::PartitionedFile,
-    physical_plan::{FileGroup, FileScanConfigBuilder},
+use std::any::Any;
+use std::sync::Arc;
+
+use datafusion::datasource::listing::PartitionedFile;
+use datafusion::datasource::physical_plan::{
+    FileGroup, FileScanConfigBuilder, FileSource, FileStream,
 };
 use datafusion::execution::object_store::ObjectStoreUrl;
 use datafusion::physical_expr::{EquivalenceProperties, Partitioning};
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
-use datafusion::physical_plan::{DisplayAs, DisplayFormatType};
+use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion::physical_plan::{
-    ExecutionPlan, PhysicalExpr, PlanProperties, SendableRecordBatchStream,
+    DisplayAs, DisplayFormatType, ExecutionPlan, PhysicalExpr, PlanProperties,
+    SendableRecordBatchStream,
 };
-use datafusion::{
-    datasource::physical_plan::{FileSource, FileStream},
-    physical_plan::metrics::ExecutionPlanMetricsSet,
-};
-
 use object_store::local::LocalFileSystem;
-use std::{any::Any, sync::Arc};
+
+use super::config::ZarrTableConfig;
+use super::opener::ZarrSource;
 
 #[derive(Debug, Clone)]
 pub struct ZarrScan {
@@ -129,15 +129,17 @@ impl ExecutionPlan for ZarrScan {
 
 #[cfg(test)]
 mod scanner_tests {
-    use crate::table::config::ZarrTableUrl;
-    use arrow::datatypes::Float64Type;
-    use arrow_schema::DataType;
-    use datafusion::datasource::listing::ListingTableUrl;
-    use datafusion::{config::ConfigOptions, prelude::SessionContext};
-    use futures_util::TryStreamExt;
     use std::collections::HashMap;
 
+    use arrow::datatypes::Float64Type;
+    use arrow_schema::DataType;
+    use datafusion::config::ConfigOptions;
+    use datafusion::datasource::listing::ListingTableUrl;
+    use datafusion::prelude::SessionContext;
+    use futures_util::TryStreamExt;
+
     use super::*;
+    use crate::table::config::ZarrTableUrl;
     use crate::test_utils::{
         get_lat_lon_data_store, validate_names_and_types, validate_primitive_column,
     };
