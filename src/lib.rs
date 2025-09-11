@@ -95,7 +95,6 @@ mod test_utils {
 
     // convenience class to make sure the local icechunk repos get cleanup
     // after we're done running a test.
-    #[allow(dead_code)]
     #[cfg(feature = "icechunk")]
     pub(crate) struct LocalIcechunkRepoWrapper {
         store: Arc<AsyncIcechunkStore>,
@@ -128,7 +127,6 @@ mod test_utils {
             self.store.clone()
         }
 
-        #[allow(dead_code)]
         pub(crate) fn get_store_path(&self) -> String {
             self.path.to_str().unwrap().into()
         }
