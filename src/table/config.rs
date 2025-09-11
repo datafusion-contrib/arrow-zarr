@@ -5,9 +5,11 @@ use std::sync::Arc;
 use arrow_schema::{DataType, Field, Fields, Schema, SchemaRef};
 use datafusion::datasource::listing::ListingTableUrl;
 use datafusion::error::{DataFusionError, Result as DfResult};
+#[cfg(feature = "icechunk")]
 use icechunk::{ObjectStorage, Repository};
 use object_store::local::LocalFileSystem;
 use zarrs::array::Array;
+#[cfg(feature = "icechunk")]
 use zarrs_icechunk::AsyncIcechunkStore;
 use zarrs_metadata::v3::array::data_type::DataTypeMetadataV3;
 use zarrs_metadata::ArrayMetadata;
@@ -56,6 +58,7 @@ impl ZarrTableConfig {
 #[derive(Clone, Debug)]
 pub(crate) enum ZarrTableUrl {
     ZarrStore(ListingTableUrl),
+    #[cfg(feature = "icechunk")]
     IcechunkRepo(ListingTableUrl),
 }
 
@@ -80,6 +83,7 @@ impl ZarrTableUrl {
 
             // this is for the case of an icechunk repo. note that here we hard code
             // reading from the main branch, and "as of" now.
+            #[cfg(feature = "icechunk")]
             Self::IcechunkRepo(table_url) => match table_url.scheme() {
                 "file" => {
                     let path = PathBuf::from("/".to_owned() + table_url.prefix().as_ref());
@@ -170,7 +174,9 @@ fn get_schema_type(value: &DataTypeMetadataV3) -> DfResult<DataType> {
 #[cfg(test)]
 mod zarr_config_tests {
     use super::*;
-    use crate::test_utils::{get_local_icechunk_repo, get_local_zarr_store};
+    #[cfg(feature = "icechunk")]
+    use crate::test_utils::get_local_icechunk_repo;
+    use crate::test_utils::get_local_zarr_store;
 
     #[tokio::test]
     async fn schema_inference_tests() {
@@ -184,12 +190,16 @@ mod zarr_config_tests {
         assert_eq!(inferred_schema, schema);
 
         // local icechunk repo.
-        let (wrapper, schema) = get_local_icechunk_repo(true, 0.0, "data_for_config_repo").await;
-        let path = wrapper.get_store_path();
+        #[cfg(feature = "icechunk")]
+        {
+            let (wrapper, schema) =
+                get_local_icechunk_repo(true, 0.0, "data_for_config_repo").await;
+            let path = wrapper.get_store_path();
 
-        let table_url = ListingTableUrl::parse(path).unwrap();
-        let zarr_table_url = ZarrTableUrl::IcechunkRepo(table_url);
-        let inferred_schema = zarr_table_url.infer_schema().await.unwrap();
-        assert_eq!(inferred_schema, schema);
+            let table_url = ListingTableUrl::parse(path).unwrap();
+            let zarr_table_url = ZarrTableUrl::IcechunkRepo(table_url);
+            let inferred_schema = zarr_table_url.infer_schema().await.unwrap();
+            assert_eq!(inferred_schema, schema);
+        }
     }
 }

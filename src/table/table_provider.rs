@@ -76,6 +76,7 @@ impl TableProviderFactory for ZarrTableFactory {
     ) -> DfResult<Arc<dyn TableProvider>> {
         let table_url = match cmd.file_type.as_str() {
             "ZARR_STORE" => ZarrTableUrl::ZarrStore(ListingTableUrl::parse(&cmd.location)?),
+            #[cfg(feature = "icechunk")]
             "ICECHUNK_REPO" => ZarrTableUrl::IcechunkRepo(ListingTableUrl::parse(&cmd.location)?),
             _ => {
                 return Err(DataFusionError::Execution(format!(
@@ -123,9 +124,10 @@ mod table_provider_tests {
 
     use super::*;
     use crate::table::table_provider::ZarrTable;
+    #[cfg(feature = "icechunk")]
+    use crate::test_utils::get_local_icechunk_repo;
     use crate::test_utils::{
-        get_lat_lon_data_store, get_local_icechunk_repo, validate_names_and_types,
-        validate_primitive_column,
+        get_lat_lon_data_store, validate_names_and_types, validate_primitive_column,
     };
 
     async fn read_and_validate(table_url: ZarrTableUrl, schema: SchemaRef) {
@@ -185,12 +187,15 @@ mod table_provider_tests {
         read_and_validate(table_url, schema).await;
 
         // a local icechunk repo.
-        let (wrapper, schema) =
-            get_local_icechunk_repo(true, 0.0, "lat_lon_repo_for_provider").await;
-        let path = wrapper.get_store_path();
-        let table_url = ZarrTableUrl::IcechunkRepo(ListingTableUrl::parse(path).unwrap());
+        #[cfg(feature = "icechunk")]
+        {
+            let (wrapper, schema) =
+                get_local_icechunk_repo(true, 0.0, "lat_lon_repo_for_provider").await;
+            let path = wrapper.get_store_path();
+            let table_url = ZarrTableUrl::IcechunkRepo(ListingTableUrl::parse(path).unwrap());
 
-        read_and_validate(table_url, schema).await;
+            read_and_validate(table_url, schema).await;
+        }
     }
 
     #[tokio::test]
@@ -282,28 +287,31 @@ mod table_provider_tests {
         assert_eq!(data1, data2);
 
         // create a table from an icechunk repo.
-        let (wrapper, _) = get_local_icechunk_repo(true, 0.0, "lat_lon_repo_for_factory").await;
-        let table_path = wrapper.get_store_path();
-        state
-            .table_factories_mut()
-            .insert("ICECHUNK_REPO".into(), Arc::new(ZarrTableFactory {}));
+        #[cfg(feature = "icechunk")]
+        {
+            let (wrapper, _) = get_local_icechunk_repo(true, 0.0, "lat_lon_repo_for_factory").await;
+            let table_path = wrapper.get_store_path();
+            state
+                .table_factories_mut()
+                .insert("ICECHUNK_REPO".into(), Arc::new(ZarrTableFactory {}));
 
-        let query = format!(
-            "CREATE EXTERNAL TABLE zarr_table_icechunk STORED AS ICECHUNK_REPO LOCATION '{}'",
-            table_path,
-        );
+            let query = format!(
+                "CREATE EXTERNAL TABLE zarr_table_icechunk STORED AS ICECHUNK_REPO LOCATION '{}'",
+                table_path,
+            );
 
-        let session = SessionContext::new_with_state(state.clone());
-        session.sql(&query).await.unwrap();
+            let session = SessionContext::new_with_state(state.clone());
+            session.sql(&query).await.unwrap();
 
-        let query = "SELECT lat, lon FROM zarr_table LIMIT 10";
-        let df = session.sql(query).await.unwrap();
-        let batches = df.collect().await.unwrap();
+            let query = "SELECT lat, lon FROM zarr_table LIMIT 10";
+            let df = session.sql(query).await.unwrap();
+            let batches = df.collect().await.unwrap();
 
-        let schema = batches[0].schema();
-        let batch = concat_batches(&schema, &batches).unwrap();
-        assert_eq!(batch.num_columns(), 2);
-        assert_eq!(batch.num_rows(), 10);
+            let schema = batches[0].schema();
+            let batch = concat_batches(&schema, &batches).unwrap();
+            assert_eq!(batch.num_columns(), 2);
+            assert_eq!(batch.num_rows(), 10);
+        }
     }
 
     #[tokio::test]

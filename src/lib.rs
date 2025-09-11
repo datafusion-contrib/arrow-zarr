@@ -34,6 +34,7 @@ mod test_utils {
     use arrow_array::RecordBatch;
     use arrow_schema::{DataType as ArrowDataType, Field, Schema, SchemaRef};
     use futures::executor::block_on;
+    #[cfg(feature = "icechunk")]
     use icechunk::{ObjectStorage, Repository};
     use itertools::enumerate;
     use ndarray::{Array, Array1, Array2};
@@ -41,6 +42,7 @@ mod test_utils {
     use walkdir::WalkDir;
     use zarrs::array::{codec, ArrayBuilder, DataType, FillValue};
     use zarrs::array_subset::ArraySubset;
+    #[cfg(feature = "icechunk")]
     use zarrs_icechunk::AsyncIcechunkStore;
     use zarrs_object_store::AsyncObjectStore;
     use zarrs_storage::{
@@ -94,11 +96,13 @@ mod test_utils {
     // convenience class to make sure the local icechunk repos get cleanup
     // after we're done running a test.
     #[allow(dead_code)]
+    #[cfg(feature = "icechunk")]
     pub(crate) struct LocalIcechunkRepoWrapper {
         store: Arc<AsyncIcechunkStore>,
         path: PathBuf,
     }
 
+    #[cfg(feature = "icechunk")]
     impl LocalIcechunkRepoWrapper {
         pub(crate) async fn new(store_name: String) -> Self {
             if store_name.is_empty() {
@@ -131,6 +135,7 @@ mod test_utils {
     }
 
     // TODO: Implement Drop. Just not sure how to do this cleanly yet.
+    #[cfg(feature = "icechunk")]
     impl Drop for LocalIcechunkRepoWrapper {
         fn drop(&mut self) {
             if !self
@@ -334,7 +339,7 @@ mod test_utils {
         (wrapper, schema)
     }
 
-    #[allow(dead_code)]
+    #[cfg(feature = "icechunk")]
     pub(crate) async fn get_local_icechunk_repo(
         write_data: bool,
         fillvalue: f64,

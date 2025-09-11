@@ -9,6 +9,10 @@ keywords = ["arrow"]
 edition = "2021"
 rust-version = "1.86"
 
+[features]
+default = []
+icechunk = ["dep:icechunk", "dep:zarrs_icechunk"]
+
 [dependencies]
 arrow = { version = "55.2.0" }
 arrow-array = { version = "55.2.0" }
@@ -20,14 +24,14 @@ chrono = { version = "0.4.42" }
 datafusion = { version = "49.0.0" }
 futures = { version = "0.3.31" }
 futures-util = { version = "0.3.31" }
-icechunk = { version = "0.3.8" }
+icechunk = { version = "0.3.8", optional = true }
 itertools = { version = "0.14.0" }
 object_store = { version = "0.12.0" }
 tokio = { version = "1.46.1", features = ["rt", "macros", "net"] }
 tokio-test = { version = "0.4.4" }
 zarrs = { version = "0.19.2", features = ["async"] }
 zarrs_filesystem = { version = "0.2.0" }
-zarrs_icechunk = { version = "0.3.1" }
+zarrs_icechunk = { version = "0.3.1", optional = true }
 zarrs_metadata = { version = "0.3.4" }
 zarrs_object_store = { version = "0.4.0" }
 zarrs_storage = { version = "0.3.0", features = ["async"] }
