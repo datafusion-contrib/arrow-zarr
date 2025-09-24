@@ -44,6 +44,24 @@ impl ZarrTable {
             zarr_storage,
         }
     }
+
+    pub async fn from_path(store_path: String) -> DfResult<Arc<dyn TableProvider>> {
+        let store_type = ZarrStoreType::from_str(&store_path)?;
+        let store = match store_type {
+            ZarrStoreType::LocalFolder => {
+                let p = PathBuf::from(&store_path);
+                let f = LocalFileSystem::new_with_prefix(p)?;
+                Arc::new(AsyncObjectStore::new(f))
+            }
+            ZarrStoreType::IcechunkRepo => not_impl_err!("Icechunk repos are not yet supported")?,
+        };
+
+        let schema = infer_schema(store.clone()).await?;
+        let table_schema = Arc::new(schema);
+
+        let table_provider = ZarrTable::new(table_schema, store);
+        Ok(Arc::new(table_provider))
+    }
 }
 
 #[async_trait]
