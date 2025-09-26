@@ -113,11 +113,10 @@ impl ZarrTableUrl {
 
     pub(crate) async fn infer_schema(&self) -> DfResult<SchemaRef> {
         let store = self.get_store_pointer().await?;
-        let prefixes = store
-            .list_prefix(&StorePrefix::new("").map_err(|e| DataFusionError::External(Box::new(e)))?)
-            .await
-            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+        let prefixes = store.list()
         let mut fields = Vec::with_capacity(prefixes.len());
+
+        println!("All prefixes: {}", prefixes)
 
         for prefix in prefixes {
             if prefix.as_str().contains("zarr.json") {
