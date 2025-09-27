@@ -31,7 +31,7 @@ impl ZarrScan {
         _filters: Option<Arc<dyn PhysicalExpr>>,
     ) -> Self {
         let plan_properties = PlanProperties::new(
-            EquivalenceProperties::new(zarr_config.get_schema_ref()),
+            EquivalenceProperties::new(zarr_config.get_projected_schema_ref()),
             Partitioning::UnknownPartitioning(1),
             EmissionType::Incremental,
             Boundedness::Bounded,
