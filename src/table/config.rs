@@ -122,6 +122,10 @@ impl ZarrTableUrl {
         for prefix in prefixes {
             if prefix.as_str().contains("zarr.json") {
                 let parent = prefix.parent();
+                // Skip the root zarr.json (group metadata file)
+                if parent.as_str().is_empty() {
+                    continue;
+                }
                 let field_name =
                     parent
                         .as_str()
