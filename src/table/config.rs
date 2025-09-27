@@ -52,6 +52,18 @@ impl ZarrTableConfig {
     pub(crate) fn get_schema_ref(&self) -> SchemaRef {
         self.schema_ref.clone()
     }
+
+    pub(crate) fn get_projected_schema_ref(&self) -> SchemaRef {
+        if let Some(projection) = &self.projection {
+            let projected_fields: Fields = projection
+                .iter()
+                .map(|&i| self.schema_ref.field(i).clone())
+                .collect();
+            Arc::new(Schema::new(projected_fields))
+        } else {
+            self.schema_ref.clone()
+        }
+    }
 }
 
 /// We can create a table based on a directory with a supported zarr
