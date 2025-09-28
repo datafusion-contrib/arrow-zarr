@@ -127,7 +127,7 @@ mod table_provider_tests {
     #[cfg(feature = "icechunk")]
     use crate::test_utils::get_local_icechunk_repo;
     use crate::test_utils::{
-        get_lat_lon_data_store, validate_names_and_types, validate_primitive_column,
+        get_local_zarr_store, validate_names_and_types, validate_primitive_column,
     };
 
     async fn read_and_validate(table_url: ZarrTableUrl, schema: SchemaRef) {
@@ -179,8 +179,7 @@ mod table_provider_tests {
     #[tokio::test]
     async fn read_data_test() {
         // a zarr store in a local directory.
-        let (wrapper, schema) =
-            get_lat_lon_data_store(true, 0.0, "lat_lon_data_for_provider").await;
+        let (wrapper, schema) = get_local_zarr_store(true, 0.0, "lat_lon_data_for_provider").await;
         let path = wrapper.get_store_path();
         let table_url = ZarrTableUrl::ZarrStore(ListingTableUrl::parse(path).unwrap());
 
@@ -200,7 +199,7 @@ mod table_provider_tests {
 
     #[tokio::test]
     async fn create_table_provider_test() {
-        let (wrapper, _) = get_lat_lon_data_store(true, 0.0, "lat_lon_data_for_factory").await;
+        let (wrapper, _) = get_local_zarr_store(true, 0.0, "lat_lon_data_for_factory").await;
         let mut state = SessionStateBuilder::new().build();
         let table_path = wrapper.get_store_path();
         state
@@ -316,8 +315,7 @@ mod table_provider_tests {
 
     #[tokio::test]
     async fn table_factory_error_test() {
-        let (wrapper, _) =
-            get_lat_lon_data_store(true, 0.0, "lat_lon_data_for_factory_error").await;
+        let (wrapper, _) = get_local_zarr_store(true, 0.0, "lat_lon_data_for_factory_error").await;
         let mut state = SessionStateBuilder::new().build();
         let table_path = wrapper.get_store_path();
         state
