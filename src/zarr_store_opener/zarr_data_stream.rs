@@ -35,7 +35,7 @@ fn get_coord_names<T: ?Sized>(arr: &Array<T>) -> ZarrQueryResult<Option<Vec<Stri
     if let Some(coords) = arr.dimension_names() {
         let coords: Vec<_> = coords
             .iter()
-            .map(|d| d.as_str())
+            .map(|d| d.as_ref())
             .collect::<Option<Vec<_>>>()
             .ok_or(ZarrQueryError::InvalidMetadata(
                 "Coodrinates without a name are not supported".into(),
@@ -299,10 +299,7 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ArrayInterface<T>
 
     /// read the bytes from the chunk the interface was built for.
     async fn read_bytes(&self) -> ZarrQueryResult<BytesFromArray> {
-        let chunk_grid = self.arr.chunk_grid_shape().ok_or_else(|| {
-            ZarrQueryError::InvalidMetadata("Array is missing its chunk grid shape".into())
-        })?;
-
+        let chunk_grid = self.arr.chunk_grid_shape();
         let is_edge_grid = self
             .chk_index
             .iter()
@@ -473,13 +470,7 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrStore<T> {
 
         let mut chk_grid_shapes: HashMap<String, Vec<u64>> = HashMap::new();
         for (k, arr) in arrays.iter() {
-            chk_grid_shapes.insert(
-                k.to_owned(),
-                arr.chunk_grid_shape()
-                    .ok_or(ZarrQueryError::InvalidMetadata(
-                        "Array is missing its chunk grid shape".into(),
-                    ))?,
-            );
+            chk_grid_shapes.insert(k.to_owned(), arr.chunk_grid_shape().clone());
         }
         let chunk_grid_shape = resolve_vector(&coordinates, chk_grid_shapes)?;
 
@@ -656,7 +647,7 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrRecordBatchSt
     async fn new(
         store: Arc<T>,
         schema_ref: SchemaRef,
-        group: Option<String>,
+        prefix: Option<String>,
         projection: Option<Vec<usize>>,
         n_partitions: usize,
         partition: usize,
@@ -675,12 +666,15 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrRecordBatchSt
             None => schema_ref.clone(),
         };
 
-        // any groups the actual arrays fall under (e.g. /some_group/array1,
-        // /some_group/array2, etc...)
-        let grp = if let Some(group) = group {
-            [group, "/".into()].join("")
+        // the prefix is necessary when reading from some remote
+        // stores that don't work off of the url and require a
+        // prefix. for example aws s3 object store doesn't seem
+        // to use the url, just the bucket, so the path to the
+        // actual zarr store needs to be provided separately.
+        let prefix = if let Some(prefix) = prefix {
+            ["/".into(), prefix].join("")
         } else {
-            "".to_string()
+            "/".to_string()
         };
 
         // this will extract column (i.e. array) names based (possibly
@@ -694,8 +688,8 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrRecordBatchSt
         // open all the arrays based on the column names.
         let mut arrays: HashMap<String, Array<T>> = HashMap::new();
         for col in &cols {
-            let path = PathBuf::from(&grp)
-                .join(["/", col].join(""))
+            let path = PathBuf::from(&prefix)
+                .join(col)
                 .into_os_string()
                 .to_str()
                 .ok_or(ZarrQueryError::InvalidMetadata(
@@ -821,7 +815,7 @@ impl ZarrRecordBatchStream {
     pub async fn try_new<T: AsyncReadableListableStorageTraits + ?Sized + 'static>(
         store: Arc<T>,
         schema_ref: SchemaRef,
-        group: Option<String>,
+        prefix: Option<String>,
         projection: Option<Vec<usize>>,
         n_partitions: usize,
         partition: usize,
@@ -829,7 +823,7 @@ impl ZarrRecordBatchStream {
         let inner = ZarrRecordBatchStreamInner::new(
             store,
             schema_ref,
-            group,
+            prefix,
             projection,
             n_partitions,
             partition,
