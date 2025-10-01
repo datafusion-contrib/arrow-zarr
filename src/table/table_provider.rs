@@ -30,6 +30,15 @@ impl ZarrTable {
     pub fn new(table_config: ZarrTableConfig) -> Self {
         Self { table_config }
     }
+
+    pub async fn from_path(path: String) -> Self {
+        let table_url = ListingTableUrl::parse(path).unwrap();
+        // TODO(alxmrs): Figure out how to optionally support icechunk
+        let zarr_url = ZarrTableUrl::ZarrStore(table_url);
+        let schema = zarr_url.infer_schema().await.unwrap();
+        let table_config = ZarrTableConfig::new(zarr_url, schema);
+        Self { table_config }
+    }
 }
 
 #[async_trait]
