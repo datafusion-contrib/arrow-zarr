@@ -1,31 +1,23 @@
-use super::config::ZarrConfig;
-use super::scanner::ZarrScan;
-use arrow_schema::{DataType, Field, Fields};
+use std::any::Any;
+use std::fmt::Debug;
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use datafusion::arrow::datatypes::{Schema, SchemaRef};
 use datafusion::catalog::{Session, TableProviderFactory};
-use datafusion::common::not_impl_err;
+use datafusion::datasource::listing::ListingTableUrl;
 use datafusion::datasource::{TableProvider, TableType};
 use datafusion::error::{DataFusionError, Result as DfResult};
-use datafusion::logical_expr::CreateExternalTable;
-use datafusion::logical_expr::Expr;
+use datafusion::logical_expr::{CreateExternalTable, Expr};
 use datafusion::physical_plan::ExecutionPlan;
-use object_store::local::LocalFileSystem;
-use std::any::Any;
-use std::fmt::Debug;
-use std::path::PathBuf;
-use std::str::FromStr;
-use std::sync::Arc;
-use zarrs::array::Array;
-use zarrs_metadata::v3::array::data_type::DataTypeMetadataV3;
-use zarrs_metadata::ArrayMetadata;
-use zarrs_object_store::AsyncObjectStore;
-use zarrs_storage::{AsyncReadableListableStorageTraits, StorePrefix};
+
+use super::config::ZarrTableConfig;
+use super::scanner::ZarrScan;
+use crate::table::config::ZarrTableUrl;
 
 /// The table provider for zarr stores.
 pub struct ZarrTable {
-    table_schema: SchemaRef,
-    zarr_storage: Arc<dyn AsyncReadableListableStorageTraits + Unpin + Send>,
+    table_config: ZarrTableConfig,
 }
 
 impl Debug for ZarrTable {
@@ -35,14 +27,8 @@ impl Debug for ZarrTable {
 }
 
 impl ZarrTable {
-    pub fn new(
-        table_schema: SchemaRef,
-        zarr_storage: Arc<dyn AsyncReadableListableStorageTraits + Unpin + Send>,
-    ) -> Self {
-        Self {
-            table_schema,
-            zarr_storage,
-        }
+    pub fn new(table_config: ZarrTableConfig) -> Self {
+        Self { table_config }
     }
 }
 
@@ -53,7 +39,7 @@ impl TableProvider for ZarrTable {
     }
 
     fn schema(&self) -> SchemaRef {
-        self.table_schema.clone()
+        self.table_config.get_schema_ref()
     }
 
     fn table_type(&self) -> TableType {
@@ -67,7 +53,7 @@ impl TableProvider for ZarrTable {
         _filters: &[Expr],
         _limit: Option<usize>,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
-        let mut config = ZarrConfig::new(self.zarr_storage.clone(), self.table_schema.clone());
+        let mut config = self.table_config.clone();
         if let Some(proj) = projection {
             config = config.with_projection(proj.to_vec());
         }
@@ -81,30 +67,6 @@ impl TableProvider for ZarrTable {
 #[derive(Debug)]
 pub struct ZarrTableFactory {}
 
-enum ZarrStoreType {
-    LocalFolder,
-    IcechunkRepo,
-}
-
-impl FromStr for ZarrStoreType {
-    type Err = DataFusionError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let e = match s {
-            "ZARR_LOCAL_FOLDER" => Self::LocalFolder,
-            "ICECHUNK_REPO" => Self::IcechunkRepo,
-            _ => {
-                return Err(DataFusionError::Execution(format!(
-                    "Invalid file type {}",
-                    s
-                )))
-            }
-        };
-
-        Ok(e)
-    }
-}
-
 #[async_trait]
 impl TableProviderFactory for ZarrTableFactory {
     async fn create(
@@ -112,17 +74,19 @@ impl TableProviderFactory for ZarrTableFactory {
         _state: &dyn Session,
         cmd: &CreateExternalTable,
     ) -> DfResult<Arc<dyn TableProvider>> {
-        let store_type = ZarrStoreType::from_str(&cmd.file_type)?;
-        let store = match store_type {
-            ZarrStoreType::LocalFolder => {
-                let p = PathBuf::from(cmd.location.clone());
-                let f = LocalFileSystem::new_with_prefix(p.clone())?;
-                Arc::new(AsyncObjectStore::new(f))
+        let table_url = match cmd.file_type.as_str() {
+            "ZARR_STORE" => ZarrTableUrl::ZarrStore(ListingTableUrl::parse(&cmd.location)?),
+            #[cfg(feature = "icechunk")]
+            "ICECHUNK_REPO" => ZarrTableUrl::IcechunkRepo(ListingTableUrl::parse(&cmd.location)?),
+            _ => {
+                return Err(DataFusionError::Execution(format!(
+                    "Unsupported file type {}",
+                    cmd.file_type
+                )))
             }
-            ZarrStoreType::IcechunkRepo => not_impl_err!("Icechunk repos are not yet supported")?,
         };
 
-        let inferred_schema = infer_schema(store.clone()).await?;
+        let inferred_schema = table_url.infer_schema().await?;
         let schema = if cmd.schema.fields().is_empty() {
             inferred_schema
         } else {
@@ -137,83 +101,20 @@ impl TableProviderFactory for ZarrTableFactory {
                 }
             }
 
-            provided_schema
+            Arc::new(provided_schema)
         };
 
-        let table_provider = ZarrTable::new(Arc::new(schema), store);
+        let zarr_config = ZarrTableConfig::new(table_url, schema);
+        let table_provider = ZarrTable::new(zarr_config);
         Ok(Arc::new(table_provider))
     }
 }
 
-/// helpers to infer the schema from a zarr store, which involves reading
-/// directory names and reading some metadata, so it's a bit trickier than
-/// e.g. get a schema from a parquet file.
-fn get_schema_type(value: &DataTypeMetadataV3) -> DfResult<DataType> {
-    match value {
-        DataTypeMetadataV3::Bool => Ok(DataType::Boolean),
-        DataTypeMetadataV3::UInt8 => Ok(DataType::UInt8),
-        DataTypeMetadataV3::UInt16 => Ok(DataType::UInt16),
-        DataTypeMetadataV3::UInt32 => Ok(DataType::UInt32),
-        DataTypeMetadataV3::UInt64 => Ok(DataType::UInt64),
-        DataTypeMetadataV3::Int8 => Ok(DataType::Int8),
-        DataTypeMetadataV3::Int16 => Ok(DataType::Int16),
-        DataTypeMetadataV3::Int32 => Ok(DataType::Int32),
-        DataTypeMetadataV3::Int64 => Ok(DataType::Int64),
-        DataTypeMetadataV3::Float32 => Ok(DataType::Float32),
-        DataTypeMetadataV3::Float64 => Ok(DataType::Float64),
-        DataTypeMetadataV3::String => Ok(DataType::Utf8),
-        _ => Err(DataFusionError::Execution(format!(
-            "Unsupported type {value} from zarr metadata"
-        ))),
-    }
-}
-
-async fn infer_schema(store: Arc<dyn AsyncReadableListableStorageTraits>) -> DfResult<Schema> {
-    let dirs = store
-        .list_dir(&StorePrefix::new("").map_err(|e| DataFusionError::External(Box::new(e)))?)
-        .await
-        .map_err(|e| DataFusionError::External(Box::new(e)))?;
-    let prefixes = dirs.prefixes();
-    let mut fields = Vec::with_capacity(prefixes.len());
-
-    for prefix in prefixes {
-        let field_name = prefix
-            .as_str()
-            .strip_suffix("/")
-            .ok_or(DataFusionError::Execution(
-                "Invalid directory name in zarr store".into(),
-            ))?;
-
-        let arr = Array::async_open(store.clone(), &("/".to_owned() + field_name))
-            .await
-            .map_err(|e| DataFusionError::External(Box::new(e)))?;
-        let meta = match arr.metadata() {
-            ArrayMetadata::V3(meta) => Ok(meta),
-            _ => Err(DataFusionError::Execution(
-                "Only Zarr v3 metadata is supported".into(),
-            )),
-        }?;
-
-        fields.push(Field::new(
-            field_name,
-            get_schema_type(&meta.data_type)?,
-            true,
-        ));
-    }
-
-    Ok(Schema::new(Fields::from(fields)))
-}
-
 #[cfg(test)]
 mod table_provider_tests {
-    use arrow::array::AsArray;
     use std::collections::HashMap;
 
-    use super::*;
-    use crate::table::table_provider::ZarrTable;
-    use crate::test_utils::{
-        get_lat_lon_data_store, validate_names_and_types, validate_primitive_column,
-    };
+    use arrow::array::AsArray;
     use arrow::compute::concat_batches;
     use arrow::datatypes::Float64Type;
     use arrow_schema::DataType;
@@ -221,13 +122,18 @@ mod table_provider_tests {
     use datafusion::prelude::SessionContext;
     use futures_util::TryStreamExt;
 
-    #[tokio::test]
-    async fn read_data_test() {
-        let (wrapper, schema) =
-            get_lat_lon_data_store(true, 0.0, "lat_lon_data_for_provider").await;
-        let store = wrapper.get_store();
+    use super::*;
+    use crate::table::table_provider::ZarrTable;
+    #[cfg(feature = "icechunk")]
+    use crate::test_utils::get_local_icechunk_repo;
+    use crate::test_utils::{
+        get_lat_lon_data_store, validate_names_and_types, validate_primitive_column,
+    };
 
-        let table_provider = ZarrTable::new(schema, store);
+    async fn read_and_validate(table_url: ZarrTableUrl, schema: SchemaRef) {
+        let config = ZarrTableConfig::new(table_url, schema);
+
+        let table_provider = ZarrTable::new(config);
         let state = SessionStateBuilder::new().build();
         let session = SessionContext::new();
 
@@ -271,17 +177,39 @@ mod table_provider_tests {
     }
 
     #[tokio::test]
+    async fn read_data_test() {
+        // a zarr store in a local directory.
+        let (wrapper, schema) =
+            get_lat_lon_data_store(true, 0.0, "lat_lon_data_for_provider").await;
+        let path = wrapper.get_store_path();
+        let table_url = ZarrTableUrl::ZarrStore(ListingTableUrl::parse(path).unwrap());
+
+        read_and_validate(table_url, schema).await;
+
+        // a local icechunk repo.
+        #[cfg(feature = "icechunk")]
+        {
+            let (wrapper, schema) =
+                get_local_icechunk_repo(true, 0.0, "lat_lon_repo_for_provider").await;
+            let path = wrapper.get_store_path();
+            let table_url = ZarrTableUrl::IcechunkRepo(ListingTableUrl::parse(path).unwrap());
+
+            read_and_validate(table_url, schema).await;
+        }
+    }
+
+    #[tokio::test]
     async fn create_table_provider_test() {
         let (wrapper, _) = get_lat_lon_data_store(true, 0.0, "lat_lon_data_for_factory").await;
         let mut state = SessionStateBuilder::new().build();
         let table_path = wrapper.get_store_path();
         state
             .table_factories_mut()
-            .insert("ZARR_LOCAL_FOLDER".into(), Arc::new(ZarrTableFactory {}));
+            .insert("ZARR_STORE".into(), Arc::new(ZarrTableFactory {}));
 
         // create a table with 2 explicitly selected columns
         let query = format!(
-            "CREATE EXTERNAL TABLE zarr_table_partial(lat double, lon double) STORED AS ZARR_LOCAL_FOLDER LOCATION '{}'",
+            "CREATE EXTERNAL TABLE zarr_table_partial(lat double, lon double) STORED AS ZARR_STORE LOCATION '{}'",
             table_path,
         );
 
@@ -301,7 +229,7 @@ mod table_provider_tests {
 
         // create a table, with 3 columns, lat, lon and data.
         let query = format!(
-            "CREATE EXTERNAL TABLE zarr_table STORED AS ZARR_LOCAL_FOLDER LOCATION '{}'",
+            "CREATE EXTERNAL TABLE zarr_table STORED AS ZARR_STORE LOCATION '{}'",
             table_path,
         );
 
@@ -357,6 +285,33 @@ mod table_provider_tests {
             .values()
             .to_vec();
         assert_eq!(data1, data2);
+
+        // create a table from an icechunk repo.
+        #[cfg(feature = "icechunk")]
+        {
+            let (wrapper, _) = get_local_icechunk_repo(true, 0.0, "lat_lon_repo_for_factory").await;
+            let table_path = wrapper.get_store_path();
+            state
+                .table_factories_mut()
+                .insert("ICECHUNK_REPO".into(), Arc::new(ZarrTableFactory {}));
+
+            let query = format!(
+                "CREATE EXTERNAL TABLE zarr_table_icechunk STORED AS ICECHUNK_REPO LOCATION '{}'",
+                table_path,
+            );
+
+            let session = SessionContext::new_with_state(state.clone());
+            session.sql(&query).await.unwrap();
+
+            let query = "SELECT lat, lon FROM zarr_table LIMIT 10";
+            let df = session.sql(query).await.unwrap();
+            let batches = df.collect().await.unwrap();
+
+            let schema = batches[0].schema();
+            let batch = concat_batches(&schema, &batches).unwrap();
+            assert_eq!(batch.num_columns(), 2);
+            assert_eq!(batch.num_rows(), 10);
+        }
     }
 
     #[tokio::test]
@@ -367,12 +322,12 @@ mod table_provider_tests {
         let table_path = wrapper.get_store_path();
         state
             .table_factories_mut()
-            .insert("ZARR_LOCAL_FOLDER".into(), Arc::new(ZarrTableFactory {}));
+            .insert("ZARR_STORE".into(), Arc::new(ZarrTableFactory {}));
 
         // create a table with 2 explicitly selected columns, but the names
         // are wrong so it should error out.
         let query = format!(
-            "CREATE EXTERNAL TABLE zarr_table(latitude double, longitude double) STORED AS ZARR_LOCAL_FOLDER LOCATION '{}'",
+            "CREATE EXTERNAL TABLE zarr_table(latitude double, longitude double) STORED AS ZARR_STORE LOCATION '{}'",
             table_path,
         );
 
@@ -383,7 +338,7 @@ mod table_provider_tests {
             Err(e) => {
                 assert_eq!(
                     e.to_string(),
-                    "Execution error: Requested column latitude is missing from store"
+                    "Arrow error: Schema error: Unable to get field named \"latitude\". Valid fields: [\"data\", \"lat\", \"lon\"]"
                 );
             }
         }
@@ -391,7 +346,7 @@ mod table_provider_tests {
         // create a table with 2 explicitly selected columns, but the type for the
         // columns are wrong so it should error out.
         let query = format!(
-            "CREATE EXTERNAL TABLE zarr_table(lat int, lon int) STORED AS ZARR_LOCAL_FOLDER LOCATION '{}'",
+            "CREATE EXTERNAL TABLE zarr_table(lat int, lon int) STORED AS ZARR_STORE LOCATION '{}'",
             table_path,
         );
 

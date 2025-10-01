@@ -1,5 +1,11 @@
-use super::{filter::ZarrChunkFilter, io_runtime::IoRuntime};
-use crate::errors::zarr_errors::{ZarrQueryError, ZarrQueryResult};
+use std::borrow::Cow;
+use std::cmp::min;
+use std::collections::{HashMap, VecDeque};
+use std::path::PathBuf;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::{Context, Poll};
+
 use arrow::array::*;
 use arrow::datatypes::*;
 use arrow::record_batch::RecordBatch;
@@ -8,19 +14,15 @@ use async_stream::try_stream;
 use bytes::Bytes;
 use futures::stream::{BoxStream, Stream};
 use itertools::iproduct;
-use std::borrow::Cow;
-use std::cmp::min;
-use std::collections::HashMap;
-use std::collections::VecDeque;
-use std::path::PathBuf;
-use std::pin::Pin;
-use std::sync::Arc;
-use std::task::{Context, Poll};
 use tokio::task::JoinSet;
 use zarrs::array::codec::{ArrayToBytesCodecTraits, CodecOptions};
 use zarrs::array::{Array, ArrayBytes, ArraySize, DataType as zDataType, ElementOwned};
 use zarrs::array_subset::ArraySubset;
 use zarrs_storage::AsyncReadableListableStorageTraits;
+
+use super::filter::ZarrChunkFilter;
+use super::io_runtime::IoRuntime;
+use crate::errors::zarr_errors::{ZarrQueryError, ZarrQueryResult};
 
 //********************************************
 // various utils to handle metadata from the zarr array, data types,
@@ -860,15 +862,16 @@ impl Stream for ZarrRecordBatchStream {
 
 #[cfg(test)]
 mod zarr_stream_tests {
+    use futures_util::TryStreamExt;
+
     use super::*;
     use crate::test_utils::{
-        get_lat_lon_data_store, validate_names_and_types, validate_primitive_column,
+        get_local_zarr_store, validate_names_and_types, validate_primitive_column,
     };
-    use futures_util::TryStreamExt;
 
     #[tokio::test]
     async fn read_data_test() {
-        let (wrapper, schema) = get_lat_lon_data_store(true, 0.0, "lat_lon_data").await;
+        let (wrapper, schema) = get_local_zarr_store(true, 0.0, "lat_lon_data").await;
         let store = wrapper.get_store();
 
         let stream = ZarrRecordBatchStream::try_new(store, schema, None, None, 1, 0)
@@ -942,8 +945,7 @@ mod zarr_stream_tests {
     #[tokio::test]
     async fn read_missing_chunks_test() {
         let fillvalue = 1234.0;
-        let (wrapper, schema) =
-            get_lat_lon_data_store(false, fillvalue, "lat_lon_empty_data").await;
+        let (wrapper, schema) = get_local_zarr_store(false, fillvalue, "lat_lon_empty_data").await;
         let store = wrapper.get_store();
 
         let stream = ZarrRecordBatchStream::try_new(store, schema, None, None, 1, 0)
@@ -978,7 +980,7 @@ mod zarr_stream_tests {
     #[tokio::test]
     async fn read_with_partition_test() {
         let (wrapper, schema) =
-            get_lat_lon_data_store(true, 0.0, "lat_lon_data_with_partition").await;
+            get_local_zarr_store(true, 0.0, "lat_lon_data_with_partition").await;
         let store = wrapper.get_store();
 
         let target_types = HashMap::from([
@@ -1026,7 +1028,7 @@ mod zarr_stream_tests {
     #[tokio::test]
     async fn read_too_many_partitions_test() {
         let (wrapper, schema) =
-            get_lat_lon_data_store(true, 0.0, "lat_lon_data_too_many_partitions").await;
+            get_local_zarr_store(true, 0.0, "lat_lon_data_too_many_partition").await;
         let store = wrapper.get_store();
 
         // there are only 9 chunks, asking for 20 partitions, so each partition up to

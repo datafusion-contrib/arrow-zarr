@@ -1,10 +1,9 @@
+use std::sync::Arc;
+
 use arrow_array::{BooleanArray, RecordBatch};
-use arrow_schema::ArrowError;
-use arrow_schema::Schema;
-use arrow_schema::SchemaRef;
+use arrow_schema::{ArrowError, Schema, SchemaRef};
 use datafusion::physical_expr::PhysicalExpr;
 use itertools::Itertools;
-use std::sync::Arc;
 
 /// A predicate operating on [`RecordBatch`].
 pub trait ZarrArrowPredicate: Send + 'static {
@@ -94,11 +93,11 @@ impl ZarrChunkFilter {
 #[cfg(test)]
 #[allow(unused_imports)]
 mod filter_tests {
-    use arrow::compute::kernels::cmp::eq;
-    use arrow_array::RecordBatch;
-    use arrow_array::{ArrayRef, BooleanArray, Float64Array};
-    use arrow_schema::{DataType, Field, Schema};
     use std::sync::Arc;
+
+    use arrow::compute::kernels::cmp::eq;
+    use arrow_array::{ArrayRef, BooleanArray, Float64Array, RecordBatch};
+    use arrow_schema::{DataType, Field, Schema};
 
     use super::*;
 

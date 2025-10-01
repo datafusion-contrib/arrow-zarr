@@ -1,92 +1,37 @@
-use super::config::ZarrConfig;
-use crate::zarr_store_opener::zarr_data_stream::ZarrRecordBatchStream;
-use arrow::record_batch::RecordBatch;
-use arrow_schema::ArrowError;
-use datafusion::arrow::datatypes::SchemaRef;
-use datafusion::datasource::physical_plan::FileOpenFuture;
-use datafusion::error::DataFusionError;
+use std::any::Any;
+use std::sync::Arc;
+
+use datafusion::datasource::listing::PartitionedFile;
+use datafusion::datasource::physical_plan::{
+    FileGroup, FileScanConfigBuilder, FileSource, FileStream,
+};
+use datafusion::execution::object_store::ObjectStoreUrl;
 use datafusion::physical_expr::{EquivalenceProperties, Partitioning};
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
-use datafusion::physical_plan::{DisplayAs, DisplayFormatType};
+use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion::physical_plan::{
-    ExecutionPlan, PhysicalExpr, PlanProperties, RecordBatchStream, SendableRecordBatchStream,
+    DisplayAs, DisplayFormatType, ExecutionPlan, PhysicalExpr, PlanProperties,
+    SendableRecordBatchStream,
 };
-use futures::{ready, stream::BoxStream, FutureExt, StreamExt};
-use futures_util::{
-    task::{Context, Poll},
-    Stream,
-};
-use std::{any::Any, pin::Pin, sync::Arc};
+use object_store::local::LocalFileSystem;
 
-enum StreamWrapperState {
-    OpeningInnerStream(FileOpenFuture),
-    InnerStreamReady(BoxStream<'static, Result<RecordBatch, ArrowError>>),
-    Error,
-}
-struct StreamWrapper {
-    schema_ref: SchemaRef,
-    state: StreamWrapperState,
-}
-
-impl StreamWrapper {
-    fn new(future: FileOpenFuture, schema_ref: SchemaRef) -> Self {
-        Self {
-            schema_ref,
-            state: StreamWrapperState::OpeningInnerStream(future),
-        }
-    }
-}
-
-impl Stream for StreamWrapper {
-    type Item = Result<RecordBatch, DataFusionError>;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        loop {
-            match &mut self.state {
-                StreamWrapperState::OpeningInnerStream(future) => {
-                    match ready!(future.poll_unpin(cx)) {
-                        Ok(stream) => {
-                            self.state = StreamWrapperState::InnerStreamReady(stream);
-                        }
-                        Err(e) => {
-                            return Poll::Ready(Some(Err(e)));
-                        }
-                    }
-                }
-                StreamWrapperState::InnerStreamReady(stream) => {
-                    match ready!(stream.poll_next_unpin(cx)) {
-                        Some(Ok(batch)) => return Poll::Ready(Some(Ok(batch))),
-                        Some(Err(e)) => {
-                            self.state = StreamWrapperState::Error;
-                            return Poll::Ready(Some(Err(e.into())));
-                        }
-                        None => return Poll::Ready(None),
-                    }
-                }
-                StreamWrapperState::Error => return Poll::Ready(None),
-            }
-        }
-    }
-}
-
-impl RecordBatchStream for StreamWrapper {
-    fn schema(&self) -> SchemaRef {
-        self.schema_ref.clone()
-    }
-}
+use super::config::ZarrTableConfig;
+use super::opener::ZarrSource;
 
 #[derive(Debug, Clone)]
 pub struct ZarrScan {
-    zarr_config: ZarrConfig,
-    #[allow(dead_code)]
-    filters: Option<Arc<dyn PhysicalExpr>>,
+    zarr_config: ZarrTableConfig,
+    _filters: Option<Arc<dyn PhysicalExpr>>,
     plan_properties: PlanProperties,
 }
 
 impl ZarrScan {
-    pub(crate) fn new(zarr_config: ZarrConfig, filters: Option<Arc<dyn PhysicalExpr>>) -> Self {
+    pub(crate) fn new(
+        zarr_config: ZarrTableConfig,
+        _filters: Option<Arc<dyn PhysicalExpr>>,
+    ) -> Self {
         let plan_properties = PlanProperties::new(
-            EquivalenceProperties::new(zarr_config.schema.clone()),
+            EquivalenceProperties::new(zarr_config.get_schema_ref()),
             Partitioning::UnknownPartitioning(1),
             EmissionType::Incremental,
             Boundedness::Bounded,
@@ -94,7 +39,7 @@ impl ZarrScan {
 
         Self {
             zarr_config,
-            filters,
+            _filters,
             plan_properties,
         }
     }
@@ -147,9 +92,6 @@ impl ExecutionPlan for ZarrScan {
         partition: usize,
         _context: Arc<datafusion::execution::TaskContext>,
     ) -> datafusion::error::Result<SendableRecordBatchStream> {
-        let zarr_store = self.zarr_config.zarr_store.clone();
-        let schema_ref = self.zarr_config.schema.clone();
-        let schema_ref_for_future = schema_ref.clone();
         let n_partitions = match self.plan_properties.partitioning {
             Partitioning::UnknownPartitioning(n) => n,
             _ => {
@@ -159,22 +101,29 @@ impl ExecutionPlan for ZarrScan {
             }
         };
 
-        let projection = self.zarr_config.projection.clone();
-        let stream: FileOpenFuture = Box::pin(async move {
-            let inner_stream = ZarrRecordBatchStream::try_new(
-                zarr_store,
-                schema_ref_for_future,
-                None,
-                projection,
-                n_partitions,
-                partition,
-            )
-            .await
-            .map_err(|e| DataFusionError::External(Box::new(e)))?;
-            Ok(inner_stream.boxed())
-        });
-        let adapter = StreamWrapper::new(stream, schema_ref);
-        Ok(Box::pin(adapter))
+        let zarr_source = ZarrSource::new(self.zarr_config.clone(), n_partitions);
+        let file_groups = vec![FileGroup::new(vec![PartitionedFile::new("", 0)])];
+        let file_scan_config = FileScanConfigBuilder::new(
+            ObjectStoreUrl::parse("file://").unwrap(),
+            self.zarr_config.get_schema_ref(),
+            Arc::new(zarr_source.clone()),
+        )
+        .with_file_groups(file_groups)
+        .with_projection(self.zarr_config.get_projection())
+        .build();
+
+        let dummy_object_store = Arc::new(LocalFileSystem::new());
+        let file_opener =
+            zarr_source.create_file_opener(dummy_object_store, &file_scan_config, partition);
+        let metrics = ExecutionPlanMetricsSet::default();
+
+        // Note: the "partition" argument is hardcoded to 0 here. We are not making
+        // use of most of the logic in the file stream, for example the partitioning
+        // logic is handled in the zarr stream object, so we need to effectively
+        // "disable" it in the file stream obejct by always setting it to 0.
+        let file_stream = FileStream::new(&file_scan_config, 0, file_opener, &metrics).unwrap();
+
+        Ok(Box::pin(file_stream))
     }
 }
 
@@ -184,10 +133,13 @@ mod scanner_tests {
 
     use arrow::datatypes::Float64Type;
     use arrow_schema::DataType;
-    use datafusion::{config::ConfigOptions, prelude::SessionContext};
+    use datafusion::config::ConfigOptions;
+    use datafusion::datasource::listing::ListingTableUrl;
+    use datafusion::prelude::SessionContext;
     use futures_util::TryStreamExt;
 
     use super::*;
+    use crate::table::config::ZarrTableUrl;
     use crate::test_utils::{
         get_lat_lon_data_store, validate_names_and_types, validate_primitive_column,
     };
@@ -195,8 +147,9 @@ mod scanner_tests {
     #[tokio::test]
     async fn read_data_test() {
         let (wrapper, schema) = get_lat_lon_data_store(true, 0.0, "lat_lon_data_for_scan").await;
-        let store = wrapper.get_store();
-        let config = ZarrConfig::new(store, schema);
+        let path = wrapper.get_store_path();
+        let table_url = ZarrTableUrl::ZarrStore(ListingTableUrl::parse(path).unwrap());
+        let config = ZarrTableConfig::new(table_url, schema);
 
         let session = SessionContext::new();
         let scan = ZarrScan::new(config, None);
@@ -239,8 +192,9 @@ mod scanner_tests {
     async fn read_partition_test() {
         let (wrapper, schema) =
             get_lat_lon_data_store(true, 0.0, "lat_lon_data_for_scan_with_partition").await;
-        let store = wrapper.get_store();
-        let config = ZarrConfig::new(store, schema);
+        let path = wrapper.get_store_path();
+        let table_url = ZarrTableUrl::ZarrStore(ListingTableUrl::parse(path).unwrap());
+        let config = ZarrTableConfig::new(table_url, schema);
 
         let session = SessionContext::new();
         let scan = ZarrScan::new(config, None);

@@ -14,12 +14,12 @@ jobs:
       image: amd64/rust
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2025-05-14
           components: rustfmt
       - name: Run check
-        run: |
-          cargo fmt --all -- --check
+        run: cargo +nightly-2025-05-14 fmt -- --check --unstable-features --config imports_granularity=Module,group_imports=StdExternalCrate
 
   check-clippy-all-features:
     name: Check cargo clippy
@@ -32,8 +32,7 @@ jobs:
         with:
           components: clippy
       - name: Run check
-        run: |
-          cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --all-targets --all-features -- -D warnings
 
   # Check clippy without features, helps to catch missing feature configurations
   check-clippy-no-features:
@@ -47,5 +46,12 @@ jobs:
         with:
           components: clippy
       - name: Run check
-        run: |
-          cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --all-targets -- -D warnings
+
+  test:
+    name: Run unit tests
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: dtolnay/rust-toolchain@stable
+    - run: cargo test --features icechunk
