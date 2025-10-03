@@ -24,32 +24,6 @@ use super::filter::ZarrChunkFilter;
 use super::io_runtime::IoRuntime;
 use crate::errors::zarr_errors::{ZarrQueryError, ZarrQueryResult};
 
-//********************************************
-// various utils to handle metadata from the zarr array, data types,
-// schemas, etc...
-//********************************************
-
-/// extract the coordinate names from the array. it is possible to
-/// have an array with no coordinates.
-fn get_coord_names<T: ?Sized>(arr: &Array<T>) -> ZarrQueryResult<Option<Vec<String>>> {
-    if let Some(coords) = arr.dimension_names() {
-        let coords: Vec<_> = coords
-            .iter()
-            .map(|d| d.as_ref())
-            .collect::<Option<Vec<_>>>()
-            .ok_or(ZarrQueryError::InvalidMetadata(
-                "Coodrinates without a name are not supported".into(),
-            ))?
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-
-        return Ok(Some(coords));
-    }
-
-    Ok(None)
-}
-
 /// this function handles having multiple values for a given vector,
 /// one per array, including some arrays that might be lower
 /// dimension coordinates.
@@ -65,7 +39,7 @@ fn resolve_vector(
                 // coordinate array), and this current array is a coordinate
                 // array, its one vector element must match the array element
                 // in the final vector at the position of the cooridnate.
-                if final_vec[pos as usize] != vec[0] {
+                if final_vec[pos] != vec[0] {
                     return Err(ZarrQueryError::InvalidMetadata(
                         "Mismatch between vectors for different arrays".into(),
                     ));
@@ -88,7 +62,7 @@ fn resolve_vector(
     } else {
         let mut final_vec: Vec<u64> = vec![0; coords.coord_positions.len()];
         for (k, p) in coords.coord_positions.iter() {
-            final_vec[*p as usize] = vecs.get(k).ok_or(ZarrQueryError::InvalidMetadata(
+            final_vec[*p] = vecs.get(k).ok_or(ZarrQueryError::InvalidMetadata(
                 "Array is missing from array map".into(),
             ))?[0];
         }
@@ -103,70 +77,114 @@ struct ZarrCoordinates {
     /// the position of each coordinate in the overall chunk shape.
     /// the coordinates are arrays that contain data that characterises
     /// a dimension, such as time, or a longitude or latitude.
-    coord_positions: HashMap<String, u64>,
+    coord_positions: HashMap<String, usize>,
 }
 
 impl ZarrCoordinates {
-    fn new<T: ?Sized>(arrays: &HashMap<String, Array<T>>) -> ZarrQueryResult<Self> {
-        let mut coord_positions: HashMap<String, u64> = HashMap::new();
+    fn new<T: ?Sized>(
+        arrays: &HashMap<String, Array<T>>,
+        schema_ref: SchemaRef,
+    ) -> ZarrQueryResult<Self> {
+        // the goal of these "coordinates" is to determine what needs
+        // to be broadcasted from 1D to ND depending on what columns
+        // were selected. based on what is a broadcastable coordinate
+        // and its position in the overall chunk dimensionality, we
+        // can combine a 1D array with ND arrays later on.
+        let mut coord_positions: HashMap<String, usize> = HashMap::new();
 
-        // first pass, determine what the coordinates are and what the
-        // chunk dimensionaliy is.
+        // this is pretty messy, but essentially for each array we
+        // extract it's dimentionality and its dimension. at this stage,
+        // we allow for an array to not have dimensions, but not to have
+        // dimensions without a name.
+        let arr_dims = arrays
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k,
+                    v.dimensionality(),
+                    v.dimension_names()
+                        .clone()
+                        .map(|vec| {
+                            vec.into_iter().collect::<Option<Vec<_>>>().ok_or(
+                                ZarrQueryError::InvalidMetadata(
+                                    "Null dimension names not supported".into(),
+                                ),
+                            )
+                        })
+                        .transpose(),
+                )
+            })
+            .map(|(k, d, res)| res.map(|names| (k, d, names)))
+            .collect::<ZarrQueryResult<Vec<(&String, usize, Option<Vec<String>>)>>>()?;
 
-        // this is a list of what columns are coordinates.
-        let mut coords: Vec<String> = Vec::new();
+        // first case to check, do all the arrays have the same
+        // dimensionality.
+        let mut ordered_dim_names: Option<Vec<String>> = None;
+        if arr_dims.windows(2).all(|w| w[0].1 == w[1].1) {
+            // this is the case where all the arrays are coordinates,
+            // so we determine the broadcasting order from the schema.
+            if arr_dims.iter().all(|d| Some(vec![d.0.clone()]) == d.2) {
+                ordered_dim_names = Some(
+                    schema_ref
+                        .fields
+                        .into_iter()
+                        .map(|f| f.name().to_string())
+                        .collect(),
+                );
+            // this is the case where there is a mix of data and
+            // coordinates, but all the coordinates are already
+            // stored as broadcasted ararys, so there is no need
+            // to do anything later on.
+            } else {
+                return Ok(Self { coord_positions });
+            }
+        }
 
-        // this is an ordered list of the coordinates as they
-        // show up in the array metadata.
-        let mut chunk_coords: Option<Vec<String>> = None;
+        // if we didn't hit the above conditions, then the arrays
+        // have mixed dimensionality. we extract the chunk dimension
+        // names, which must be consistent across all arrays (that
+        // are not broadcastable coordinates).
+        if ordered_dim_names.is_none() {
+            for d in &arr_dims {
+                if d.1 != 1 {
+                    let d = d.2.clone();
+                    let arr_dim_names: Vec<_> = d.ok_or(ZarrQueryError::InvalidMetadata(
+                        "With mixed array dimensionality, dimension names are required".into(),
+                    ))?;
 
-        for (k, arr) in arrays.iter() {
-            let arr_coords = get_coord_names(arr)?;
-            if let Some(arr_coords) = arr_coords {
-                if arr_coords.contains(k) {
-                    if arr_coords.len() != 1 {
-                        return Err(ZarrQueryError::InvalidMetadata("Invalid coordinate".into()));
-                    }
-                    coords.push(k.to_string());
-                } else {
-                    // I don't like clippy's warning that I should collapse this.
-                    #[allow(clippy::collapsible_else_if)]
-                    if let Some(chk_coords) = &chunk_coords {
-                        if chk_coords != &arr_coords {
+                    if let Some(ordered_dim_names) = &ordered_dim_names {
+                        if *ordered_dim_names != arr_dim_names {
                             return Err(ZarrQueryError::InvalidMetadata(
-                                "Mismatch between variables' coordinates".into(),
+                                "Dimension names must be consistent across arrays".into(),
                             ));
                         }
                     } else {
-                        chunk_coords = Some(arr_coords);
+                        ordered_dim_names = Some(arr_dim_names);
                     }
                 }
             }
         }
 
-        // second pass, find the position of each coordinate in the chunk's
-        // dimensionality.
-        let chunk_coords = if let Some(chk_coords) = chunk_coords {
-            chk_coords
-        // the else branch here would happen if all the arrays are coordinates.
-        } else {
-            let mut coords_copy = coords.clone();
-            coords_copy.sort();
-            coords_copy
-        };
-
-        if coords.len() != chunk_coords.len() {
-            return Err(ZarrQueryError::InvalidMetadata(
-                "Mismatch with the number of coordinates".into(),
-            ));
-        }
-        for d in coords {
-            let pos = chunk_coords.iter().position(|s| &d == s).ok_or(
-                ZarrQueryError::InvalidMetadata(
-                    "Dimension is missing from variable's dimension list".into(),
-                ),
-            )?;
-            coord_positions.insert(d.to_string(), pos as u64);
+        // for each 1D array, we check that it is a coordinate, it has
+        // to be at this point in the function, and find its position
+        // in the chunk dimension names.
+        let ordered_dim_names = ordered_dim_names.ok_or(ZarrQueryError::InvalidMetadata(
+            "With mixed array dimensionality, dimension names are required".into(),
+        ))?;
+        for d in arr_dims {
+            if d.1 == 1 {
+                if Some(vec![d.0.clone()]) != d.2 {
+                    return Err(ZarrQueryError::InvalidMetadata(
+                        "With mixed array dimensionality, 1D arrays must be coordinates".into(),
+                    ));
+                }
+                let pos = ordered_dim_names.iter().position(|dim| dim == d.0).ok_or(
+                    ZarrQueryError::InvalidMetadata(
+                        "Could not find coordinate in dimension names".into(),
+                    ),
+                )?;
+                coord_positions.insert(d.0.clone(), pos);
+            }
         }
 
         Ok(Self { coord_positions })
@@ -180,7 +198,7 @@ impl ZarrCoordinates {
     /// returns the position of a coordinate within the chunk
     /// dimensionality if the column is a coordinate, if not
     /// returns None.
-    fn get_coord_position(&self, col: &str) -> Option<u64> {
+    fn get_coord_position(&self, col: &str) -> Option<usize> {
         self.coord_positions.get(col).cloned()
     }
 
@@ -188,7 +206,7 @@ impl ZarrCoordinates {
     /// position within the dimensionality (if the variable is a coordinate).
     fn reduce_if_coord(&self, vec: Vec<u64>, col: &str) -> Vec<u64> {
         if let Some(pos) = self.coord_positions.get(col) {
-            return vec![vec[*pos as usize]];
+            return vec![vec[*pos]];
         }
 
         vec
@@ -452,8 +470,8 @@ struct ZarrStore<T: AsyncReadableListableStorageTraits + ?Sized> {
 }
 
 impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrStore<T> {
-    fn new(arrays: HashMap<String, Array<T>>) -> ZarrQueryResult<Self> {
-        let coordinates = ZarrCoordinates::new(&arrays)?;
+    fn new(arrays: HashMap<String, Array<T>>, schema_ref: SchemaRef) -> ZarrQueryResult<Self> {
+        let coordinates = ZarrCoordinates::new(&arrays, schema_ref)?;
 
         // technically getting the chunk shape requires a chunk
         // index, but it seems the zarrs library doesn't actually
@@ -702,7 +720,7 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrRecordBatchSt
 
         // store all the zarr arrays in a struct that we can use
         // to access them later.
-        let zarr_store = Arc::new(ZarrStore::new(arrays)?);
+        let zarr_store = Arc::new(ZarrStore::new(arrays, projected_schema_ref.clone())?);
 
         // this creates all the chunk indices we will be reading from.
         let chk_grid_shape = &zarr_store.chunk_grid_shape;
@@ -860,7 +878,8 @@ mod zarr_stream_tests {
 
     use super::*;
     use crate::test_utils::{
-        get_local_zarr_store, validate_names_and_types, validate_primitive_column,
+        get_local_zarr_store, get_local_zarr_store_mix_dims, validate_names_and_types,
+        validate_primitive_column,
     };
 
     #[tokio::test]
@@ -869,7 +888,6 @@ mod zarr_stream_tests {
         let store = wrapper.get_store();
 
         let stream = ZarrRecordBatchStream::try_new(store, schema, None, None, 1, 0)
-            // let stream = ZarrRecordBatchStream::new(store, schema, None, None, 1, 0)
             .await
             .unwrap();
         let records: Vec<_> = stream.try_collect().await.unwrap();
@@ -933,6 +951,46 @@ mod zarr_stream_tests {
             "data",
             &records[8],
             &[54.0, 55.0, 62.0, 63.0],
+        );
+    }
+
+    #[tokio::test]
+    async fn dimension_tests() {
+        // this store will have 2d lat coordinates and 1d lon coordinates.
+        // that shoudl effecitvely given the same as 1d and 1d.
+        let (wrapper, schema) = get_local_zarr_store_mix_dims(0.0, "lat_lon_mixed_dims_data").await;
+        let store = wrapper.get_store();
+
+        let stream = ZarrRecordBatchStream::try_new(store, schema, None, None, 1, 0)
+            .await
+            .unwrap();
+        let records: Vec<_> = stream.try_collect().await.unwrap();
+
+        let target_types = HashMap::from([
+            ("lat".to_string(), DataType::Float64),
+            ("lon".to_string(), DataType::Float64),
+            ("data".to_string(), DataType::Float64),
+        ]);
+        validate_names_and_types(&target_types, &records[0]);
+        assert_eq!(records.len(), 9);
+
+        // the top left chunk, full 3x3
+        validate_primitive_column::<Float64Type, f64>(
+            "lat",
+            &records[0],
+            &[35., 35., 35., 36., 36., 36., 37., 37., 37.],
+        );
+        validate_primitive_column::<Float64Type, f64>(
+            "lon",
+            &records[0],
+            &[
+                -120.0, -119.0, -118.0, -120.0, -119.0, -118.0, -120.0, -119.0, -118.0,
+            ],
+        );
+        validate_primitive_column::<Float64Type, f64>(
+            "data",
+            &records[0],
+            &[0.0, 1.0, 2.0, 8.0, 9.0, 10.0, 16.0, 17.0, 18.0],
         );
     }
 
