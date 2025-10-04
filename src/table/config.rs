@@ -1,5 +1,6 @@
 #[cfg(feature = "icechunk")]
 use std::collections::HashMap;
+#[cfg(feature = "icechunk")]
 use std::env;
 use std::path::PathBuf;
 use std::sync::Arc;

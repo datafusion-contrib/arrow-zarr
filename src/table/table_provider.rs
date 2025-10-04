@@ -323,6 +323,36 @@ mod table_provider_tests {
     }
 
     #[tokio::test]
+    async fn partial_coordinates_query() {
+        let (wrapper, _) =
+            get_local_zarr_store(true, 0.0, "lat_lon_data_partial_coord_query").await;
+        let mut state = SessionStateBuilder::new().build();
+        let table_path = wrapper.get_store_path();
+        state
+            .table_factories_mut()
+            .insert("ZARR_STORE".into(), Arc::new(ZarrTableFactory {}));
+
+        let query = format!(
+            "CREATE EXTERNAL TABLE zarr_table STORED AS ZARR_STORE LOCATION '{}'",
+            table_path,
+        );
+
+        let session = SessionContext::new_with_state(state.clone());
+        session.sql(&query).await.unwrap();
+
+        // select the 2D data and only one of the 1D coordinates. This should get
+        // resolved to the lon being brodacasted to match the 2D data.
+        let query = "SELECT data, lon FROM zarr_table";
+        let df = session.sql(query).await.unwrap();
+        let batches = df.collect().await.unwrap();
+
+        let schema = batches[0].schema();
+        let batch = concat_batches(&schema, &batches).unwrap();
+        assert_eq!(batch.num_columns(), 2);
+        assert_eq!(batch.num_rows(), 64);
+    }
+
+    #[tokio::test]
     async fn table_factory_error_test() {
         let (wrapper, _) = get_local_zarr_store(true, 0.0, "lat_lon_data_for_factory_error").await;
         let mut state = SessionStateBuilder::new().build();
