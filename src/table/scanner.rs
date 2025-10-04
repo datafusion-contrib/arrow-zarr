@@ -31,7 +31,7 @@ impl ZarrScan {
         _filters: Option<Arc<dyn PhysicalExpr>>,
     ) -> Self {
         let plan_properties = PlanProperties::new(
-            EquivalenceProperties::new(zarr_config.get_schema_ref()),
+            EquivalenceProperties::new(zarr_config.get_projected_schema_ref()),
             Partitioning::UnknownPartitioning(1),
             EmissionType::Incremental,
             Boundedness::Bounded,
@@ -141,12 +141,12 @@ mod scanner_tests {
     use super::*;
     use crate::table::config::ZarrTableUrl;
     use crate::test_utils::{
-        get_lat_lon_data_store, validate_names_and_types, validate_primitive_column,
+        get_local_zarr_store, validate_names_and_types, validate_primitive_column,
     };
 
     #[tokio::test]
     async fn read_data_test() {
-        let (wrapper, schema) = get_lat_lon_data_store(true, 0.0, "lat_lon_data_for_scan").await;
+        let (wrapper, schema) = get_local_zarr_store(true, 0.0, "lat_lon_data_for_scan").await;
         let path = wrapper.get_store_path();
         let table_url = ZarrTableUrl::ZarrStore(ListingTableUrl::parse(path).unwrap());
         let config = ZarrTableConfig::new(table_url, schema);
@@ -191,7 +191,7 @@ mod scanner_tests {
     #[tokio::test]
     async fn read_partition_test() {
         let (wrapper, schema) =
-            get_lat_lon_data_store(true, 0.0, "lat_lon_data_for_scan_with_partition").await;
+            get_local_zarr_store(true, 0.0, "lat_lon_data_for_scan_with_partition").await;
         let path = wrapper.get_store_path();
         let table_url = ZarrTableUrl::ZarrStore(ListingTableUrl::parse(path).unwrap());
         let config = ZarrTableConfig::new(table_url, schema);
