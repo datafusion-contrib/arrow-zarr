@@ -46,10 +46,11 @@ impl FileOpener for ZarrOpener {
         let config = self.config.clone();
         let (n_partitions, partition) = (self.n_partitions, self.partition);
         let stream = Box::pin(async move {
+            let (store, prefix) = config.get_store_pointer_and_prefix().await?;
             let inner_stream = ZarrRecordBatchStream::try_new(
-                config.get_store_pointer().await?,
+                store,
                 config.get_schema_ref(),
-                None,
+                prefix,
                 config.get_projection(),
                 n_partitions,
                 partition,

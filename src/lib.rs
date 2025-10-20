@@ -177,8 +177,8 @@ mod test_utils {
     ) {
         let mut array_builder = ArrayBuilder::new(
             vec![shape],
+            [chunk],
             DataType::Float64,
-            vec![chunk].try_into().unwrap(),
             FillValue::from(fillvalue),
         );
         let mut builder_ref = &mut array_builder;
@@ -210,8 +210,8 @@ mod test_utils {
     ) {
         let mut array_builder = ArrayBuilder::new(
             vec![shape.0, shape.1],
+            [chunk.0, chunk.1],
             DataType::Float64,
-            vec![chunk.0, chunk.1].try_into().unwrap(),
             FillValue::from(fillvalue),
         );
 
@@ -319,6 +319,59 @@ mod test_utils {
         .await;
     }
 
+    async fn write_mixed_dims_lat_lon_data_to_store(
+        store: Arc<dyn AsyncReadableWritableListableStorageTraits>,
+        fillvalue: f64,
+    ) {
+        let lats = [
+            vec![35.0; 8],
+            vec![36.0; 8],
+            vec![37.0; 8],
+            vec![38.0; 8],
+            vec![39.0; 8],
+            vec![40.0; 8],
+            vec![41.0; 8],
+            vec![42.0; 8],
+        ]
+        .concat();
+        write_2d_float_array(
+            Some(lats),
+            0.0,
+            (8, 8),
+            (3, 3),
+            store.clone(),
+            "/lat",
+            Some(["lat".into(), "lon".into()].to_vec()),
+        )
+        .await;
+
+        let lons = vec![
+            -120.0, -119.0, -118.0, -117.0, -116.0, -115.0, -114.0, -113.0,
+        ];
+        write_1d_float_array(
+            lons,
+            0.0,
+            8,
+            3,
+            store.clone(),
+            "/lon",
+            Some(["lon".into()].to_vec()),
+        )
+        .await;
+
+        let data = (0..64).map(|i| i as f64).collect();
+        write_2d_float_array(
+            Some(data),
+            fillvalue,
+            (8, 8),
+            (3, 3),
+            store.clone(),
+            "/data",
+            Some(["lat".into(), "lon".into()].to_vec()),
+        )
+        .await;
+    }
+
     pub(crate) async fn get_local_zarr_store(
         write_data: bool,
         fillvalue: f64,
@@ -328,6 +381,23 @@ mod test_utils {
         let store = wrapper.get_store();
 
         write_lat_lon_data_to_store(store, write_data, fillvalue).await;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("data", ArrowDataType::Float64, true),
+            Field::new("lat", ArrowDataType::Float64, true),
+            Field::new("lon", ArrowDataType::Float64, true),
+        ]));
+
+        (wrapper, schema)
+    }
+
+    pub(crate) async fn get_local_zarr_store_mix_dims(
+        fillvalue: f64,
+        dir_name: &str,
+    ) -> (LocalZarrStoreWrapper, SchemaRef) {
+        let wrapper = LocalZarrStoreWrapper::new(dir_name.into());
+        let store = wrapper.get_store();
+
+        write_mixed_dims_lat_lon_data_to_store(store, fillvalue).await;
         let schema = Arc::new(Schema::new(vec![
             Field::new("data", ArrowDataType::Float64, true),
             Field::new("lat", ArrowDataType::Float64, true),
@@ -354,65 +424,6 @@ mod test_utils {
             .commit("some test data", None)
             .await
             .unwrap();
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("data", ArrowDataType::Float64, true),
-            Field::new("lat", ArrowDataType::Float64, true),
-            Field::new("lon", ArrowDataType::Float64, true),
-        ]));
-
-        (wrapper, schema)
-    }
-
-    pub(crate) async fn get_lat_lon_data_store(
-        write_data: bool,
-        fillvalue: f64,
-        dir_name: &str,
-    ) -> (LocalZarrStoreWrapper, SchemaRef) {
-        let wrapper = LocalZarrStoreWrapper::new(dir_name.into());
-        let store = wrapper.get_store();
-
-        let lats = vec![35.0, 36.0, 37.0, 38.0, 39.0, 40.0, 41.0, 42.0];
-        write_1d_float_array(
-            lats,
-            0.0,
-            8,
-            3,
-            store.clone(),
-            "/lat",
-            Some(["lat".into()].to_vec()),
-        )
-        .await;
-
-        let lons = vec![
-            -120.0, -119.0, -118.0, -117.0, -116.0, -115.0, -114.0, -113.0,
-        ];
-        write_1d_float_array(
-            lons,
-            0.0,
-            8,
-            3,
-            store.clone(),
-            "/lon",
-            Some(["lon".into()].to_vec()),
-        )
-        .await;
-
-        let data: Option<Vec<_>> = if write_data {
-            Some((0..64).map(|i| i as f64).collect())
-        } else {
-            None
-        };
-        write_2d_float_array(
-            data,
-            fillvalue,
-            (8, 8),
-            (3, 3),
-            store.clone(),
-            "/data",
-            Some(["lat".into(), "lon".into()].to_vec()),
-        )
-        .await;
-
         let schema = Arc::new(Schema::new(vec![
             Field::new("data", ArrowDataType::Float64, true),
             Field::new("lat", ArrowDataType::Float64, true),
