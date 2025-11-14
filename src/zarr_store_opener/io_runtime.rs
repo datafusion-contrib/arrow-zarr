@@ -36,15 +36,12 @@ impl Drop for IoRuntime {
 impl IoRuntime {
     /// Create a new Tokio Runtime for non-blocking tasks.
     pub(crate) fn try_new() -> ZarrQueryResult<Self> {
-        // So the way I'm thinking about this is I'm going to submit one
-        // i/o task at a time, the point is for that task, which will be
-        // reading a chunk, to run concurrently with decoding the
-        // previously read chunk. So for now, the runtime will have
-        // a single thread, since I don't need more than that.
-        let io_runtime = tokio::runtime::Builder::new_current_thread()
+        let io_runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
             .enable_time()
             .enable_io()
             .build()?;
+
         let handle = io_runtime.handle().clone();
         let notify_shutdown = Arc::new(Notify::new());
         let notify_shutdown_captured = Arc::clone(&notify_shutdown);
