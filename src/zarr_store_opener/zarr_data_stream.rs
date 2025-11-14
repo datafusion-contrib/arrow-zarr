@@ -14,6 +14,7 @@ use async_stream::try_stream;
 use bytes::Bytes;
 use futures::stream::{BoxStream, Stream};
 use itertools::iproduct;
+use tokio::sync::mpsc::Receiver;
 use tokio::task::JoinSet;
 use zarrs::array::codec::{ArrayToBytesCodecTraits, CodecOptions};
 use zarrs::array::{Array, ArrayBytes, ArraySize, DataType as zDataType, ElementOwned};
@@ -437,6 +438,29 @@ impl ZarrInMemoryChunk {
         self.data.insert(arr_name, data);
     }
 
+    fn combine(&mut self, other: ZarrInMemoryChunk) {
+        self.data.extend(other.data);
+    }
+
+    fn check_filter(&self, filter: &ZarrChunkFilter) -> Result<bool, ArrowError> {
+        let array_refs: Vec<(String, ArrayRef)> = filter
+            .schema_ref()
+            .fields()
+            .iter()
+            .map(|f| self.data.get(f.name()).cloned())
+            .collect::<Option<Vec<ArrayRef>>>()
+            .ok_or(ZarrQueryError::InvalidProjection(
+                "Array missing from array map".into(),
+            ))?
+            .into_iter()
+            .zip(filter.schema_ref().fields.iter())
+            .map(|(ar, f)| (f.name().to_string(), ar))
+            .collect();
+
+        let rec_batch = RecordBatch::try_from_iter(array_refs)?;
+        filter.evaluate(&rec_batch)
+    }
+
     /// the columns in the record batch will be ordered following
     /// the field names in the schema.
     fn into_record_batch(mut self, schema: &SchemaRef) -> ZarrQueryResult<RecordBatch> {
@@ -460,6 +484,7 @@ impl ZarrInMemoryChunk {
 
 /// A wrapper for a map of arrays, which will handle interleaving
 /// reading and decoding data from zarr storage.
+type ZarrReceiver<T> = Receiver<(ZarrQueryResult<BytesFromArray>, ArrayInterface<T>)>;
 struct ZarrStore<T: AsyncReadableListableStorageTraits + ?Sized> {
     arrays: HashMap<String, Arc<Array<T>>>,
     coordinates: Arc<ZarrCoordinates>,
@@ -467,6 +492,8 @@ struct ZarrStore<T: AsyncReadableListableStorageTraits + ?Sized> {
     chunk_grid_shape: Vec<u64>,
     array_shape: Vec<u64>,
     io_runtime: IoRuntime,
+    join_set: JoinSet<()>,
+    state: Option<(ZarrReceiver<T>, Vec<u64>, Vec<String>)>,
 }
 
 impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrStore<T> {
@@ -510,6 +537,8 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrStore<T> {
             chunk_grid_shape,
             array_shape,
             io_runtime,
+            join_set: JoinSet::new(),
+            state: None,
         })
     }
 
@@ -535,24 +564,13 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrStore<T> {
         Ok(chunk_shape)
     }
 
-    /// this is the main function that does the heavy lifting, getting
-    /// the data from the zarr store and decoding it.
-    async fn get_chunk(
+    fn get_array_interfaces(
         &self,
         cols: Vec<String>,
         chk_idx: Vec<u64>,
-    ) -> ZarrQueryResult<ZarrInMemoryChunk> {
-        if cols.is_empty() {
-            return Err(ZarrQueryError::InvalidProjection(
-                "No columns when polling zarr store for chunks".into(),
-            ));
-        }
-        let mut chk_data = ZarrInMemoryChunk::new();
-
-        // this sets up the interfaces to each array chunk,
-        // one for each column we are getting data for.
+    ) -> ZarrQueryResult<Vec<ArrayInterface<T>>> {
         let full_chunk_shape = self.get_chunk_shape(&chk_idx)?;
-        let arr_interfaces: Vec<_> = cols
+        let arr_interfaces = cols
             .iter()
             .map(|col| {
                 let arr = self
@@ -570,74 +588,92 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrStore<T> {
             })
             .collect::<ZarrQueryResult<Vec<_>>>()
             .unwrap();
+        Ok(arr_interfaces)
+    }
 
-        // channel for the tasks on the io runtime to send results
-        // back to this runtime.
-        let (tx, mut rx) = tokio::sync::mpsc::channel(2);
-        let mut join_set = JoinSet::new();
-
-        // first column, we grab the data without decoding it, and we
-        // clone the first array interface to use it later to decode
-        // that first chunk of data.
-        let tx_copy = tx.clone();
-        let arr_for_future = arr_interfaces[0].clone();
-        join_set.spawn_on(
-            async move {
-                let data = arr_for_future.read_bytes().await;
-                let _ = tx_copy.send(data).await;
-            },
-            self.io_runtime.handle(),
-        );
-        let mut data;
-        if let Some(Ok(d)) = rx.recv().await {
-            data = d;
-        } else {
-            return Err(ZarrQueryError::InvalidCompute(
-                "Unable to retrieve first data chunk".into(),
+    /// this is the main function that does the heavy lifting, getting
+    /// the data from the zarr store and decoding it.
+    async fn get_chunk(
+        &mut self,
+        cols: Vec<String>,
+        chk_idx: Vec<u64>,
+        use_cached_value: bool,
+        next_chunk_idx: Option<Vec<u64>>,
+    ) -> ZarrQueryResult<ZarrInMemoryChunk> {
+        if cols.is_empty() {
+            return Err(ZarrQueryError::InvalidProjection(
+                "No columns when polling zarr store for chunks".into(),
             ));
         }
-        let mut last_arr = arr_interfaces[0].clone();
+        let mut chk_data = ZarrInMemoryChunk::new();
 
-        // loop over all other column, intervealing decoding the
-        // previously fetched data with reading from the next array.
-        for arr in arr_interfaces.iter().skip(1) {
-            // this is the name of a column we have already read
-            // the data for.
-            let last_col = last_arr.name.to_string();
-
-            // this task, spawned on the io runtime, reads the next
-            // data chunk.
-            let tx_copy = tx.clone();
-            let arr_for_future = arr.clone();
-            let io_task = async move {
-                let b = arr_for_future.read_bytes().await;
-                let _ = tx_copy.send(b).await;
-            };
-            join_set.spawn_on(io_task, self.io_runtime.handle());
-
-            // this decodes the last data chunk we read.
-            let array_ref = last_arr.decode_data(data);
-
-            // if everything went as expected, we have a decoded
-            // chunk and a newly read (still encoded) chunk.
-            if let (Some(Ok(d)), Ok(array_ref)) = (rx.recv().await, array_ref) {
-                data = d;
-                chk_data.add_data(last_col, array_ref);
-            } else {
+        // if there is a cached zarr chunk that was trigger from the
+        // previous call, we use that.
+        if use_cached_value & self.state.is_some() {
+            let (mut rx, cached_idx, cached_cols) = self
+                .state
+                .take()
+                .expect("Cached zarr received unexpectedly available");
+            if chk_idx != cached_idx {
                 return Err(ZarrQueryError::InvalidCompute(
-                    "Unable to retrieve decoded chunk".into(),
+                    "Cached zarr chunk index doesn't match requested chunk index".into(),
                 ));
             }
 
-            // keep a copy of the array interface we just read
-            // from, to use it to decode the data for the next
-            // iteration (or the final task after the loop).
-            last_arr = arr.clone();
-        }
+            if cols != cached_cols {
+                return Err(ZarrQueryError::InvalidCompute(
+                    "Cached zarr chunk columns don't match requested columns".into(),
+                ));
+            }
 
-        // decode the last array chunk.
-        let array_ref = last_arr.decode_data(data)?;
-        chk_data.add_data(last_arr.name, array_ref);
+            while let Some((data, arr_interface)) = rx.recv().await {
+                let data = data?;
+                let data = arr_interface.decode_data(data)?;
+                chk_data.add_data(arr_interface.name, data);
+            }
+        }
+        // if there we are either not pre reading data, or we are but
+        // this is the first call and there is no cached data yet,
+        // we read the data now and wait for it to be ready.
+        else {
+            let arr_interfaces = self.get_array_interfaces(cols.clone(), chk_idx)?;
+            let (tx, mut rx) = tokio::sync::mpsc::channel(arr_interfaces.len());
+            for arr_interface in arr_interfaces {
+                let tx_copy = tx.clone();
+                let io_task = async move {
+                    let b = arr_interface.read_bytes().await;
+                    let _ = tx_copy.send((b, arr_interface)).await;
+                };
+                self.join_set.spawn_on(io_task, self.io_runtime.handle());
+
+                if let Some((Ok(d), arr_int)) = rx.recv().await {
+                    let data = arr_int.decode_data(d)?;
+                    chk_data.add_data(arr_int.name, data);
+                } else {
+                    return Err(ZarrQueryError::InvalidCompute(
+                        "Unable to retrieve decoded chunk".into(),
+                    ));
+                }
+            }
+        };
+
+        // if the call was made with an index for the next chunk, we
+        // submitting a job to read that next chunk before returning,
+        // so that we can fetch the data while other operations run
+        // between now and the next call to this function.
+        if let Some(next_chunk_idx) = next_chunk_idx {
+            let arr_interfaces = self.get_array_interfaces(cols.clone(), next_chunk_idx.clone())?;
+            let (tx, rx) = tokio::sync::mpsc::channel(arr_interfaces.len());
+            for arr_interface in arr_interfaces {
+                let tx_copy = tx.clone();
+                let io_task = async move {
+                    let b = arr_interface.read_bytes().await;
+                    let _ = tx_copy.send((b, arr_interface)).await;
+                };
+                self.join_set.spawn_on(io_task, self.io_runtime.handle());
+            }
+            self.state = Some((rx, next_chunk_idx, cols));
+        };
 
         Ok(chk_data)
     }
@@ -653,6 +689,7 @@ struct ZarrRecordBatchStreamInner<T: AsyncReadableListableStorageTraits + ?Sized
     #[allow(dead_code)]
     schema_ref: SchemaRef,
     projected_schema_ref: SchemaRef,
+    schema_without_filter_cols: Option<SchemaRef>,
     filter: Option<ZarrChunkFilter>,
     chunk_indices: VecDeque<Vec<u64>>,
 }
@@ -765,24 +802,93 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrRecordBatchSt
             projected_schema_ref,
             filter: None,
             chunk_indices,
+            schema_without_filter_cols: None,
         })
     }
 
     /// Fetch the next chunk, returning None if there are no more chunks.
     pub(crate) async fn next_chunk(&mut self) -> Result<Option<RecordBatch>, ArrowError> {
-        if let Some(chunk_index) = self.pop_chunk_idx() {
-            let schema = if let Some(filter) = &self.filter {
-                filter.schema_ref()
-            } else {
-                &self.projected_schema_ref
-            };
-            let column_names: Vec<_> = schema
-                .fields()
-                .iter()
-                .map(|f| f.name().to_owned())
-                .collect();
+        // the logic here is not trivial so it wararnts a few explanations.
+        // if there is a filter to apply, we read whatever data is needed to
+        // evaluate it. we do pre fetch chunks here, when calling [`get_chunk`],
+        // and we keep going through the chunk indices until we find a chunk
+        // where the filter condition is satisfied.
+        //
+        // when we do find such a chunk, we move on to the next stage, which
+        // is to read the data for the actual query. we do save the data we
+        // read to evaluate the filter, because some of it might also be
+        // requested in the query. we don't request columns if they are already
+        // present in the filter data, and then combine the filter data with
+        // the data for the chunk for the main query. if there is a filter,
+        // we can't pre fetch the data when reading the data for the main
+        // query, because the next time we read some data it would be for the
+        // fitler, not for the main query.
 
-            let zarr_chunk = self.zarr_store.get_chunk(column_names, chunk_index).await?;
+        let mut chunk_index: Option<Vec<u64>> = None;
+        let mut filter_zarr_chunk: Option<ZarrInMemoryChunk> = None;
+
+        let filter = self.filter.take();
+        if let Some(filter) = filter {
+            let mut filter_passed = false;
+            while !filter_passed {
+                chunk_index = self.pop_chunk_idx();
+                if let Some(chunk_index) = &chunk_index {
+                    let next_chnk_idx = self.see_chunk_idx();
+                    let column_names: Vec<_> = filter
+                        .schema_ref()
+                        .fields()
+                        .iter()
+                        .map(|f| f.name().to_owned())
+                        .collect();
+                    let zarr_chunk = Arc::get_mut(&mut self.zarr_store)
+                        .expect("Zarr store pointer unexpectedly not unique")
+                        .get_chunk(column_names, chunk_index.clone(), true, next_chnk_idx)
+                        .await?;
+                    filter_passed = zarr_chunk.check_filter(&filter)?;
+                    filter_zarr_chunk = Some(zarr_chunk);
+                } else {
+                    filter_passed = true;
+                }
+            }
+            self.filter = Some(filter);
+        } else {
+            chunk_index = self.pop_chunk_idx();
+        }
+
+        if let Some(chunk_index) = chunk_index {
+            let mut zarr_chunk;
+            if self.filter.is_some() {
+                let filter_zarr_chunk = filter_zarr_chunk.expect("Filter zarr chunk missing.");
+                let schema = self
+                    .schema_without_filter_cols
+                    .as_ref()
+                    .expect("Schema without filter columns is missing.");
+
+                let column_names: Vec<_> = schema
+                    .fields()
+                    .iter()
+                    .map(|f| f.name().to_owned())
+                    .collect();
+                zarr_chunk = Arc::get_mut(&mut self.zarr_store)
+                    .expect("Zarr store pointer unexpectedly not unique")
+                    .get_chunk(column_names, chunk_index, false, None)
+                    .await?;
+                zarr_chunk.combine(filter_zarr_chunk);
+            } else {
+                let next_chnk_idx = self.see_chunk_idx();
+                let column_names: Vec<_> = self
+                    .projected_schema_ref
+                    .fields()
+                    .iter()
+                    .map(|f| f.name().to_owned())
+                    .collect();
+
+                zarr_chunk = Arc::get_mut(&mut self.zarr_store)
+                    .expect("Zarr store pointer unexpectedly not unique")
+                    .get_chunk(column_names, chunk_index, true, next_chnk_idx)
+                    .await?;
+            }
+
             let record_batch = zarr_chunk.into_record_batch(&self.projected_schema_ref)?;
             Ok(Some(record_batch))
         } else {
@@ -806,14 +912,35 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrRecordBatchSt
         self.chunk_indices.pop_front()
     }
 
+    fn see_chunk_idx(&self) -> Option<Vec<u64>> {
+        self.chunk_indices.front().cloned()
+    }
+
     /// adds a filter to avoid reading whole chunks if no values
-    /// in the corresponding arrays pass the check. this not to filter
-    /// out values within a chunk, we rely on datafusion's default
-    /// filtering for that. basically this here is to handle filter
-    /// pushdowns.
+    /// in the corresponding arrays pass the check. this is not to
+    /// filter out values within a chunk, we rely on datafusion's
+    /// default filtering for that. basically this here is to handle
+    /// filter pushdowns.
     #[allow(dead_code)]
     fn with_filter(mut self, filter: ZarrChunkFilter) -> ZarrQueryResult<Self> {
+        // because we'll need to read the filter data first, evaluate
+        // the filter, then read the data for the main query, we want
+        // to re-use the filter data if it's also requested in the
+        // query, so here we build the schema for the columns that
+        // are requested in the query, but not in the filter predicate.
+        let fields: Vec<_> = self
+            .projected_schema_ref
+            .fields()
+            .iter()
+            .filter(|f| filter.schema_ref().index_of(f.name()).is_err())
+            .cloned()
+            .collect();
+        let schema = Schema::new(fields);
+        self.schema_without_filter_cols = Some(Arc::new(schema));
+
+        // set the filter on the inner stream.
         self.filter = Some(filter);
+
         Ok(self)
     }
 }
