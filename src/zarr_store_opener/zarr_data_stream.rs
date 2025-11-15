@@ -607,7 +607,7 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrStore<T> {
         }
         let mut chk_data = ZarrInMemoryChunk::new();
 
-        // if there is a cached zarr chunk that was trigger from the
+        // if there is a cached zarr chunk that was triggered from the
         // previous call, we use that.
         if use_cached_value & self.state.is_some() {
             let (mut rx, cached_idx, cached_cols) = self
@@ -632,7 +632,7 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrStore<T> {
                 chk_data.add_data(arr_interface.name, data);
             }
         }
-        // if there we are either not pre reading data, or we are but
+        // if we are either not pre reading data, or we are but
         // this is the first call and there is no cached data yet,
         // we read the data now and wait for it to be ready.
         else {
@@ -658,7 +658,7 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrStore<T> {
         };
 
         // if the call was made with an index for the next chunk, we
-        // submitting a job to read that next chunk before returning,
+        // submit a job to read that next chunk before returning,
         // so that we can fetch the data while other operations run
         // between now and the next call to this function.
         if let Some(next_chunk_idx) = next_chunk_idx {
@@ -810,7 +810,7 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrRecordBatchSt
     pub(crate) async fn next_chunk(&mut self) -> Result<Option<RecordBatch>, ArrowError> {
         // the logic here is not trivial so it wararnts a few explanations.
         // if there is a filter to apply, we read whatever data is needed to
-        // evaluate it. we do pre fetch chunks here, when calling [`get_chunk`],
+        // evaluate it. we do pre fetch chunks here, when calling get_chunk,
         // and we keep going through the chunk indices until we find a chunk
         // where the filter condition is satisfied.
         //
