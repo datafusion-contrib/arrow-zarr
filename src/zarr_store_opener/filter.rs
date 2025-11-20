@@ -12,7 +12,7 @@ pub trait ZarrArrowPredicate: Send + 'static {
     /// that are `false` do not. The method should not return any `Null` values.
     /// Note that the [`RecordBatch`] is passed by reference and not consumed by
     /// the method.
-    fn evaluate(&mut self, batch: &RecordBatch) -> Result<BooleanArray, ArrowError>;
+    fn evaluate(&self, batch: &RecordBatch) -> Result<BooleanArray, ArrowError>;
 }
 
 /// A [`ZarrArrowPredicate`] created from an [`FnMut`]. The predicate function has
@@ -24,7 +24,7 @@ pub struct ZarrArrowPredicateFn<F> {
 
 impl<F> ZarrArrowPredicateFn<F>
 where
-    F: FnMut(&RecordBatch) -> Result<BooleanArray, ArrowError> + Send + 'static,
+    F: Fn(&RecordBatch) -> Result<BooleanArray, ArrowError> + Send + 'static,
 {
     pub fn new(f: F) -> Self {
         Self { f }
@@ -33,9 +33,9 @@ where
 
 impl<F> ZarrArrowPredicate for ZarrArrowPredicateFn<F>
 where
-    F: FnMut(&RecordBatch) -> Result<BooleanArray, ArrowError> + Send + Clone + 'static,
+    F: Fn(&RecordBatch) -> Result<BooleanArray, ArrowError> + Send + Clone + 'static,
 {
-    fn evaluate(&mut self, batch: &RecordBatch) -> Result<BooleanArray, ArrowError> {
+    fn evaluate(&self, batch: &RecordBatch) -> Result<BooleanArray, ArrowError> {
         (self.f)(batch)
     }
 }
@@ -65,9 +65,9 @@ impl ZarrChunkFilter {
         &self.schema_ref
     }
 
-    pub fn evaluate(&mut self, rec_batch: &RecordBatch) -> Result<bool, ArrowError> {
+    pub fn evaluate(&self, rec_batch: &RecordBatch) -> Result<bool, ArrowError> {
         let mut bool_arr: Option<BooleanArray> = None;
-        for predicate in self.predicates.iter_mut() {
+        for predicate in self.predicates.iter() {
             let mask = predicate.evaluate(rec_batch)?;
             if let Some(old_bool_arr) = bool_arr {
                 bool_arr = Some(BooleanArray::from(
