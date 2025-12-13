@@ -5,10 +5,13 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use datafusion::arrow::datatypes::{Schema, SchemaRef};
 use datafusion::catalog::{Session, TableProviderFactory};
+use datafusion::common::ToDFSchema;
 use datafusion::datasource::listing::ListingTableUrl;
 use datafusion::datasource::{TableProvider, TableType};
 use datafusion::error::{DataFusionError, Result as DfResult};
-use datafusion::logical_expr::{CreateExternalTable, Expr};
+use datafusion::logical_expr::utils::conjunction;
+use datafusion::logical_expr::{CreateExternalTable, Expr, TableProviderFilterPushDown};
+use datafusion::physical_expr::create_physical_expr;
 use datafusion::physical_plan::ExecutionPlan;
 
 use super::config::ZarrTableConfig;
@@ -55,18 +58,34 @@ impl TableProvider for ZarrTable {
         TableType::Base
     }
 
+    fn supports_filters_pushdown(
+        &self,
+        filters: &[&Expr],
+    ) -> datafusion::error::Result<Vec<TableProviderFilterPushDown>> {
+        Ok(vec![TableProviderFilterPushDown::Inexact; filters.len()])
+    }
+
     async fn scan(
         &self,
-        _state: &dyn Session,
+        state: &dyn Session,
         projection: Option<&Vec<usize>>,
-        _filters: &[Expr],
+        filters: &[Expr],
         _limit: Option<usize>,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
+        let mut filters_physical_expr = None;
+        if let Some(filters) = conjunction(filters.to_vec()) {
+            filters_physical_expr = Some(create_physical_expr(
+                &filters,
+                &self.table_config.get_schema_ref().to_dfschema()?,
+                state.execution_props(),
+            )?);
+        }
+
         let mut config = self.table_config.clone();
         if let Some(proj) = projection {
             config = config.with_projection(proj.to_vec());
         }
-        let scanner = ZarrScan::new(config, None);
+        let scanner = ZarrScan::new(config, filters_physical_expr);
 
         Ok(Arc::new(scanner))
     }
@@ -136,7 +155,7 @@ mod table_provider_tests {
     #[cfg(feature = "icechunk")]
     use crate::test_utils::get_local_icechunk_repo;
     use crate::test_utils::{
-        get_local_zarr_store, validate_names_and_types, validate_primitive_column,
+        extract_col, get_local_zarr_store, validate_names_and_types, validate_primitive_column,
     };
 
     async fn read_and_validate(table_url: ZarrTableUrl, schema: SchemaRef) {
@@ -350,6 +369,48 @@ mod table_provider_tests {
         let batch = concat_batches(&schema, &batches).unwrap();
         assert_eq!(batch.num_columns(), 2);
         assert_eq!(batch.num_rows(), 64);
+    }
+
+    #[tokio::test]
+    async fn query_with_filter() {
+        let (wrapper, _) = get_local_zarr_store(true, 0.0, "lat_lon_data_filter_query").await;
+        let mut state = SessionStateBuilder::new().build();
+        let table_path = wrapper.get_store_path();
+        state
+            .table_factories_mut()
+            .insert("ZARR_STORE".into(), Arc::new(ZarrTableFactory {}));
+
+        let query = format!(
+            "CREATE EXTERNAL TABLE zarr_table STORED AS ZARR_STORE LOCATION '{}'",
+            table_path,
+        );
+
+        let session = SessionContext::new_with_state(state.clone());
+        session.sql(&query).await.unwrap();
+
+        // select the 2D data and only one of the 1D coordinates. This should get
+        // resolved to the lon being brodacasted to match the 2D data.
+        let query = "
+                    SELECT lat, lon, data
+                    FROM zarr_table
+                    WHERE lat < 38.1
+                    AND lon > -116.9
+                    ";
+        let df = session.sql(query).await.unwrap();
+        let batches = df.collect().await.unwrap();
+
+        // this tests for the actual WHERE clause, which is a combination
+        // of the filter pushdown and some filtering provided by datafusion,
+        // out-of-the-box, so the condition in the test matches the WHERE
+        // clause exactly.
+        for batch in batches {
+            let lat_values = extract_col::<Float64Type>("lat", &batch);
+            let lon_values = extract_col::<Float64Type>("lon", &batch);
+            assert!(lat_values
+                .iter()
+                .zip(lon_values.iter())
+                .all(|(lat, lon)| *lat < 38.1 && *lon > -116.9));
+        }
     }
 
     #[tokio::test]

@@ -11,11 +11,12 @@ use datafusion::datasource::physical_plan::{
 };
 use datafusion::error::{DataFusionError, Result as DfResult};
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
-use datafusion::physical_plan::DisplayFormatType;
+use datafusion::physical_plan::{DisplayFormatType, PhysicalExpr};
 use futures::StreamExt;
 use object_store::ObjectStore;
 
 use super::config::ZarrTableConfig;
+use crate::zarr_store_opener::ZarrChunkFilter;
 use crate::ZarrRecordBatchStream;
 
 /// Implementation of [`FileOpener`] for zarr.
@@ -23,14 +24,21 @@ pub(crate) struct ZarrOpener {
     config: ZarrTableConfig,
     n_partitions: usize,
     partition: usize,
+    filter_expr: Option<Arc<dyn PhysicalExpr>>,
 }
 
 impl ZarrOpener {
-    fn new(config: ZarrTableConfig, n_partitions: usize, partition: usize) -> Self {
+    fn new(
+        config: ZarrTableConfig,
+        n_partitions: usize,
+        partition: usize,
+        filter_expr: Option<Arc<dyn PhysicalExpr>>,
+    ) -> Self {
         Self {
             config,
             n_partitions,
             partition,
+            filter_expr,
         }
     }
 }
@@ -45,6 +53,13 @@ impl FileOpener for ZarrOpener {
     fn open(&self, _file_meta: FileMeta, _file: PartitionedFile) -> DfResult<FileOpenFuture> {
         let config = self.config.clone();
         let (n_partitions, partition) = (self.n_partitions, self.partition);
+
+        let filter = if let Some(filter_expr) = &self.filter_expr {
+            Some(ZarrChunkFilter::new(filter_expr, config.get_schema_ref())?)
+        } else {
+            None
+        };
+
         let stream = Box::pin(async move {
             let (store, prefix) = config.get_store_pointer_and_prefix().await?;
             let inner_stream = ZarrRecordBatchStream::try_new(
@@ -54,6 +69,7 @@ impl FileOpener for ZarrOpener {
                 config.get_projection(),
                 n_partitions,
                 partition,
+                filter,
             )
             .await
             .map_err(|e| DataFusionError::External(Box::new(e)))?;
@@ -70,14 +86,20 @@ pub(crate) struct ZarrSource {
     config: ZarrTableConfig,
     n_partitions: usize,
     exec_plan_metrics: ExecutionPlanMetricsSet,
+    filter_expr: Option<Arc<dyn PhysicalExpr>>,
 }
 
 impl ZarrSource {
-    pub(crate) fn new(config: ZarrTableConfig, n_partitions: usize) -> Self {
+    pub(crate) fn new(
+        config: ZarrTableConfig,
+        n_partitions: usize,
+        filter_expr: Option<Arc<dyn PhysicalExpr>>,
+    ) -> Self {
         Self {
             config,
             n_partitions,
             exec_plan_metrics: ExecutionPlanMetricsSet::default(),
+            filter_expr,
         }
     }
 }
@@ -91,7 +113,12 @@ impl FileSource for ZarrSource {
         _base_config: &FileScanConfig,
         partition: usize,
     ) -> Arc<dyn FileOpener> {
-        let file_opener = ZarrOpener::new(self.config.clone(), self.n_partitions, partition);
+        let file_opener = ZarrOpener::new(
+            self.config.clone(),
+            self.n_partitions,
+            partition,
+            self.filter_expr.clone(),
+        );
         Arc::new(file_opener)
     }
 
@@ -161,7 +188,7 @@ mod file_opener_tests {
         let table_url = ZarrTableUrl::ZarrStore(ListingTableUrl::parse(path).unwrap());
 
         let zarr_config = ZarrTableConfig::new(table_url, schema.clone());
-        let zarr_souce = ZarrSource::new(zarr_config, 1);
+        let zarr_souce = ZarrSource::new(zarr_config, 1, None);
 
         let file_groups = vec![FileGroup::new(vec![PartitionedFile::new("", 0)])];
         let file_scan_config = FileScanConfigBuilder::new(

@@ -1,8 +1,14 @@
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use arrow_array::{BooleanArray, RecordBatch};
-use arrow_schema::{ArrowError, Schema, SchemaRef};
-use datafusion::physical_expr::PhysicalExpr;
+use arrow_schema::{ArrowError, SchemaRef};
+use datafusion::common::cast::as_boolean_array;
+use datafusion::common::tree_node::{TreeNode, TreeNodeRecursion, TreeNodeVisitor};
+use datafusion::common::Result as DfResult;
+use datafusion::physical_expr::expressions::Column;
+use datafusion::physical_expr::utils::reassign_predicate_columns;
+use datafusion::physical_expr::{split_conjunction, PhysicalExpr};
 use itertools::Itertools;
 
 /// A predicate operating on [`RecordBatch`].
@@ -15,29 +21,86 @@ pub trait ZarrArrowPredicate: Send + 'static {
     fn evaluate(&self, batch: &RecordBatch) -> Result<BooleanArray, ArrowError>;
 }
 
-/// A [`ZarrArrowPredicate`] created from an [`FnMut`]. The predicate function has
-/// to be [`Clone`] because of the trait bound on [`ZarrArrowPredicate`].
-#[derive(Clone)]
-pub struct ZarrArrowPredicateFn<F> {
-    f: F,
+struct ZarrFilterExpression {
+    physical_expr: Arc<dyn PhysicalExpr>,
+    filter_schema: SchemaRef,
+    required_columns: Vec<usize>,
 }
 
-impl<F> ZarrArrowPredicateFn<F>
-where
-    F: Fn(&RecordBatch) -> Result<BooleanArray, ArrowError> + Send + 'static,
-{
-    pub fn new(f: F) -> Self {
-        Self { f }
+impl ZarrFilterExpression {
+    fn new(physical_expr: Arc<dyn PhysicalExpr>, table_schema: SchemaRef) -> DfResult<Self> {
+        let required_columns = pushdown_columns(&physical_expr, table_schema.clone())?;
+        let filter_schema = table_schema.project(&required_columns)?;
+        let physical_expr = reassign_predicate_columns(physical_expr, &filter_schema, true)?;
+        Ok(Self {
+            physical_expr,
+            filter_schema: Arc::new(filter_schema),
+            required_columns,
+        })
     }
 }
 
-impl<F> ZarrArrowPredicate for ZarrArrowPredicateFn<F>
-where
-    F: Fn(&RecordBatch) -> Result<BooleanArray, ArrowError> + Send + Clone + 'static,
-{
+impl ZarrArrowPredicate for ZarrFilterExpression {
     fn evaluate(&self, batch: &RecordBatch) -> Result<BooleanArray, ArrowError> {
-        (self.f)(batch)
+        let batch = batch.project(
+            &(self
+                .filter_schema
+                .fields()
+                .iter()
+                .map(|f| batch.schema().index_of(f.name()))
+                .collect::<Result<Vec<_>, _>>()?[..]),
+        )?;
+
+        match self
+            .physical_expr
+            .evaluate(&batch)
+            .and_then(|v| v.into_array(batch.num_rows()))
+        {
+            Ok(array) => {
+                let bool_arr = as_boolean_array(&array)?.clone();
+                Ok(bool_arr)
+            }
+            Err(e) => Err(ArrowError::ComputeError(format!(
+                "Error evaluating filter predicate: {e:?}"
+            ))),
+        }
     }
+}
+
+/// A struct that implements TreeNodeRewriter to traverse a PhysicalExpr tree structure
+/// to determine which columns are required to evaluate it.
+struct PushdownChecker {
+    // Indices into the table schema of the columns required to evaluate the expression
+    required_columns: BTreeSet<usize>,
+    table_schema: SchemaRef,
+}
+
+impl PushdownChecker {
+    fn new(table_schema: SchemaRef) -> Self {
+        Self {
+            required_columns: BTreeSet::default(),
+            table_schema,
+        }
+    }
+}
+
+impl TreeNodeVisitor<'_> for PushdownChecker {
+    type Node = Arc<dyn PhysicalExpr>;
+
+    fn f_down(&mut self, node: &Self::Node) -> DfResult<TreeNodeRecursion> {
+        if let Some(column) = node.as_any().downcast_ref::<Column>() {
+            let idx = self.table_schema.index_of(column.name())?;
+            self.required_columns.insert(idx);
+        }
+
+        Ok(TreeNodeRecursion::Continue)
+    }
+}
+
+fn pushdown_columns(expr: &Arc<dyn PhysicalExpr>, table_schema: SchemaRef) -> DfResult<Vec<usize>> {
+    let mut checker = PushdownChecker::new(table_schema);
+    expr.visit(&mut checker)?;
+    Ok(checker.required_columns.into_iter().collect())
 }
 
 /// A collection of one or more objects that implement [`ZarrArrowPredicate`]. The way
@@ -47,20 +110,32 @@ where
 /// condition, the other variables that we requested are read.
 pub struct ZarrChunkFilter {
     /// A list of [`ZarrArrowPredicate`]
-    pub(crate) predicates: Vec<Box<dyn ZarrArrowPredicate>>,
+    predicates: Vec<Box<dyn ZarrArrowPredicate>>,
     schema_ref: SchemaRef,
 }
 
 impl ZarrChunkFilter {
-    /// Create a new [`ZarrChunkFilter`] from an a ['PhysicalExpr']
-    pub fn new(_physical_expr: Arc<dyn PhysicalExpr>) -> Self {
-        Self {
-            predicates: Vec::new(),
-            schema_ref: Arc::new(Schema::empty()),
+    pub fn new(expr: &Arc<dyn PhysicalExpr>, table_schema: SchemaRef) -> Result<Self, ArrowError> {
+        let predicate_exprs = split_conjunction(expr);
+        let mut predicates: Vec<Box<dyn ZarrArrowPredicate>> =
+            Vec::with_capacity(predicate_exprs.len());
+        let mut schema_indices: Vec<usize> = Vec::new();
+        for pred_expr in predicate_exprs {
+            let filter_expr = ZarrFilterExpression::new(pred_expr.clone(), table_schema.clone())?;
+            schema_indices.extend(filter_expr.required_columns.clone());
+            predicates.push(Box::new(filter_expr));
         }
+
+        schema_indices.sort();
+        schema_indices.dedup();
+        let table_schema = table_schema.project(&schema_indices)?;
+
+        Ok(Self {
+            predicates,
+            schema_ref: Arc::new(table_schema),
+        })
     }
 
-    /// A reference to the schema for the columns needed to evaluate the filter.
     pub fn schema_ref(&self) -> &SchemaRef {
         &self.schema_ref
     }
@@ -91,27 +166,149 @@ impl ZarrChunkFilter {
 }
 
 #[cfg(test)]
-#[allow(unused_imports)]
 mod filter_tests {
     use std::sync::Arc;
 
-    use arrow::compute::kernels::cmp::eq;
-    use arrow_array::{ArrayRef, BooleanArray, Float64Array, RecordBatch};
+    use arrow_array::{Int32Array, RecordBatch};
     use arrow_schema::{DataType, Field, Schema};
+    use datafusion::logical_expr::Operator;
+    use datafusion::physical_expr::expressions::col;
+    use datafusion::physical_plan::expressions::binary;
 
     use super::*;
 
-    // generate a record batch to test filters on.
-    fn _generate_rec_batch() -> RecordBatch {
-        let fields = vec![
-            Arc::new(Field::new("var1".to_string(), DataType::Float64, false)),
-            Arc::new(Field::new("var2".to_string(), DataType::Float64, false)),
-        ];
-        let arrs = vec![
-            Arc::new(Float64Array::from(vec![38.0, 39.0, 40.0, 41.0, 42.0, 43.0])) as ArrayRef,
-            Arc::new(Float64Array::from(vec![39.0, 38.0, 40.0, 41.0, 52.0, 53.0])) as ArrayRef,
-        ];
+    #[test]
+    fn test_single_filter() {
+        let schema = Schema::new(vec![
+            Field::new("a", DataType::Int32, false),
+            Field::new("b", DataType::Int32, false),
+            Field::new("c", DataType::Int32, false),
+        ]);
+        let a = Int32Array::from(vec![1, 2, 3, 4, 5, 6]);
+        let b = Int32Array::from(vec![3, 3, 3, 3, 3, 3]);
+        let c = Int32Array::from(vec![4, 4, 4, 4, 4, 4]);
+        let batch = RecordBatch::try_new(
+            Arc::new(schema.clone()),
+            vec![Arc::new(a), Arc::new(b), Arc::new(c)],
+        )
+        .unwrap();
 
-        RecordBatch::try_new(Arc::new(Schema::new(fields)), arrs).unwrap()
+        // expression: "a > b"
+        let expr = binary(
+            col("a", &schema).unwrap(),
+            Operator::Gt,
+            col("b", &schema).unwrap(),
+            &schema,
+        )
+        .unwrap();
+
+        let filter = ZarrFilterExpression::new(expr, Arc::new(schema.clone())).unwrap();
+        let mask = filter.evaluate(&batch).unwrap();
+
+        assert_eq!(mask, vec![false, false, false, true, true, true].into());
+
+        // this test in particular is important because it applies the filter
+        // to a record batch where the data is ordered differently than in the
+        // physical expression for filter.
+        // expression: "c < a"
+        let expr = binary(
+            col("c", &schema).unwrap(),
+            Operator::Lt,
+            col("a", &schema).unwrap(),
+            &schema,
+        )
+        .unwrap();
+
+        let filter = ZarrFilterExpression::new(expr, Arc::new(schema)).unwrap();
+        let mask = filter.evaluate(&batch).unwrap();
+
+        assert_eq!(mask, vec![false, false, false, false, true, true].into());
+    }
+
+    #[test]
+    fn test_chunk_filter() {
+        let schema = Schema::new(vec![
+            Field::new("a", DataType::Int32, false),
+            Field::new("b", DataType::Int32, false),
+            Field::new("c", DataType::Int32, false),
+            Field::new("d", DataType::Int32, false),
+        ]);
+        let a = Int32Array::from(vec![1, 2, 3, 4, 5, 6]);
+        let b = Int32Array::from(vec![3, 3, 3, 3, 3, 3]);
+        let c = Int32Array::from(vec![1, 1, 2, 2, 4, 4]);
+        let d = Int32Array::from(vec![2, 3, 1, 1, 1, 1]);
+        let batch = RecordBatch::try_new(
+            Arc::new(schema.clone()),
+            vec![Arc::new(a), Arc::new(b), Arc::new(c), Arc::new(d)],
+        )
+        .unwrap();
+
+        // expression: "b < c AND a < d"
+        let expr = binary(
+            binary(
+                col("b", &schema).unwrap(),
+                Operator::Lt,
+                col("c", &schema).unwrap(),
+                &schema,
+            )
+            .unwrap(),
+            Operator::And,
+            binary(
+                col("a", &schema).unwrap(),
+                Operator::Lt,
+                col("d", &schema).unwrap(),
+                &schema,
+            )
+            .unwrap(),
+            &schema,
+        )
+        .unwrap();
+
+        let chunk_filter = ZarrChunkFilter::new(&Arc::new(expr), Arc::new(schema.clone())).unwrap();
+        let filter_passed = chunk_filter.evaluate(&batch).unwrap();
+        assert!(!filter_passed);
+
+        // expression: "b < c OR a < d"
+        let expr = binary(
+            binary(
+                col("b", &schema).unwrap(),
+                Operator::Lt,
+                col("c", &schema).unwrap(),
+                &schema,
+            )
+            .unwrap(),
+            Operator::Or,
+            binary(
+                col("a", &schema).unwrap(),
+                Operator::Lt,
+                col("d", &schema).unwrap(),
+                &schema,
+            )
+            .unwrap(),
+            &schema,
+        )
+        .unwrap();
+
+        let chunk_filter = ZarrChunkFilter::new(&Arc::new(expr), Arc::new(schema.clone())).unwrap();
+        let filter_passed = chunk_filter.evaluate(&batch).unwrap();
+        assert!(filter_passed);
+
+        let expr = binary(
+            col("b", &schema).unwrap(),
+            Operator::Lt,
+            col("c", &schema).unwrap(),
+            &schema,
+        )
+        .unwrap();
+        let chunk_filter = ZarrChunkFilter::new(&Arc::new(expr), Arc::new(schema.clone())).unwrap();
+        assert_eq!(
+            vec!["b", "c"],
+            chunk_filter
+                .schema_ref()
+                .fields()
+                .iter()
+                .map(|f| f.name())
+                .collect::<Vec<_>>()
+        );
     }
 }

@@ -29,6 +29,7 @@ mod test_utils {
     use std::path::PathBuf;
     use std::sync::Arc;
 
+    use arrow::buffer::ScalarBuffer;
     use arrow_array::cast::AsArray;
     use arrow_array::types::*;
     use arrow_array::RecordBatch;
@@ -269,6 +270,18 @@ mod test_utils {
         for field in schema.fields.iter() {
             assert_eq!(field.data_type(), targets.get(field.name()).unwrap());
         }
+    }
+
+    pub(crate) fn extract_col<T>(col_name: &str, rec_batch: &RecordBatch) -> ScalarBuffer<T::Native>
+    where
+        T: ArrowPrimitiveType,
+    {
+        rec_batch
+            .column_by_name(col_name)
+            .unwrap()
+            .as_primitive::<T>()
+            .values()
+            .clone()
     }
 
     async fn write_lat_lon_data_to_store(

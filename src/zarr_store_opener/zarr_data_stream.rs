@@ -964,8 +964,9 @@ impl ZarrRecordBatchStream {
         projection: Option<Vec<usize>>,
         n_partitions: usize,
         partition: usize,
+        filter: Option<ZarrChunkFilter>,
     ) -> ZarrQueryResult<Self> {
-        let inner = ZarrRecordBatchStreamInner::new(
+        let mut inner = ZarrRecordBatchStreamInner::new(
             store,
             schema_ref,
             prefix,
@@ -974,6 +975,11 @@ impl ZarrRecordBatchStream {
             partition,
         )
         .await?;
+
+        if let Some(filter) = filter {
+            inner = inner.with_filter(filter)?;
+        }
+
         Ok(Self {
             schema: inner.projected_schema_ref.clone(),
             stream: inner.into_stream().stream,
@@ -1001,11 +1007,14 @@ impl Stream for ZarrRecordBatchStream {
 
 #[cfg(test)]
 mod zarr_stream_tests {
+    use datafusion::logical_expr::Operator;
+    use datafusion::physical_expr::expressions::{col, lit};
+    use datafusion::physical_plan::expressions::binary;
     use futures_util::TryStreamExt;
 
     use super::*;
     use crate::test_utils::{
-        get_local_zarr_store, get_local_zarr_store_mix_dims, validate_names_and_types,
+        extract_col, get_local_zarr_store, get_local_zarr_store_mix_dims, validate_names_and_types,
         validate_primitive_column,
     };
 
@@ -1014,7 +1023,7 @@ mod zarr_stream_tests {
         let (wrapper, schema) = get_local_zarr_store(true, 0.0, "lat_lon_data").await;
         let store = wrapper.get_store();
 
-        let stream = ZarrRecordBatchStream::try_new(store, schema, None, None, 1, 0)
+        let stream = ZarrRecordBatchStream::try_new(store, schema, None, None, 1, 0, None)
             .await
             .unwrap();
         let records: Vec<_> = stream.try_collect().await.unwrap();
@@ -1082,13 +1091,67 @@ mod zarr_stream_tests {
     }
 
     #[tokio::test]
+    async fn filter_test() {
+        let (wrapper, schema) = get_local_zarr_store(true, 0.0, "lat_lon_data_with_filter").await;
+        let store = wrapper.get_store();
+
+        let expr = binary(
+            binary(
+                col("lat", &schema).unwrap(),
+                Operator::Lt,
+                lit(38.1),
+                &schema,
+            )
+            .unwrap(),
+            Operator::And,
+            binary(
+                col("lon", &schema).unwrap(),
+                Operator::Gt,
+                lit(-116.9),
+                &schema,
+            )
+            .unwrap(),
+            &schema,
+        )
+        .unwrap();
+        let filter = Some(ZarrChunkFilter::new(&expr, schema.clone()).unwrap());
+
+        let stream = ZarrRecordBatchStream::try_new(store, schema, None, None, 1, 0, filter)
+            .await
+            .unwrap();
+        let records: Vec<_> = stream.try_collect().await.unwrap();
+
+        let target_types = HashMap::from([
+            ("lat".to_string(), DataType::Float64),
+            ("lon".to_string(), DataType::Float64),
+            ("data".to_string(), DataType::Float64),
+        ]);
+        validate_names_and_types(&target_types, &records[0]);
+
+        // this tests for the filter push down, which doesn't completely
+        // filter out the results, it only drops chunks of data where
+        // not a single "row" passes the filter, so the condition we
+        // are checking lines up with the data in the chunks, and is
+        // a bit different from the WHERE clause.
+        assert_eq!(records.len(), 4);
+        for batch in records {
+            let lat_values = extract_col::<Float64Type>("lat", &batch);
+            let lon_values = extract_col::<Float64Type>("lon", &batch);
+            assert!(lat_values
+                .iter()
+                .zip(lon_values.iter())
+                .all(|(lat, lon)| *lat < 41.0 && *lon > -118.0));
+        }
+    }
+
+    #[tokio::test]
     async fn dimension_tests() {
         // this store will have 2d lat coordinates and 1d lon coordinates.
         // that shoudl effecitvely given the same as 1d and 1d.
         let (wrapper, schema) = get_local_zarr_store_mix_dims(0.0, "lat_lon_mixed_dims_data").await;
         let store = wrapper.get_store();
 
-        let stream = ZarrRecordBatchStream::try_new(store, schema, None, None, 1, 0)
+        let stream = ZarrRecordBatchStream::try_new(store, schema, None, None, 1, 0, None)
             .await
             .unwrap();
         let records: Vec<_> = stream.try_collect().await.unwrap();
@@ -1127,7 +1190,7 @@ mod zarr_stream_tests {
         let (wrapper, schema) = get_local_zarr_store(false, fillvalue, "lat_lon_empty_data").await;
         let store = wrapper.get_store();
 
-        let stream = ZarrRecordBatchStream::try_new(store, schema, None, None, 1, 0)
+        let stream = ZarrRecordBatchStream::try_new(store, schema, None, None, 1, 0, None)
             .await
             .unwrap();
         let records: Vec<_> = stream.try_collect().await.unwrap();
@@ -1169,14 +1232,14 @@ mod zarr_stream_tests {
         ]);
 
         let stream =
-            ZarrRecordBatchStream::try_new(store.clone(), schema.clone(), None, None, 2, 0)
+            ZarrRecordBatchStream::try_new(store.clone(), schema.clone(), None, None, 2, 0, None)
                 .await
                 .unwrap();
         let records: Vec<_> = stream.try_collect().await.unwrap();
         validate_names_and_types(&target_types, &records[0]);
         assert_eq!(records.len(), 5);
 
-        let stream = ZarrRecordBatchStream::try_new(store, schema, None, None, 2, 1)
+        let stream = ZarrRecordBatchStream::try_new(store, schema, None, None, 2, 1, None)
             .await
             .unwrap();
         let records: Vec<_> = stream.try_collect().await.unwrap();
@@ -1214,27 +1277,27 @@ mod zarr_stream_tests {
         // the 9th parittion should have one batch in them, after that there should be
         // no data returned by the streams.
         let stream =
-            ZarrRecordBatchStream::try_new(store.clone(), schema.clone(), None, None, 20, 0)
+            ZarrRecordBatchStream::try_new(store.clone(), schema.clone(), None, None, 20, 0, None)
                 .await
                 .unwrap();
         let records: Vec<_> = stream.try_collect().await.unwrap();
         assert_eq!(records.len(), 1);
 
         let stream =
-            ZarrRecordBatchStream::try_new(store.clone(), schema.clone(), None, None, 20, 8)
+            ZarrRecordBatchStream::try_new(store.clone(), schema.clone(), None, None, 20, 8, None)
                 .await
                 .unwrap();
         let records: Vec<_> = stream.try_collect().await.unwrap();
         assert_eq!(records.len(), 1);
 
         let stream =
-            ZarrRecordBatchStream::try_new(store.clone(), schema.clone(), None, None, 20, 10)
+            ZarrRecordBatchStream::try_new(store.clone(), schema.clone(), None, None, 20, 10, None)
                 .await
                 .unwrap();
         let records: Vec<_> = stream.try_collect().await.unwrap();
         assert_eq!(records.len(), 0);
 
-        let stream = ZarrRecordBatchStream::try_new(store, schema, None, None, 20, 19)
+        let stream = ZarrRecordBatchStream::try_new(store, schema, None, None, 20, 19, None)
             .await
             .unwrap();
         let records: Vec<_> = stream.try_collect().await.unwrap();
