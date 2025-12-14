@@ -58,6 +58,11 @@ impl TableProvider for ZarrTable {
         TableType::Base
     }
 
+    // there's no projected columns or partitions with the zarr data,
+    // so really all we have are arrays that are present in all the data
+    // chunks. there's not much to check here, we do use the filter
+    // pushdown to avoid reading entire chunk, so pretty much all the
+    // available arrays can be used as Inexact filters.
     fn supports_filters_pushdown(
         &self,
         filters: &[&Expr],

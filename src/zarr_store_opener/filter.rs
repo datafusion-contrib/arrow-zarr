@@ -29,9 +29,15 @@ struct ZarrFilterExpression {
 
 impl ZarrFilterExpression {
     fn new(physical_expr: Arc<dyn PhysicalExpr>, table_schema: SchemaRef) -> DfResult<Self> {
+        // this part is to make sure that the indices for each column in the
+        // predicate match the columns in the filter schema. the physical
+        // expressions are created from the full table schema initally, but
+        // the record batches will come in with the filter schema, that's why
+        // this step is needed.
         let required_columns = pushdown_columns(&physical_expr, table_schema.clone())?;
         let filter_schema = table_schema.project(&required_columns)?;
         let physical_expr = reassign_predicate_columns(physical_expr, &filter_schema, true)?;
+
         Ok(Self {
             physical_expr,
             filter_schema: Arc::new(filter_schema),
@@ -42,6 +48,15 @@ impl ZarrFilterExpression {
 
 impl ZarrArrowPredicate for ZarrFilterExpression {
     fn evaluate(&self, batch: &RecordBatch) -> Result<BooleanArray, ArrowError> {
+        // if there was only one filter expression in the full chunk filter,
+        // the record batch would come in with the right schema all the time
+        // (because the caller would first check what schema is required for
+        // filter, only evaluate those columns and pass in that record batch).
+        // but there could be multiple expressions in the final, full chunk
+        // filter, so in practice the record batch is a superset of what each
+        // individual filter needs, hence we need to project it to make sure
+        // field/column indices match between the expression and the record
+        // batch schema.
         let batch = batch.project(
             &(self
                 .filter_schema
@@ -75,6 +90,9 @@ struct PushdownChecker {
     table_schema: SchemaRef,
 }
 
+// Note that the zarr case is simpler than the other cases that support projected
+// columns or partition columns. There is not much we need to check here, columns
+// are just columns, we just need to check which columns are in which predicate.
 impl PushdownChecker {
     fn new(table_schema: SchemaRef) -> Self {
         Self {
@@ -120,6 +138,12 @@ impl ZarrChunkFilter {
         let mut predicates: Vec<Box<dyn ZarrArrowPredicate>> =
             Vec::with_capacity(predicate_exprs.len());
         let mut schema_indices: Vec<usize> = Vec::new();
+
+        // we don't bother reorganizing filters to start with the cheaper ones
+        // before we do the more expensive ones. in terms of the amount of data
+        // read, it's the same for all the chunks. some operations might be
+        // cheaper to check (computationally), not sure how e.g. the parquet
+        // case handles this, I might revisit later to optimize things a bit.
         for pred_expr in predicate_exprs {
             let filter_expr = ZarrFilterExpression::new(pred_expr.clone(), table_schema.clone())?;
             schema_indices.extend(filter_expr.required_columns.clone());
@@ -140,6 +164,9 @@ impl ZarrChunkFilter {
         &self.schema_ref
     }
 
+    /// Applies all the filters in the chunk filter and returns true only
+    /// if all the filters return true for at least one row in the record
+    /// batch.
     pub fn evaluate(&self, rec_batch: &RecordBatch) -> Result<bool, ArrowError> {
         let mut bool_arr: Option<BooleanArray> = None;
         for predicate in self.predicates.iter() {
