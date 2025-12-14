@@ -24,7 +24,7 @@ chrono = { version = "0.4.42" }
 datafusion = { version = "49.0.0" }
 futures = { version = "0.3.31" }
 futures-util = { version = "0.3.31" }
-icechunk = { version = "0.3.8", optional = true }
+icechunk = { version = "0.3.17", optional = true }
 itertools = { version = "0.14.0" }
 ndarray = { version = "^0.16.1" }
 object_store = { version = "0.12.0", features = ["aws", "gcp"] }

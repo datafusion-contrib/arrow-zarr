@@ -147,6 +147,7 @@ impl ZarrTableUrl {
                             allow_http: false,
                             force_path_style: false,
                             network_stream_timeout_seconds: None,
+                            requester_pays: false,
                         };
 
                         ObjectStorage::new_s3(
