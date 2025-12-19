@@ -686,8 +686,6 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrStore<T> {
 /// into a stream.
 struct ZarrRecordBatchStreamInner<T: AsyncReadableListableStorageTraits + ?Sized> {
     zarr_store: Arc<ZarrStore<T>>,
-    #[allow(dead_code)]
-    schema_ref: SchemaRef,
     projected_schema_ref: SchemaRef,
     schema_without_filter_cols: Option<SchemaRef>,
     filter: Option<ZarrChunkFilter>,
@@ -798,7 +796,6 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrRecordBatchSt
 
         Ok(Self {
             zarr_store,
-            schema_ref,
             projected_schema_ref,
             filter: None,
             chunk_indices,
@@ -921,7 +918,6 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrRecordBatchSt
     /// filter out values within a chunk, we rely on datafusion's
     /// default filtering for that. basically this here is to handle
     /// filter pushdowns.
-    #[allow(dead_code)]
     fn with_filter(mut self, filter: ZarrChunkFilter) -> ZarrQueryResult<Self> {
         // because we'll need to read the filter data first, evaluate
         // the filter, then read the data for the main query, we want
