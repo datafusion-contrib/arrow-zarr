@@ -21,14 +21,14 @@ use super::opener::ZarrSource;
 #[derive(Debug, Clone)]
 pub struct ZarrScan {
     zarr_config: ZarrTableConfig,
-    _filters: Option<Arc<dyn PhysicalExpr>>,
+    filters: Option<Arc<dyn PhysicalExpr>>,
     plan_properties: PlanProperties,
 }
 
 impl ZarrScan {
     pub(crate) fn new(
         zarr_config: ZarrTableConfig,
-        _filters: Option<Arc<dyn PhysicalExpr>>,
+        filters: Option<Arc<dyn PhysicalExpr>>,
     ) -> Self {
         let plan_properties = PlanProperties::new(
             EquivalenceProperties::new(zarr_config.get_projected_schema_ref()),
@@ -39,7 +39,7 @@ impl ZarrScan {
 
         Self {
             zarr_config,
-            _filters,
+            filters,
             plan_properties,
         }
     }
@@ -101,7 +101,8 @@ impl ExecutionPlan for ZarrScan {
             }
         };
 
-        let zarr_source = ZarrSource::new(self.zarr_config.clone(), n_partitions);
+        let zarr_source =
+            ZarrSource::new(self.zarr_config.clone(), n_partitions, self.filters.clone());
         let file_groups = vec![FileGroup::new(vec![PartitionedFile::new("", 0)])];
         let file_scan_config = FileScanConfigBuilder::new(
             ObjectStoreUrl::parse("file://").unwrap(),

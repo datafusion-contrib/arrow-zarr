@@ -36,6 +36,7 @@ async fn create_s3_icechunk(url: &str) -> Arc<AsyncIcechunkStore> {
         allow_http: false,
         force_path_style: false,
         network_stream_timeout_seconds: None,
+        requester_pays: false,
     };
 
     let store = ObjectStorage::new_s3(
