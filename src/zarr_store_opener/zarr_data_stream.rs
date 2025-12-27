@@ -1,3 +1,20 @@
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
+//
+//   http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
 use std::borrow::Cow;
 use std::cmp::min;
 use std::collections::{HashMap, VecDeque};
@@ -23,7 +40,7 @@ use zarrs_storage::AsyncReadableListableStorageTraits;
 
 use super::filter::ZarrChunkFilter;
 use super::io_runtime::IoRuntime;
-use crate::errors::zarr_errors::{ZarrQueryError, ZarrQueryResult};
+use super::zarr_errors::{ZarrQueryError, ZarrQueryResult};
 
 /// this function handles having multiple values for a given vector,
 /// one per array, including some arrays that might be lower
@@ -1003,9 +1020,6 @@ impl Stream for ZarrRecordBatchStream {
 
 #[cfg(test)]
 mod zarr_stream_tests {
-    use datafusion::logical_expr::Operator;
-    use datafusion::physical_expr::expressions::{col, lit};
-    use datafusion::physical_plan::expressions::binary;
     use futures_util::TryStreamExt;
 
     use super::*;
@@ -1013,6 +1027,25 @@ mod zarr_stream_tests {
         extract_col, get_local_zarr_store, get_local_zarr_store_mix_dims, validate_names_and_types,
         validate_primitive_column,
     };
+    use crate::zarr_store_opener::ZarrArrowPredicate;
+
+    // this is just to help with testing the filter pushdown
+    // functionality, since the full implementation is not done
+    // in this module.
+    struct DummyPredicate {}
+
+    impl ZarrArrowPredicate for DummyPredicate {
+        fn evaluate(&self, batch: &RecordBatch) -> Result<BooleanArray, ArrowError> {
+            let lat_values = extract_col::<Float64Type>("lat", batch);
+            let lon_values = extract_col::<Float64Type>("lon", batch);
+            let bools: Vec<_> = lat_values
+                .iter()
+                .zip(lon_values.iter())
+                .map(|(lat, lon)| *lat < 41.0 && *lon > -118.0)
+                .collect();
+            Ok(bools.into())
+        }
+    }
 
     #[tokio::test]
     async fn read_data_test() {
@@ -1091,26 +1124,17 @@ mod zarr_stream_tests {
         let (wrapper, schema) = get_local_zarr_store(true, 0.0, "lat_lon_data_with_filter").await;
         let store = wrapper.get_store();
 
-        let expr = binary(
-            binary(
-                col("lat", &schema).unwrap(),
-                Operator::Lt,
-                lit(38.1),
-                &schema,
+        // note: we need to project the schema to match what the filter
+        // predicate checks, since here we're manually creating a chunk
+        // filter. a proper impmlementation of the chunk filter creation
+        // (e.g. see the [`create_zarr_chunk_filter`]) should handle this.
+        let filter = Some(
+            ZarrChunkFilter::new(
+                vec![Box::new(DummyPredicate {})],
+                Arc::new(schema.project(&[1, 2]).unwrap()),
             )
             .unwrap(),
-            Operator::And,
-            binary(
-                col("lon", &schema).unwrap(),
-                Operator::Gt,
-                lit(-116.9),
-                &schema,
-            )
-            .unwrap(),
-            &schema,
-        )
-        .unwrap();
-        let filter = Some(ZarrChunkFilter::new(&expr, schema.clone()).unwrap());
+        );
 
         let stream = ZarrRecordBatchStream::try_new(store, schema, None, None, 1, 0, filter)
             .await
@@ -1126,7 +1150,7 @@ mod zarr_stream_tests {
 
         // this tests for the filter push down, which doesn't completely
         // filter out the results, it only drops chunks of data where
-        // not a single "row" passes the filter, so the condition we
+        // not a single "row" passes the filter, so the condition weinto()
         // are checking lines up with the data in the chunks, and is
         // a bit different from the WHERE clause.
         assert_eq!(records.len(), 4);

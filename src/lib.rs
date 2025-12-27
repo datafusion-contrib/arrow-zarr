@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-pub mod errors;
+//pub mod errors;
 pub mod table;
 pub mod zarr_store_opener;
 
