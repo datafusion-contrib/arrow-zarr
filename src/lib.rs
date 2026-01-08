@@ -332,6 +332,17 @@ mod test_utils {
         .await;
     }
 
+    async fn write_no_coord_data_to_store(
+        store: Arc<dyn AsyncReadableWritableListableStorageTraits>,
+        fillvalue: f64,
+    ) {
+        let data = (0..8).map(|i| i as f64).collect();
+        write_1d_float_array(data, fillvalue, 8, 3, store.clone(), "/data_1", None).await;
+
+        let data = (100..108).map(|i| i as f64).collect();
+        write_1d_float_array(data, fillvalue, 8, 3, store.clone(), "/data_2", None).await;
+    }
+
     async fn write_mixed_dims_lat_lon_data_to_store(
         store: Arc<dyn AsyncReadableWritableListableStorageTraits>,
         fillvalue: f64,
@@ -398,6 +409,22 @@ mod test_utils {
             Field::new("data", ArrowDataType::Float64, true),
             Field::new("lat", ArrowDataType::Float64, true),
             Field::new("lon", ArrowDataType::Float64, true),
+        ]));
+
+        (wrapper, schema)
+    }
+
+    pub(crate) async fn get_local_zarr_store_no_coords(
+        fillvalue: f64,
+        dir_name: &str,
+    ) -> (LocalZarrStoreWrapper, SchemaRef) {
+        let wrapper = LocalZarrStoreWrapper::new(dir_name.into());
+        let store = wrapper.get_store();
+
+        write_no_coord_data_to_store(store, fillvalue).await;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("data_1", ArrowDataType::Float64, true),
+            Field::new("data_2", ArrowDataType::Float64, true),
         ]));
 
         (wrapper, schema)

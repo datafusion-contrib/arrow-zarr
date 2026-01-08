@@ -43,8 +43,8 @@ use super::io_runtime::IoRuntime;
 use super::zarr_errors::{ZarrQueryError, ZarrQueryResult};
 
 /// this function handles having multiple values for a given vector,
-/// one per array, including some arrays that might be lower
-/// dimension coordinates.
+/// one per array, including some arrays that might be lower dimension
+/// coordinates.
 fn resolve_vector(
     coords: &ZarrCoordinates,
     vecs: HashMap<String, Vec<u64>>,
@@ -53,15 +53,20 @@ fn resolve_vector(
     for (k, vec) in vecs.iter() {
         if let Some(final_vec) = &final_vec {
             if let Some(pos) = coords.get_coord_position(k) {
-                // if we have a the final vector (from a previous non
-                // coordinate array), and this current array is a coordinate
-                // array, its one vector element must match the array element
-                // in the final vector at the position of the cooridnate.
+                // if we have a vector (from a previous non coordinate array),
+                // and this current array is a coordinate array, its one vector
+                // element must match the array element in the previous vector at
+                // the position of the cooridnate.
+                //
+                // for example, if the vector from the non coordinate array is [l, m, n],
+                // and this current array is the coordinate for the second dimension, it
+                // must be a 1D array of length m.
                 if final_vec[pos] != vec[0] {
                     return Err(ZarrQueryError::InvalidMetadata(
                         "Mismatch between vectors for different arrays".into(),
                     ));
                 }
+
             // if the current array is not a coordinate, it must match the
             // final vector we have extracted from a previous array.
             } else if final_vec != vec {
@@ -69,6 +74,8 @@ fn resolve_vector(
                     "Mismatch between vectors for different arrays".into(),
                 ));
             }
+
+        // if this is the first array we see, we simply record that.
         } else if !coords.is_coordinate(k) {
             final_vec = Some(vec.clone());
         }
@@ -80,7 +87,7 @@ fn resolve_vector(
     } else {
         let mut final_vec: Vec<u64> = vec![0; coords.coord_positions.len()];
         for (k, p) in coords.coord_positions.iter() {
-            final_vec[*p] = vecs.get(k).ok_or(ZarrQueryError::InvalidMetadata(
+            final_vec[*p] = vecs.get(k).ok_or(ZarrQueryError::InvalidColumnRequest(
                 "Array is missing from array map".into(),
             ))?[0];
         }
@@ -88,13 +95,13 @@ fn resolve_vector(
     }
 }
 
-/// A struct to handle coordinate variables, and "broadcasting" them when reading multidimensional
-/// data.
+/// A struct to handle coordinate variables, and "broadcasting" them when reading
+/// multidimensional data.
 #[derive(Debug)]
 struct ZarrCoordinates {
-    /// the position of each coordinate in the overall chunk shape.
-    /// the coordinates are arrays that contain data that characterises
-    /// a dimension, such as time, or a longitude or latitude.
+    // the position of each coordinate in the overall chunk shape.
+    // the coordinates are arrays that contain data that characterizes
+    // a dimension, such as time, or a longitude or latitude.
     coord_positions: HashMap<String, usize>,
 }
 
@@ -110,10 +117,9 @@ impl ZarrCoordinates {
         // can combine a 1D array with ND arrays later on.
         let mut coord_positions: HashMap<String, usize> = HashMap::new();
 
-        // this is pretty messy, but essentially for each array we
-        // extract it's dimentionality and its dimension. at this stage,
-        // we allow for an array to not have dimensions, but not to have
-        // dimensions without a name.
+        // this is pretty messy, but essentially for each array we extract its
+        // dimentionality and its dimension. we allow for an array to not have
+        // dimensions, but not to have dimensions without a name.
         let arr_dims = arrays
             .iter()
             .map(|(k, v)| {
@@ -136,7 +142,7 @@ impl ZarrCoordinates {
             .collect::<ZarrQueryResult<Vec<(&String, usize, Option<Vec<String>>)>>>()?;
 
         // first case to check, do all the arrays have the same
-        // dimensionality.
+        // dimensionality?
         let mut ordered_dim_names: Option<Vec<String>> = None;
         if arr_dims.windows(2).all(|w| w[0].1 == w[1].1) {
             // this is the case where all the arrays are coordinates,
@@ -150,9 +156,9 @@ impl ZarrCoordinates {
                         .collect(),
                 );
             // this is the case where there is a mix of data and
-            // coordinates, but all the coordinates are already
-            // stored as broadcasted ararys, so there is no need
-            // to do anything later on.
+            // coordinates (including no coordinates), but all the
+            // coordinates are already stored as broadcasted arrays,
+            // so there is no need to do anything later on.
             } else {
                 return Ok(Self { coord_positions });
             }
@@ -230,7 +236,7 @@ impl ZarrCoordinates {
         vec
     }
 
-    /// broadacast a 1D array to a nD array if the variable is a coordinate.
+    /// broadacast a 1D array to a ND array if the variable is a coordinate.
     /// note that we return a 1D vector, but this is just because we map all
     /// the chunk to columnar data, so a m x n array gets mapped to a 1D
     /// vector of length m x n.
@@ -292,26 +298,18 @@ struct ArrayInterface<T: AsyncReadableListableStorageTraits + ?Sized> {
     chk_index: Vec<u64>,
 }
 
-// T doesn't need to be Clone, but deriving apparently requires
-// that, so I have implement manually.
-impl<T: AsyncReadableListableStorageTraits + ?Sized> Clone for ArrayInterface<T> {
-    fn clone(&self) -> Self {
-        Self {
-            name: self.name.to_string(),
-            arr: self.arr.clone(),
-            coords: self.coords.clone(),
-            full_chunk_shape: self.full_chunk_shape.clone(),
-            chk_index: self.chk_index.clone(),
-        }
-    }
-}
-
 /// in most cases, we will read encoded bytes and decode them after,
 /// but in the case of a missing chunk the result of the read operation
-/// will be done.vin a few cases though we will read pre-decoded bytes,
+/// will be none. in a few cases though we will read pre-decoded bytes,
 /// hence why we have this enum.
 enum BytesFromArray {
-    Decoded(Bytes),
+    // since this is used to basically transfer decoded bytes between the
+    // read and decode stages, it's easier if the enum just owns the data.
+    // ArrayBytes wraps a Cow<u8>, and because it borrows data there's a
+    // lifetime associated with it. so long story short, the static lifetime
+    // is there because the ArrayBytes comes from calling into_owned() on
+    // the ArrayBytes we get from reading the zarr data.
+    Decoded(ArrayBytes<'static>),
     Encoded(Option<Bytes>),
 }
 
@@ -362,8 +360,7 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ArrayInterface<T>
                 .arr
                 .async_retrieve_chunk_subset(&self.chk_index, &array_subset)
                 .await?;
-            let data = data.into_fixed()?;
-            Ok(BytesFromArray::Decoded(data.into_owned().into()))
+            Ok(BytesFromArray::Decoded(data.into_owned()))
         // this will be the more common case, everything except edge chunks.
         } else {
             let data = self
@@ -400,7 +397,7 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ArrayInterface<T>
                     ArrayBytes::new_fill_value(array_size, self.arr.fill_value())
                 }
             }
-            BytesFromArray::Decoded(bytes) => ArrayBytes::Fixed(Cow::Owned(bytes.into())),
+            BytesFromArray::Decoded(bytes) => bytes,
         };
 
         let t = self.arr.data_type();
@@ -459,6 +456,8 @@ impl ZarrInMemoryChunk {
         self.data.extend(other.data);
     }
 
+    /// this checks if any "row" in the chunk passes the filter
+    /// condition. this function does not consume the chunk.
     fn check_filter(&self, filter: &ZarrChunkFilter) -> Result<bool, ArrowError> {
         let array_refs: Vec<(String, ArrayRef)> = filter
             .schema_ref()
@@ -466,7 +465,7 @@ impl ZarrInMemoryChunk {
             .iter()
             .map(|f| self.data.get(f.name()).cloned())
             .collect::<Option<Vec<ArrayRef>>>()
-            .ok_or(ZarrQueryError::InvalidProjection(
+            .ok_or(ZarrQueryError::InvalidColumnRequest(
                 "Array missing from array map".into(),
             ))?
             .into_iter()
@@ -486,7 +485,7 @@ impl ZarrInMemoryChunk {
             .iter()
             .map(|f| self.data.remove(f.name()))
             .collect::<Option<Vec<ArrayRef>>>()
-            .ok_or(ZarrQueryError::InvalidProjection(
+            .ok_or(ZarrQueryError::InvalidColumnRequest(
                 "Array missing from array map".into(),
             ))?
             .into_iter()
@@ -494,8 +493,7 @@ impl ZarrInMemoryChunk {
             .map(|(ar, f)| (f.name().to_string(), ar))
             .collect();
 
-        RecordBatch::try_from_iter(array_refs)
-            .map_err(|e| ZarrQueryError::RecordBatchError(Box::new(e)))
+        RecordBatch::try_from_iter(array_refs).map_err(|e| ZarrQueryError::External(Box::new(e)))
     }
 }
 
@@ -514,37 +512,51 @@ struct ZarrStore<T: AsyncReadableListableStorageTraits + ?Sized> {
 }
 
 impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrStore<T> {
-    fn new(arrays: HashMap<String, Array<T>>, schema_ref: SchemaRef) -> ZarrQueryResult<Self> {
+    async fn new(
+        cols: &Vec<&String>,
+        prefix: &str,
+        store: Arc<T>,
+        schema_ref: SchemaRef,
+    ) -> ZarrQueryResult<Self> {
+        // open all the arrays based on the column names.
+        let mut arrays: HashMap<String, Array<T>> = HashMap::new();
+        for col in cols {
+            let path = PathBuf::from(&prefix)
+                .join(col)
+                .to_str()
+                .ok_or(ZarrQueryError::InvalidCompute(
+                    "Could not form path from group and column name".into(),
+                ))?
+                .to_string();
+            let arr = Array::async_open(store.clone(), &path).await?;
+            arrays.insert(col.to_string(), arr);
+        }
+
+        // determine which column, if any, represents a coordinate.
         let coordinates = ZarrCoordinates::new(&arrays, schema_ref)?;
 
         // technically getting the chunk shape requires a chunk
         // index, but it seems the zarrs library doesn't actually
         // return a chunk size that depends on the index, at least
         // for regular grids (it ignores edges in other words).
-        // so here we just retrive "chunk 0", store that, and adjust
+        // so here we just retrieve "chunk 0", store that, and adjust
         // for array edges in a separate function.
         let mut chk_shapes: HashMap<String, Vec<u64>> = HashMap::new();
+        let mut chk_grid_shapes: HashMap<String, Vec<u64>> = HashMap::new();
+        let mut arr_shapes: HashMap<String, Vec<u64>> = HashMap::new();
         for (k, arr) in arrays.iter() {
             let chk_idx = vec![0; arr.shape().len()];
             chk_shapes.insert(k.to_owned(), arr.chunk_shape(&chk_idx)?.to_array_shape());
-        }
-        let chunk_shape = resolve_vector(&coordinates, chk_shapes)?;
-
-        let mut chk_grid_shapes: HashMap<String, Vec<u64>> = HashMap::new();
-        for (k, arr) in arrays.iter() {
             chk_grid_shapes.insert(k.to_owned(), arr.chunk_grid_shape().clone());
-        }
-        let chunk_grid_shape = resolve_vector(&coordinates, chk_grid_shapes)?;
-
-        let mut arr_shapes: HashMap<String, Vec<u64>> = HashMap::new();
-        for (k, arr) in arrays.iter() {
             arr_shapes.insert(k.to_owned(), arr.shape().to_vec());
         }
+        let chunk_shape = resolve_vector(&coordinates, chk_shapes)?;
+        let chunk_grid_shape = resolve_vector(&coordinates, chk_grid_shapes)?;
         let array_shape = resolve_vector(&coordinates, arr_shapes)?;
 
         // this runtime will handle the i/o. i/o tasks spawned in
-        // that runtime will not share a thead pool with out (probably
-        // compute heavy, blocking) tasks.
+        // that runtime will not share a thead pool with other
+        // (probably compute heavy, blocking) tasks.
         let io_runtime = IoRuntime::try_new()?;
 
         Ok(Self {
@@ -581,6 +593,12 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrStore<T> {
         Ok(chunk_shape)
     }
 
+    /// this method will create interfaces (with pointers to the arrays)
+    /// and return them. those can than be packaged with the (encoded)
+    /// data so that those can be tracked together across async calls,
+    /// and the array interfaces can then be used to decode the encoded
+    /// data. this is all so that data can be read and decoded in different
+    /// thread pools and in parallel.
     fn get_array_interfaces(
         &self,
         cols: Vec<String>,
@@ -618,7 +636,7 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrStore<T> {
         next_chunk_idx: Option<Vec<u64>>,
     ) -> ZarrQueryResult<ZarrInMemoryChunk> {
         if cols.is_empty() {
-            return Err(ZarrQueryError::InvalidProjection(
+            return Err(ZarrQueryError::InvalidColumnRequest(
                 "No columns when polling zarr store for chunks".into(),
             ));
         }
@@ -747,32 +765,19 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrRecordBatchSt
             "/".to_string()
         };
 
-        // this will extract column (i.e. array) names based (possibly
-        // projected) schema.
+        // this will extract column (i.e. array) names based on the
+        // (possibly projected) schema.
         let cols: Vec<_> = projected_schema_ref
             .fields()
             .iter()
             .map(|f| f.name())
             .collect();
 
-        // open all the arrays based on the column names.
-        let mut arrays: HashMap<String, Array<T>> = HashMap::new();
-        for col in &cols {
-            let path = PathBuf::from(&prefix)
-                .join(col)
-                .into_os_string()
-                .to_str()
-                .ok_or(ZarrQueryError::InvalidMetadata(
-                    "could not form path from group and column name".into(),
-                ))?
-                .to_string();
-            let arr = Array::async_open(store.clone(), &path).await?;
-            arrays.insert(col.to_string(), arr);
-        }
-
-        // store all the zarr arrays in a struct that we can use
-        // to access them later.
-        let zarr_store = Arc::new(ZarrStore::new(arrays, projected_schema_ref.clone())?);
+        // create the zarr store object that will have access to all
+        // the data stored in it.
+        let zarr_store = Arc::new(
+            ZarrStore::new(&cols, &prefix, store.clone(), projected_schema_ref.clone()).await?,
+        );
 
         // this creates all the chunk indices we will be reading from.
         let chk_grid_shape = &zarr_store.chunk_grid_shape;
@@ -960,7 +965,8 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrRecordBatchSt
 
 /// An async stream of record batches read from the Zarr store.
 ///
-/// This implementation is modeled to be used with the DataFusion [`RecordBatchStream`] trait.
+/// This implementation is modeled to be used with the DataFusion
+/// [`RecordBatchStream`] trait.
 ///
 /// [`RecordBatchStream`]: https://docs.rs/datafusion/latest/datafusion/execution/trait.RecordBatchStream.html
 pub struct ZarrRecordBatchStream {
@@ -1020,12 +1026,13 @@ impl Stream for ZarrRecordBatchStream {
 
 #[cfg(test)]
 mod zarr_stream_tests {
+    use arrow::compute::concat_batches;
     use futures_util::TryStreamExt;
 
     use super::*;
     use crate::test_utils::{
-        extract_col, get_local_zarr_store, get_local_zarr_store_mix_dims, validate_names_and_types,
-        validate_primitive_column,
+        extract_col, get_local_zarr_store, get_local_zarr_store_mix_dims,
+        get_local_zarr_store_no_coords, validate_names_and_types, validate_primitive_column,
     };
     use crate::zarr_store_opener::ZarrArrowPredicate;
 
@@ -1116,6 +1123,37 @@ mod zarr_stream_tests {
             "data",
             &records[8],
             &[54.0, 55.0, 62.0, 63.0],
+        );
+    }
+
+    #[tokio::test]
+    async fn read_data_no_coords_test() {
+        let (wrapper, schema) = get_local_zarr_store_no_coords(0.0, "data_no_coords").await;
+        let store = wrapper.get_store();
+
+        let stream = ZarrRecordBatchStream::try_new(store, schema.clone(), None, None, 1, 0, None)
+            .await
+            .unwrap();
+        let records: Vec<_> = stream.try_collect().await.unwrap();
+
+        let target_types = HashMap::from([
+            ("data_1".to_string(), DataType::Float64),
+            ("data_2".to_string(), DataType::Float64),
+        ]);
+        validate_names_and_types(&target_types, &records[0]);
+        assert_eq!(records.len(), 3);
+
+        let batch = concat_batches(&schema, &records).unwrap();
+
+        validate_primitive_column::<Float64Type, f64>(
+            "data_1",
+            &batch,
+            &[0., 1., 2., 3., 4., 5., 6., 7.],
+        );
+        validate_primitive_column::<Float64Type, f64>(
+            "data_2",
+            &batch,
+            &[100., 101., 102., 103., 104., 105., 106., 107.],
         );
     }
 
