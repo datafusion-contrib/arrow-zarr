@@ -120,6 +120,8 @@ impl ExecutionPlan for ZarrScan {
 
         let zarr_source =
             ZarrSource::new(self.zarr_config.clone(), n_partitions, self.filters.clone());
+        // dummy file group, it's needed to re-use some of the datafusion code,
+        // but it doesn't really apply for a zarr store.
         let file_groups = vec![FileGroup::new(vec![PartitionedFile::new("", 0)])];
         let file_scan_config = FileScanConfigBuilder::new(
             ObjectStoreUrl::parse("file://").unwrap(),
