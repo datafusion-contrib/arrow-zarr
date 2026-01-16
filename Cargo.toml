@@ -12,6 +12,7 @@ rust-version = "1.86"
 [features]
 default = []
 icechunk = ["dep:icechunk", "dep:zarrs_icechunk"]
+datafusion = ["dep:datafusion"]
 
 [dependencies]
 arrow = { version = "55.2.0" }
@@ -21,7 +22,7 @@ async-stream = "0.3"
 async-trait = { version = "0.1.89" }
 bytes = { version = "1.10.1" }
 chrono = { version = "0.4.42" }
-datafusion = { version = "49.0.0" }
+datafusion = { version = "49.0.0", optional = true }
 futures = { version = "0.3.31" }
 futures-util = { version = "0.3.31" }
 icechunk = { version = "0.3.17", optional = true }

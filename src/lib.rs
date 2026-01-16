@@ -15,11 +15,11 @@
 // specific language governing permissions and limitations
 // under the License.
 
-pub mod errors;
-pub mod table;
 pub mod zarr_store_opener;
-
 pub use zarr_store_opener::ZarrRecordBatchStream;
+
+#[cfg(feature = "datafusion")]
+pub mod table;
 
 #[cfg(test)]
 mod test_utils {
@@ -35,7 +35,7 @@ mod test_utils {
     use arrow_array::RecordBatch;
     use arrow_schema::{DataType as ArrowDataType, Field, Schema, SchemaRef};
     use futures::executor::block_on;
-    #[cfg(feature = "icechunk")]
+    #[cfg(all(feature = "icechunk", feature = "datafusion"))]
     use icechunk::{ObjectStorage, Repository};
     use itertools::enumerate;
     use ndarray::{Array, Array1, Array2};
@@ -43,7 +43,7 @@ mod test_utils {
     use walkdir::WalkDir;
     use zarrs::array::{codec, ArrayBuilder, DataType, FillValue};
     use zarrs::array_subset::ArraySubset;
-    #[cfg(feature = "icechunk")]
+    #[cfg(all(feature = "icechunk", feature = "datafusion"))]
     use zarrs_icechunk::AsyncIcechunkStore;
     use zarrs_object_store::AsyncObjectStore;
     use zarrs_storage::{
@@ -76,6 +76,7 @@ mod test_utils {
             self.store.clone()
         }
 
+        #[cfg(feature = "datafusion")]
         pub(crate) fn get_store_path(&self) -> String {
             self.path.as_os_str().to_str().unwrap().into()
         }
@@ -96,13 +97,13 @@ mod test_utils {
 
     // convenience class to make sure the local icechunk repos get cleanup
     // after we're done running a test.
-    #[cfg(feature = "icechunk")]
+    #[cfg(all(feature = "icechunk", feature = "datafusion"))]
     pub(crate) struct LocalIcechunkRepoWrapper {
         store: Arc<AsyncIcechunkStore>,
         path: PathBuf,
     }
 
-    #[cfg(feature = "icechunk")]
+    #[cfg(all(feature = "icechunk", feature = "datafusion"))]
     impl LocalIcechunkRepoWrapper {
         pub(crate) async fn new(store_name: String) -> Self {
             if store_name.is_empty() {
@@ -133,8 +134,7 @@ mod test_utils {
         }
     }
 
-    // TODO: Implement Drop. Just not sure how to do this cleanly yet.
-    #[cfg(feature = "icechunk")]
+    #[cfg(all(feature = "icechunk", feature = "datafusion"))]
     impl Drop for LocalIcechunkRepoWrapper {
         fn drop(&mut self) {
             if !self
@@ -332,6 +332,17 @@ mod test_utils {
         .await;
     }
 
+    async fn write_no_coord_data_to_store(
+        store: Arc<dyn AsyncReadableWritableListableStorageTraits>,
+        fillvalue: f64,
+    ) {
+        let data = (0..8).map(|i| i as f64).collect();
+        write_1d_float_array(data, fillvalue, 8, 3, store.clone(), "/data_1", None).await;
+
+        let data = (100..108).map(|i| i as f64).collect();
+        write_1d_float_array(data, fillvalue, 8, 3, store.clone(), "/data_2", None).await;
+    }
+
     async fn write_mixed_dims_lat_lon_data_to_store(
         store: Arc<dyn AsyncReadableWritableListableStorageTraits>,
         fillvalue: f64,
@@ -403,6 +414,22 @@ mod test_utils {
         (wrapper, schema)
     }
 
+    pub(crate) async fn get_local_zarr_store_no_coords(
+        fillvalue: f64,
+        dir_name: &str,
+    ) -> (LocalZarrStoreWrapper, SchemaRef) {
+        let wrapper = LocalZarrStoreWrapper::new(dir_name.into());
+        let store = wrapper.get_store();
+
+        write_no_coord_data_to_store(store, fillvalue).await;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("data_1", ArrowDataType::Float64, true),
+            Field::new("data_2", ArrowDataType::Float64, true),
+        ]));
+
+        (wrapper, schema)
+    }
+
     pub(crate) async fn get_local_zarr_store_mix_dims(
         fillvalue: f64,
         dir_name: &str,
@@ -420,7 +447,7 @@ mod test_utils {
         (wrapper, schema)
     }
 
-    #[cfg(feature = "icechunk")]
+    #[cfg(all(feature = "icechunk", feature = "datafusion"))]
     pub(crate) async fn get_local_icechunk_repo(
         write_data: bool,
         fillvalue: f64,
