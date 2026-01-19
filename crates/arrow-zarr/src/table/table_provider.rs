@@ -59,6 +59,7 @@ impl ZarrTable {
         Self { table_config }
     }
 
+    #[cfg(feature = "icechunk")]
     pub async fn from_path_to_icechunk(path: String) -> Self {
         let table_url = ListingTableUrl::parse(path).unwrap();
         let zarr_url = ZarrTableUrl::IcechunkRepo(table_url);
