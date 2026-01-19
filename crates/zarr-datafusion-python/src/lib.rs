@@ -9,9 +9,7 @@ use pyo3::types::PyCapsule;
 fn get_tokio_runtime() -> &'static tokio::runtime::Runtime {
     use std::sync::OnceLock;
     static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
-    RUNTIME.get_or_init(|| {
-        tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime")
-    })
+    RUNTIME.get_or_init(|| tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime"))
 }
 
 #[pyclass(name = "ZarrTableProvider", module = "zarr_datafusion._internal")]
@@ -24,9 +22,10 @@ impl PyZarrTableProvider {
     #[new]
     pub fn new(path: &str) -> PyResult<Self> {
         let path = path.to_string();
-        let table = get_tokio_runtime()
-            .block_on(async { ZarrTable::from_path(path).await });
-        Ok(Self { table: Arc::new(table) })
+        let table = get_tokio_runtime().block_on(async { ZarrTable::from_path(path).await });
+        Ok(Self {
+            table: Arc::new(table),
+        })
     }
 
     fn __datafusion_table_provider__<'py>(
@@ -50,9 +49,11 @@ impl PyIcechunkTableProvider {
     #[new]
     pub fn new(path: &str) -> PyResult<Self> {
         let path = path.to_string();
-        let table = get_tokio_runtime()
-            .block_on(async { ZarrTable::from_path_to_icechunk(path).await });
-        Ok(Self { table: Arc::new(table) })
+        let table =
+            get_tokio_runtime().block_on(async { ZarrTable::from_path_to_icechunk(path).await });
+        Ok(Self {
+            table: Arc::new(table),
+        })
     }
 
     fn __datafusion_table_provider__<'py>(
