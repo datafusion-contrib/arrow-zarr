@@ -34,7 +34,7 @@ impl PyZarrTableProvider {
     ) -> PyResult<Bound<'py, PyCapsule>> {
         let name = CString::new("datafusion_table_provider").unwrap();
         let runtime_handle = get_tokio_runtime().handle().clone();
-        let provider = FFI_TableProvider::new(self.table.clone(), false, Some(runtime_handle));
+        let provider = FFI_TableProvider::new(self.table.clone(), true, Some(runtime_handle));
         PyCapsule::new(py, provider, Some(name))
     }
 }
@@ -62,7 +62,7 @@ impl PyIcechunkTableProvider {
     ) -> PyResult<Bound<'py, PyCapsule>> {
         let name = CString::new("datafusion_table_provider").unwrap();
         let runtime_handle = get_tokio_runtime().handle().clone();
-        let provider = FFI_TableProvider::new(self.table.clone(), false, Some(runtime_handle));
+        let provider = FFI_TableProvider::new(self.table.clone(), true, Some(runtime_handle));
         PyCapsule::new(py, provider, Some(name))
     }
 }
