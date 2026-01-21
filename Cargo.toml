@@ -48,17 +48,19 @@ walkdir = { version = "2.5.0" }
 [[bench]]
 name = "shared"
 path = "benches/shared.rs"
-test = false # shared benchmark code, not meant to be ran alone
+# shared benchmark code, not meant to be ran alone
+test = false 
+bench = false 
 
 [[bench]]
 name = "s3_bench"
 path = "benches/s3_bench.rs"
 harness = false
-required-features = ["icechunk"]
+required-features = ["icechunk", "datafusion"]
 
 [[bench]]
 name = "gcs_bench"
 path = "benches/gcs_bench.rs"
 harness = false
-required-features = ["icechunk"]
+required-features = ["icechunk", "datafusion"]
 

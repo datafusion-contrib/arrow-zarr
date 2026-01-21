@@ -1,11 +1,9 @@
-use std::collections::HashMap;
+#![cfg(feature = "datafusion")] // feature gate for datafusion
 use std::hint::black_box;
 use std::sync::Arc;
 
-use arrow_array::RecordBatch;
 use arrow_zarr::table::ZarrTableFactory;
 use criterion::Criterion;
-use datafusion::dataframe::DataFrame;
 use datafusion::execution::SessionStateBuilder;
 use datafusion::prelude::SessionContext;
 use ndarray::{Array, Array2};
@@ -68,8 +66,8 @@ pub async fn write_data_to_store(
 }
 
 async fn run_query(query: &str, session: SessionContext) {
-    let df: DataFrame = session.sql(query).await.unwrap();
-    let _: Vec<RecordBatch> = df.collect().await.unwrap();
+    let df = session.sql(query).await.unwrap();
+    let _ = df.collect().await.unwrap();
 }
 
 pub fn run_benchmark_group(session: &SessionContext, c: &mut Criterion, group_name: &str) {
@@ -128,12 +126,11 @@ pub struct TestFixture<B: CloudStorageBenchBackend> {
 
 impl<B: CloudStorageBenchBackend> TestFixture<B> {
     pub async fn new(backend: B, url: &str) -> Self {
-        let store = B::create_icechunk_store(url).await;
+        let store: Arc<AsyncIcechunkStore> = B::create_icechunk_store(url).await;
         write_data_to_store(store.clone(), 1, "").await;
-        let _ = store
-            .session()
-            .write()
-            .await
+        let session = store.session();
+        let mut writer = session.write().await;
+        writer
             .commit("Test data for benchmarking", None)
             .await
             .unwrap();
@@ -151,7 +148,7 @@ impl<B: CloudStorageBenchBackend> TestFixture<B> {
             ",
             url
         );
-        session.sql(&query).await.unwrap();
+        let _ = session.sql(&query).await.unwrap();
 
         Self { backend, session }
     }

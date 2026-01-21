@@ -11,7 +11,7 @@ use icechunk::config::{GcsCredentials, GcsOptions};
 use icechunk::{ObjectStorage, Repository};
 use zarrs_icechunk::AsyncIcechunkStore;
 
-use shared::{CloudStorageBackend, TestFixture, run_benchmark_group};
+use shared::{CloudStorageBenchBackend, TestFixture, run_benchmark_group};
 
 // ============================================================================
 // GCS Backend Implementation
@@ -40,8 +40,8 @@ impl GCSBenchBackend {
 }
 
 #[async_trait::async_trait]
-impl CloudStorageBackend for GCSBenchBackend {
-    async fn create_store(url: &str) -> Arc<AsyncIcechunkStore> {
+impl CloudStorageBenchBackend for GCSBenchBackend {
+    async fn create_icechunk_store(url: &str) -> Arc<AsyncIcechunkStore> {
         let listing_url = ListingTableUrl::parse(url).unwrap();
         let bucket = listing_url
             .object_store()
