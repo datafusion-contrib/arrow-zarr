@@ -42,6 +42,7 @@ zarrs_storage = { version = "0.4.0", features = ["async"] }
 aws-config = { version = "1.5.18" }
 aws-sdk-s3 = { version = "1.78.0" }
 criterion = { version = "0.7.0", features = ["async_tokio"] }
+google-cloud-storage = "1.6.0"
 walkdir = { version = "2.5.0" }
 
 [[bench]]
@@ -52,6 +53,12 @@ test = false # shared benchmark code, not meant to be ran alone
 [[bench]]
 name = "s3_bench"
 path = "benches/s3_bench.rs"
+harness = false
+required-features = ["icechunk"]
+
+[[bench]]
+name = "gcs_bench"
+path = "benches/gcs_bench.rs"
 harness = false
 required-features = ["icechunk"]
 
