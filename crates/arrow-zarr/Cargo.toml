@@ -13,6 +13,8 @@ rust-version = "1.86"
 default = []
 icechunk = ["dep:icechunk", "dep:zarrs_icechunk"]
 datafusion = ["dep:datafusion"]
+s3 = ["object_store/aws"]
+gcs = ["object_store/gcp"]
 
 [dependencies]
 arrow = { workspace = true }
@@ -33,7 +35,7 @@ geo-types = { version = "0.7.18" }
 icechunk = { version = "0.3.17", optional = true }
 itertools = { version = "0.14.0" }
 ndarray = { version = "^0.16.1" }
-object_store = { version = "0.12.0", features = ["aws", "gcp"] }
+object_store = { version = "0.12.0" }
 tokio = { workspace = true }
 tokio-test = { version = "0.4.4" }
 wkb = { version = "0.9.2" }
@@ -45,15 +47,18 @@ zarrs_object_store = { version = "0.5.0" }
 zarrs_storage = { version = "0.4.0", features = ["async"] }
 
 [dev-dependencies]
-aws-config = { version = "1.5.18" }
 parquet = { version = "55", features = ["arrow"] }
 geos = { version = "8" }
 wkt = "0.10"
-aws-sdk-s3 = { version = "1.78.0" }
 criterion = { version = "0.7.0", features = ["async_tokio"] }
 walkdir = { version = "2.5.0" }
 
 [[bench]]
 name = "s3_bench"
 harness = false
-required-features = ["icechunk"]
+required-features = ["icechunk", "s3"]
+
+[[bench]]
+name = "gcs_bench"
+harness = false
+required-features = ["icechunk", "gcs"]

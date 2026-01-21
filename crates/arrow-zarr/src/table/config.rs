@@ -17,7 +17,7 @@
 
 #[cfg(feature = "icechunk")]
 use std::collections::HashMap;
-#[cfg(feature = "icechunk")]
+#[cfg(all(feature = "icechunk", feature = "s3"))]
 use std::env;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -27,7 +27,10 @@ use datafusion::datasource::listing::ListingTableUrl;
 use datafusion::error::{DataFusionError, Result as DfResult};
 #[cfg(feature = "icechunk")]
 use icechunk::{ObjectStorage, Repository};
+#[cfg(feature = "s3")]
 use object_store::aws::AmazonS3Builder;
+#[cfg(feature = "gcs")]
+use object_store::gcp::GoogleCloudStorageBuilder;
 use object_store::local::LocalFileSystem;
 use zarrs::array::data_type::DataType as zarr_dtype;
 use zarrs::array::Array;
@@ -109,12 +112,11 @@ impl ZarrTableUrl {
         // the Option<String> that is returned here requires some explanation.
         // for some remote stores, the full url is not used as a prefix when
         // writing and reading from the store. for example for aws s3, it
-        // seems the bucket is extracted from the url, but not the rest, so
-        // when reading from the store, you always need to provide a prefix
-        // to get to the actual zarr store. but for local object stores, it
-        // actually can store the prefix, to be applied when you read from
-        // the store. so we need to sometimes return no prefix (None) and
-        // sometimes return one (Some(prefix)).
+        // seems the bucket is extracted from the url, but other than that
+        // the object path is not kept, so when reading from the store, you
+        // always need to provide a prefix. but for local object stores, it
+        // actually can store the prefix. so we need to sometimes return no
+        // prefix (None) and sometimes return one (Some(prefix)).
         match self {
             // this is for the case of a directory with a zarr file structure inside.
             Self::ZarrStore(table_url) => match table_url.scheme() {
@@ -123,8 +125,17 @@ impl ZarrTableUrl {
                     let store = AsyncObjectStore::new(LocalFileSystem::new_with_prefix(path)?);
                     Ok((Arc::new(store), None))
                 }
+                #[cfg(feature = "s3")]
                 "s3" => {
                     let store = AmazonS3Builder::from_env()
+                        .with_url(table_url.get_url().as_str())
+                        .build()?;
+                    let store = AsyncObjectStore::new(store);
+                    Ok((Arc::new(store), Some(table_url.prefix().to_string())))
+                }
+                #[cfg(feature = "gcs")]
+                "gs" => {
+                    let store = GoogleCloudStorageBuilder::from_env()
                         .with_url(table_url.get_url().as_str())
                         .build()?;
                     let store = AsyncObjectStore::new(store);
@@ -147,6 +158,7 @@ impl ZarrTableUrl {
                             .await
                             .map_err(|e| DataFusionError::External(Box::new(e)))?
                     }
+                    #[cfg(feature = "s3")]
                     "s3" => {
                         use icechunk::config::{S3Credentials, S3Options};
 
@@ -172,6 +184,27 @@ impl ZarrTableUrl {
                             Some(table_url.prefix().as_ref().to_string()),
                             Some(credentials),
                             Some(config),
+                        )
+                        .await
+                        .map_err(|e| DataFusionError::External(Box::new(e)))?
+                    }
+                    #[cfg(feature = "gcs")]
+                    "gs" => {
+                        use icechunk::config::GcsCredentials;
+
+                        let bucket = table_url
+                            .object_store()
+                            .as_str()
+                            .replace("gs://", "")
+                            .trim_end_matches("/")
+                            .to_string();
+                        let credentials = GcsCredentials::FromEnv;
+
+                        ObjectStorage::new_gcs(
+                            bucket,
+                            Some(table_url.prefix().as_ref().to_string()),
+                            Some(credentials),
+                            None,
                         )
                         .await
                         .map_err(|e| DataFusionError::External(Box::new(e)))?
