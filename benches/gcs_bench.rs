@@ -5,9 +5,7 @@ use std::sync::Arc;
 
 use criterion::{criterion_group, criterion_main, Criterion};
 use datafusion::datasource::listing::ListingTableUrl;
-use google_cloud_storage::http::objects::delete::DeleteObjectRequest;
-use google_cloud_storage::http::objects::list::ListObjectsRequest;
-use icechunk::config::{GcsCredentials, GcsOptions};
+use icechunk::config::GcsCredentials;
 use icechunk::{ObjectStorage, Repository};
 use zarrs_icechunk::AsyncIcechunkStore;
 
@@ -18,23 +16,15 @@ use shared::{CloudStorageBenchBackend, TestFixture, run_benchmark_group};
 // ============================================================================
 
 struct GCSBenchBackend {
-    bucket: String,
-    prefix: String,
-    client: google_cloud_storage::client::Client,
+    _bucket: String,
+    _prefix: String,
 }
 
 impl GCSBenchBackend {
     async fn new(bucket: String, prefix: String) -> Self {
-        let config = google_cloud_storage::client::ClientConfig::default()
-            .with_auth()
-            .await
-            .unwrap();
-        let client = google_cloud_storage::client::Client::new(config);
-        
         Self {
-            bucket,
-            prefix,
-            client,
+            _bucket: bucket,
+            _prefix: prefix,
         }
     }
 }
@@ -51,55 +41,42 @@ impl CloudStorageBenchBackend for GCSBenchBackend {
             .to_string();
 
         let credentials = GcsCredentials::FromEnv;
-        let config = GcsOptions {
-            endpoint_url: None,
-            anonymous: false,
-            allow_http: false,
-        };
 
-        let store = ObjectStorage::new_gcs(
-            bucket,
-            Some(listing_url.prefix().as_ref().to_string()),
-            Some(credentials),
-            Some(config),
-        )
-        .await
-        .unwrap();
-
-        let repo = Repository::create(None, Arc::new(store), HashMap::new())
+        let store = Arc::new(
+            ObjectStorage::new_gcs(
+                bucket,
+                Some(listing_url.prefix().as_ref().to_string()),
+                Some(credentials),
+                None,
+            )
             .await
-            .unwrap();
+            .unwrap()
+        );
+
+        let repo = match Repository::open(None, store.clone(), HashMap::new()).await {
+            Ok(repo) => repo,
+            Err(_) => {
+                Repository::create(None, store, HashMap::new())
+                    .await
+                    .unwrap()
+            }
+        };
         let session = repo.writable_session("main").await.unwrap();
 
         Arc::new(AsyncIcechunkStore::new(session))
     }
 
     async fn cleanup(&self) {
-
-        let list_request = ListObjectsRequest {
-            bucket: self.bucket.clone(),
-            prefix: Some(self.prefix.clone()),
-            ..Default::default()
-        };
-
-        let objects = self.client.list_objects(&list_request).await.unwrap();
-
-        for obj in objects.items.unwrap_or_default() {
-            let delete_request = DeleteObjectRequest {
-                bucket: self.bucket.clone(),
-                object: obj.name,
-                ..Default::default()
-            };
-            let _ = self.client.delete_object(&delete_request).await;
-        }
+        // Cleanup is handled by the TestFixture Drop implementation
+        // which uses the icechunk store to clean up resources
     }
 
     fn bucket(&self) -> &str {
-        &self.bucket
+        &self._bucket
     }
 
     fn prefix(&self) -> &str {
-        &self.prefix
+        &self._prefix
     }
 }
 

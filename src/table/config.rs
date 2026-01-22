@@ -176,6 +176,26 @@ impl ZarrTableUrl {
                         .await
                         .map_err(|e| DataFusionError::External(Box::new(e)))?
                     }
+                    "gs" => {
+                        use icechunk::config::GcsCredentials;
+
+                        let bucket = table_url
+                            .object_store()
+                            .as_str()
+                            .replace("gs://", "")
+                            .trim_end_matches("/")
+                            .to_string();
+                        let credentials = GcsCredentials::FromEnv;
+
+                        ObjectStorage::new_gcs(
+                            bucket,
+                            Some(table_url.prefix().as_ref().to_string()),
+                            Some(credentials),
+                            None,
+                        )
+                        .await
+                        .map_err(|e| DataFusionError::External(Box::new(e)))?
+                    }
                     _ => {
                         return Err(DataFusionError::Execution(format!(
                             "Unsupported table url scheme {} for icechunk repos",
