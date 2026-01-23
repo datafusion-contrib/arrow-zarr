@@ -54,4 +54,4 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     - uses: dtolnay/rust-toolchain@stable
-    - run: cargo test --features icechunk
+    - run: cargo test -p arrow-zarr --features datafusion,icechunk
