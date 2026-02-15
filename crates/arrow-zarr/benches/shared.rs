@@ -114,7 +114,6 @@ pub fn run_benchmark_group(session: &SessionContext, c: &mut Criterion, group_na
 pub trait CloudStorageBenchBackend: Send + Sync {
     // must be implemented for different cloud storage providers to enable benchmarking
     async fn create_icechunk_store(url: &str) -> Arc<AsyncIcechunkStore>;
-    async fn cleanup(&self);
     fn bucket(&self) -> &str;
     fn prefix(&self) -> &str;
 }
@@ -158,11 +157,3 @@ impl<B: CloudStorageBenchBackend> TestFixture<B> {
     }
 }
 
-impl<B: CloudStorageBenchBackend> Drop for TestFixture<B> {
-    fn drop(&mut self) {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            self.backend.cleanup().await;
-        });
-    }
-}

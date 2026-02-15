@@ -16,16 +16,13 @@ use shared::{CloudStorageBenchBackend, TestFixture, run_benchmark_group};
 // ============================================================================
 
 struct GCSBenchBackend {
-    _bucket: String,
-    _prefix: String,
+    bucket: String,
+    prefix: String,
 }
 
 impl GCSBenchBackend {
     async fn new(bucket: String, prefix: String) -> Self {
-        Self {
-            _bucket: bucket,
-            _prefix: prefix,
-        }
+        Self { bucket, prefix }
     }
 }
 
@@ -66,17 +63,12 @@ impl CloudStorageBenchBackend for GCSBenchBackend {
         Arc::new(AsyncIcechunkStore::new(session))
     }
 
-    async fn cleanup(&self) {
-        // Cleanup is handled by the TestFixture Drop implementation
-        // which uses the icechunk store to clean up resources
-    }
-
     fn bucket(&self) -> &str {
-        &self._bucket
+        &self.bucket
     }
 
     fn prefix(&self) -> &str {
-        &self._prefix
+        &self.prefix
     }
 }
 

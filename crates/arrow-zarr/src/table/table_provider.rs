@@ -53,8 +53,16 @@ impl ZarrTable {
 
     pub async fn from_path(path: String) -> Self {
         let table_url = ListingTableUrl::parse(path).unwrap();
-        // TODO(alxmrs): Figure out how to optionally support icechunk
         let zarr_url = ZarrTableUrl::ZarrStore(table_url);
+        let schema = zarr_url.infer_schema().await.unwrap();
+        let table_config = ZarrTableConfig::new(zarr_url, schema);
+        Self { table_config }
+    }
+
+    #[cfg(feature = "icechunk")]
+    pub async fn from_path_to_icechunk(path: String) -> Self {
+        let table_url = ListingTableUrl::parse(path).unwrap();
+        let zarr_url = ZarrTableUrl::IcechunkRepo(table_url);
         let schema = zarr_url.infer_schema().await.unwrap();
         let table_config = ZarrTableConfig::new(zarr_url, schema);
         Self { table_config }
@@ -252,11 +260,13 @@ mod table_provider_tests {
         let (wrapper, _) = get_local_zarr_store(true, 0.0, "lat_lon_data_for_factory").await;
         let mut state = SessionStateBuilder::new().build();
         let table_path = wrapper.get_store_path();
+
+        // here we create the table via a sql command so that we can explicitly
+        // create it on some of the columns, to test the case where all the
+        // selected columns are coordinates that need to be broadcasted.
         state
             .table_factories_mut()
             .insert("ZARR_STORE".into(), Arc::new(ZarrTableFactory {}));
-
-        // create a table with 2 explicitly selected columns
         let query = format!(
             "CREATE EXTERNAL TABLE zarr_table_partial(lat double, lon double) STORED AS ZARR_STORE LOCATION '{}'",
             table_path,
@@ -276,14 +286,15 @@ mod table_provider_tests {
         assert_eq!(batch.num_columns(), 2);
         assert_eq!(batch.num_rows(), 64);
 
-        // create a table, with 3 columns, lat, lon and data.
-        let query = format!(
-            "CREATE EXTERNAL TABLE zarr_table STORED AS ZARR_STORE LOCATION '{}'",
-            table_path,
-        );
-
+        // nw we want the full table so we can just register the table
+        // directly on the session context.
         let session = SessionContext::new_with_state(state.clone());
-        session.sql(&query).await.unwrap();
+        session
+            .register_table(
+                "zarr_table",
+                Arc::new(ZarrTable::from_path(table_path.clone()).await),
+            )
+            .unwrap();
 
         // a simple select statement with a limit.
         let query = "SELECT lat, lon FROM zarr_table LIMIT 10";
@@ -340,19 +351,16 @@ mod table_provider_tests {
         {
             let (wrapper, _) = get_local_icechunk_repo(true, 0.0, "lat_lon_repo_for_factory").await;
             let table_path = wrapper.get_store_path();
-            state
-                .table_factories_mut()
-                .insert("ICECHUNK_REPO".into(), Arc::new(ZarrTableFactory {}));
-
-            let query = format!(
-                "CREATE EXTERNAL TABLE zarr_table_icechunk STORED AS ICECHUNK_REPO LOCATION '{}'",
-                table_path,
-            );
 
             let session = SessionContext::new_with_state(state.clone());
-            session.sql(&query).await.unwrap();
+            session
+                .register_table(
+                    "zarr_table_icechunk",
+                    Arc::new(ZarrTable::from_path_to_icechunk(table_path).await),
+                )
+                .unwrap();
 
-            let query = "SELECT lat, lon FROM zarr_table LIMIT 10";
+            let query = "SELECT lat, lon FROM zarr_table_icechunk LIMIT 10";
             let df = session.sql(query).await.unwrap();
             let batches = df.collect().await.unwrap();
 
@@ -367,19 +375,16 @@ mod table_provider_tests {
     async fn partial_coordinates_query() {
         let (wrapper, _) =
             get_local_zarr_store(true, 0.0, "lat_lon_data_partial_coord_query").await;
-        let mut state = SessionStateBuilder::new().build();
+        let state = SessionStateBuilder::new().build();
         let table_path = wrapper.get_store_path();
-        state
-            .table_factories_mut()
-            .insert("ZARR_STORE".into(), Arc::new(ZarrTableFactory {}));
-
-        let query = format!(
-            "CREATE EXTERNAL TABLE zarr_table STORED AS ZARR_STORE LOCATION '{}'",
-            table_path,
-        );
 
         let session = SessionContext::new_with_state(state.clone());
-        session.sql(&query).await.unwrap();
+        session
+            .register_table(
+                "zarr_table",
+                Arc::new(ZarrTable::from_path(table_path).await),
+            )
+            .unwrap();
 
         // select the 2D data and only one of the 1D coordinates. This should get
         // resolved to the lon being brodacasted to match the 2D data.
@@ -396,19 +401,16 @@ mod table_provider_tests {
     #[tokio::test]
     async fn query_with_filter() {
         let (wrapper, _) = get_local_zarr_store(true, 0.0, "lat_lon_data_filter_query").await;
-        let mut state = SessionStateBuilder::new().build();
+        let state = SessionStateBuilder::new().build();
         let table_path = wrapper.get_store_path();
-        state
-            .table_factories_mut()
-            .insert("ZARR_STORE".into(), Arc::new(ZarrTableFactory {}));
-
-        let query = format!(
-            "CREATE EXTERNAL TABLE zarr_table STORED AS ZARR_STORE LOCATION '{}'",
-            table_path,
-        );
 
         let session = SessionContext::new_with_state(state.clone());
-        session.sql(&query).await.unwrap();
+        session
+            .register_table(
+                "zarr_table",
+                Arc::new(ZarrTable::from_path(table_path).await),
+            )
+            .unwrap();
 
         // select the 2D data and only one of the 1D coordinates. This should get
         // resolved to the lon being brodacasted to match the 2D data.
