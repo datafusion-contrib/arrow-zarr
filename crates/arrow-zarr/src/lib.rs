@@ -21,6 +21,9 @@ pub use zarr_store_opener::ZarrRecordBatchStream;
 #[cfg(feature = "datafusion")]
 pub mod table;
 
+#[cfg(feature = "datafusion")]
+pub mod geospatial;
+
 #[cfg(test)]
 mod test_utils {
     use std::collections::HashMap;
