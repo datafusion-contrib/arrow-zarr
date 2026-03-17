@@ -8,7 +8,6 @@ use datafusion::logical_expr::ScalarUDF;
 use datafusion::prelude::SessionContext;
 use parquet::arrow::ArrowWriter;
 
-use crate::geospatial::test_utils::{make_build_batch, make_probe_batches};
 use crate::geospatial::{SpatialJoinPhysicalOptimizer, StWithinUdf};
 
 struct TestFixture {

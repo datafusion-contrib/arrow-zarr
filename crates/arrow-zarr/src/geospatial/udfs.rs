@@ -18,7 +18,6 @@ macro_rules! spatial_predicate_stub {
                         signature: Signature::one_of(
                             vec![
                                 TypeSignature::Exact(vec![DataType::Binary, DataType::Binary]),
-                                TypeSignature::Exact(vec![DataType::LargeBinary, DataType::LargeBinary]),
                                 TypeSignature::Exact(vec![DataType::BinaryView, DataType::BinaryView]),
                             ],
                             Volatility::Immutable,
@@ -45,9 +44,7 @@ macro_rules! spatial_predicate_stub {
 }
 
 spatial_predicate_stub! {
-    StWithinUdf => "st_within_bulk",
-    StContainsUdf => "st_contains_bulk",
-}
+StWithinUdf => "st_within",}
 
 #[cfg(test)]
 mod udf_tests {
@@ -55,7 +52,6 @@ mod udf_tests {
 
     #[test]
     fn test_udf_names() {
-        assert_eq!(StWithinUdf::default().name(), "st_within_bulk");
-        assert_eq!(StContainsUdf::default().name(), "st_contains_bulk");
+        assert_eq!(StWithinUdf::default().name(), "st_within");
     }
 }

@@ -1,5 +1,5 @@
 from datafusion import SessionContext
-from ._internal import ZarrTableProvider, IcechunkTableProvider
+from ._internal import ZarrTableProvider, IcechunkTableProvider, GeospatialSessionContext
 
 
 class ZarrSessionContext(SessionContext):
@@ -24,4 +24,4 @@ class ZarrSessionContext(SessionContext):
         self.register_table(name, IcechunkTableProvider(path))
 
 
-__all__ = ["ZarrSessionContext", "ZarrTableProvider", "IcechunkTableProvider"]
+__all__ = ["ZarrSessionContext", "ZarrTableProvider", "IcechunkTableProvider", "GeospatialSessionContext"]
