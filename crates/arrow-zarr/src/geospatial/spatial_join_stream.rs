@@ -112,13 +112,15 @@ impl InnerSpatialJoinStream {
         };
 
         let build = self.build_side()?;
-        let (probe_matched, build_matched) = build.traverse_with_refinement(
-            probe_rects,
-            probe_ids,
-            probe_geo_array,
-            &self.predicate.relation_type,
-            BUILD_SIDE_JOIN_SIDE,
-        );
+        let (probe_matched, build_matched) = build
+            .traverse_with_refinement(
+                probe_rects,
+                probe_ids,
+                probe_geo_array,
+                &self.predicate.relation_type,
+                BUILD_SIDE_JOIN_SIDE,
+            )
+            .map_err(|e| DataFusionError::External(Box::new(e)))?;
 
         // Apply the optional non-spatial filter to the matched pairs.
         let (probe_kept, build_kept) = if let Some(filter) = &self.filter {

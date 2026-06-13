@@ -1,6 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::ops::Range;
-use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, AtomicUsize, Ordering};
+use std::time::Instant;
 
 use arrow::compute::{interleave, nullif};
 use arrow_array::{
@@ -13,11 +14,12 @@ use futures::TryStreamExt;
 use geo_index::rtree::sort::HilbertSort;
 use geo_index::rtree::{Node, RTree as GeoRTree, RTreeBuilder, RTreeIndex};
 use geo_types::Rect;
-use rstar::{RTree, RTreeNode, RTreeObject, AABB};
+use rstar::{RTreeObject, AABB};
 
 use super::boxed_geo_batch::{BBoxedGeoBatch, BBoxedGeoStream};
-use super::parsed_geometry::ParsedGeometry;
+use super::joinable_geo::{GeoError, JoinableGeo};
 use super::spatial_predicate::SpatialRelationType;
+use super::st_within::st_within;
 
 // NOTE: the rstar-based `CustomTree` and its helpers below are superseded by the
 // geo-index R-tree used in `IndexedBuildSide`, but kept around for now (dead code).
@@ -42,106 +44,6 @@ impl RTreeObject for GeoItem {
 pub(crate) enum NodeContent {
     Internal(Range<usize>),
     Leaf(Range<usize>),
-}
-
-#[allow(dead_code)]
-pub(crate) struct TreeNode {
-    pub(crate) min_x: f32,
-    pub(crate) min_y: f32,
-    pub(crate) max_x: f32,
-    pub(crate) max_y: f32,
-    pub(crate) content: NodeContent,
-}
-
-#[allow(dead_code)]
-pub(crate) struct CustomTree {
-    pub(crate) nodes: Vec<TreeNode>,
-    pub(crate) leaf_geo_ids: Vec<u32>,
-}
-
-#[allow(dead_code)]
-impl CustomTree {
-    pub(crate) fn node(&self, i: usize) -> &TreeNode {
-        &self.nodes[i]
-    }
-
-    pub(crate) fn child_idx(&self, i: usize, n: usize) -> Option<usize> {
-        if let NodeContent::Internal(range) = &self.nodes[i].content {
-            let idx = range.start + n;
-            if idx < range.end {
-                return Some(idx);
-            }
-        }
-        None
-    }
-
-    pub(crate) fn traverse(
-        &self,
-        mut probe_rects: Vec<Rect<f32>>,
-        mut probe_ids: Vec<usize>,
-    ) -> (Vec<usize>, Vec<usize>) {
-        let initial_boundary = probe_ids.len();
-
-        if self.nodes.is_empty() || initial_boundary == 0 {
-            return (vec![], vec![]);
-        }
-
-        let mut probe_out: Vec<usize> = Vec::new();
-        let mut build_out: Vec<usize> = Vec::new();
-        let mut stack: Vec<(usize, usize)> = vec![(0, initial_boundary)];
-
-        while let Some((node_idx, saved_boundary)) = stack.pop() {
-            let node = &self.nodes[node_idx];
-            let new_boundary =
-                partition_rows(&mut probe_rects, &mut probe_ids, saved_boundary, node);
-
-            if new_boundary == 0 {
-                continue;
-            }
-
-            match &node.content {
-                NodeContent::Leaf(range) => {
-                    for &probe_id in &probe_ids[..new_boundary] {
-                        for &geo_id in &self.leaf_geo_ids[range.clone()] {
-                            probe_out.push(probe_id);
-                            build_out.push(geo_id as usize);
-                        }
-                    }
-                }
-                NodeContent::Internal(range) => {
-                    for child_idx in range.clone() {
-                        stack.push((child_idx, new_boundary));
-                    }
-                }
-            }
-        }
-
-        (probe_out, build_out)
-    }
-}
-#[allow(dead_code)]
-fn partition_rows(
-    rects: &mut [Rect<f32>],
-    ids: &mut [usize],
-    boundary: usize,
-    node: &TreeNode,
-) -> usize {
-    let mut w = 0;
-    for r in 0..boundary {
-        let rect = &rects[r];
-        if rect.min().x <= node.max_x
-            && rect.max().x >= node.min_x
-            && rect.min().y <= node.max_y
-            && rect.max().y >= node.min_y
-        {
-            if w != r {
-                rects.swap(w, r);
-                ids.swap(w, r);
-            }
-            w += 1;
-        }
-    }
-    w
 }
 
 /// In-place partition of the first `boundary` probe entries: keep those whose rect overlaps
@@ -229,68 +131,18 @@ fn wkb_at(array: &ArrayRef, row_idx: usize) -> &[u8] {
     }
 }
 
-#[allow(dead_code)]
-fn extract_tree(rtree: RTree<GeoItem>) -> CustomTree {
-    use rstar::ParentNode;
-
-    let mut nodes = Vec::new();
-    let mut leaf_geo_ids = Vec::new();
-    let mut n_reserved: usize = 1;
-
-    let mut queue: VecDeque<&ParentNode<GeoItem>> = VecDeque::new();
-    queue.push_back(rtree.root());
-
-    while let Some(parent) = queue.pop_front() {
-        let children = parent.children();
-        let env = parent.envelope();
-        let all_leaves = children.iter().all(|c| matches!(c, RTreeNode::Leaf(_)));
-
-        if all_leaves {
-            let start = leaf_geo_ids.len();
-            for child in children {
-                if let RTreeNode::Leaf(item) = child {
-                    leaf_geo_ids.push(item.geo_id);
-                }
-            }
-            nodes.push(TreeNode {
-                min_x: env.lower()[0],
-                min_y: env.lower()[1],
-                max_x: env.upper()[0],
-                max_y: env.upper()[1],
-                content: NodeContent::Leaf(start..leaf_geo_ids.len()),
-            });
-        } else {
-            nodes.push(TreeNode {
-                min_x: env.lower()[0],
-                min_y: env.lower()[1],
-                max_x: env.upper()[0],
-                max_y: env.upper()[1],
-                content: NodeContent::Internal(n_reserved..n_reserved + children.len()),
-            });
-            n_reserved += children.len();
-            for child in children {
-                if let RTreeNode::Parent(p) = child {
-                    queue.push_back(p);
-                }
-            }
-        }
-    }
-
-    CustomTree {
-        nodes,
-        leaf_geo_ids,
-    }
-}
-
-pub(crate) struct CachedParsedGeos {
+// Lazy, thread-safe cache of parsed build-side `JoinableGeo`s (one slot per geometry, populated
+// on first use). Mirrors `CachedParsedGeos`, but parsing is fallible so `get_or_parse` returns a
+// `Result` carrying any `GeoError`.
+pub(crate) struct CachedJoinableGeo {
     geo_arrays: Vec<ArrayRef>,
-    cache: Vec<Vec<AtomicPtr<ParsedGeometry>>>,
+    cache: Vec<Vec<AtomicPtr<JoinableGeo>>>,
 }
 
-unsafe impl Send for CachedParsedGeos {}
-unsafe impl Sync for CachedParsedGeos {}
+unsafe impl Send for CachedJoinableGeo {}
+unsafe impl Sync for CachedJoinableGeo {}
 
-impl CachedParsedGeos {
+impl CachedJoinableGeo {
     pub(crate) fn new(geo_arrays: Vec<ArrayRef>) -> Self {
         let cache = geo_arrays
             .iter()
@@ -303,28 +155,31 @@ impl CachedParsedGeos {
         Self { geo_arrays, cache }
     }
 
-    pub(crate) fn get_or_parse(&self, positions: &[(usize, usize)]) -> Vec<&ParsedGeometry> {
+    pub(crate) fn get_or_parse(
+        &self,
+        positions: &[(usize, usize)],
+    ) -> Result<Vec<&JoinableGeo>, GeoError> {
         positions
             .iter()
             .map(|&(batch_idx, row_idx)| {
                 let slot = &self.cache[batch_idx][row_idx];
                 let ptr = slot.load(Ordering::Acquire);
                 if !ptr.is_null() {
-                    return unsafe { &*ptr };
+                    return Ok(unsafe { &*ptr });
                 }
                 let arr = &self.geo_arrays[batch_idx];
                 let bytes: &[u8] = wkb_at(arr, row_idx);
-                let new_ptr = Box::into_raw(Box::new(ParsedGeometry::from_wkb(bytes)));
+                let new_ptr = Box::into_raw(Box::new(JoinableGeo::from_wkb(bytes)?));
                 match slot.compare_exchange(
                     std::ptr::null_mut(),
                     new_ptr,
                     Ordering::AcqRel,
                     Ordering::Acquire,
                 ) {
-                    Ok(_) => unsafe { &*new_ptr },
+                    Ok(_) => Ok(unsafe { &*new_ptr }),
                     Err(existing) => {
                         unsafe { drop(Box::from_raw(new_ptr)) };
-                        unsafe { &*existing }
+                        Ok(unsafe { &*existing })
                     }
                 }
             })
@@ -332,7 +187,7 @@ impl CachedParsedGeos {
     }
 }
 
-impl Drop for CachedParsedGeos {
+impl Drop for CachedJoinableGeo {
     fn drop(&mut self) {
         for batch in &self.cache {
             for slot in batch {
@@ -345,13 +200,69 @@ impl Drop for CachedParsedGeos {
     }
 }
 
+// Evaluates a spatial relation between a matched (build, probe) geometry pair. `side` is which
+// side the build geometry occupies, so the relation's operands are ordered accordingly.
+fn evaluate_relation(
+    predicate: &SpatialRelationType,
+    build: &JoinableGeo,
+    probe: &JoinableGeo,
+    side: JoinSide,
+) -> bool {
+    let (left, right) = match side {
+        JoinSide::Left => (build, probe),
+        JoinSide::Right => (probe, build),
+        JoinSide::None => panic!("JoinSide::None is not valid for a spatial join"),
+    };
+    match predicate {
+        SpatialRelationType::Within => st_within(left, right),
+        _ => unimplemented!("only Within is supported for now"),
+    }
+}
+
 pub(crate) struct IndexedBuildSide {
     tree: GeoRTree<f32>,
-    parsed_geos: CachedParsedGeos,
+    joinable_geos: CachedJoinableGeo,
     batch_positions: Vec<(usize, usize)>,
     batches: Vec<RecordBatch>,
     visited: Option<Vec<Vec<AtomicBool>>>,
     remaining_probes: AtomicUsize,
+    /// DIAG: total bbox candidate pairs produced by `traverse` (pre-refinement), summed
+    /// across all probe batches. Printed on drop to compare with SedonaDB's
+    /// `join_result_candidates`.
+    candidate_count: AtomicUsize,
+    /// DIAG: total nanoseconds spent in `traverse_with_refinement` (probe-geo parsing +
+    /// traverse + refinement), summed across all probe streams. Comparable to SedonaDB's
+    /// `join_time` (minus output assembly, which happens in the stream).
+    join_nanos: AtomicU64,
+    /// DIAG: sub-phase breakdown of `join_nanos`, summed across streams.
+    traverse_nanos: AtomicU64,
+    construct_nanos: AtomicU64,
+    refine_nanos: AtomicU64,
+}
+
+impl Drop for IndexedBuildSide {
+    fn drop(&mut self) {
+        println!(
+            "[DIAG] total bbox candidates (pre-refinement): {}",
+            self.candidate_count.load(Ordering::Relaxed)
+        );
+        println!(
+            "[DIAG] total traverse+refine time (summed across streams): {:.3}s",
+            self.join_nanos.load(Ordering::Relaxed) as f64 / 1e9
+        );
+        println!(
+            "[DIAG]   - traverse:  {:.3}s",
+            self.traverse_nanos.load(Ordering::Relaxed) as f64 / 1e9
+        );
+        println!(
+            "[DIAG]   - construct: {:.3}s",
+            self.construct_nanos.load(Ordering::Relaxed) as f64 / 1e9
+        );
+        println!(
+            "[DIAG]   - refine:    {:.3}s",
+            self.refine_nanos.load(Ordering::Relaxed) as f64 / 1e9
+        );
+    }
 }
 
 impl IndexedBuildSide {
@@ -386,37 +297,58 @@ impl IndexedBuildSide {
         probe_geo_array: &ArrayRef,
         predicate: &SpatialRelationType,
         side: JoinSide,
-    ) -> (Vec<usize>, Vec<usize>) {
-        let (probe_matched, build_matched) = self.traverse(probe_rects, probe_ids);
+    ) -> Result<(Vec<usize>, Vec<usize>), GeoError> {
+        let start = Instant::now();
 
+        // --- Phase 1: traverse ---
+        let t_traverse = Instant::now();
+        let (probe_matched, build_matched) = self.traverse(probe_rects, probe_ids);
+        self.traverse_nanos
+            .fetch_add(t_traverse.elapsed().as_nanos() as u64, Ordering::Relaxed);
+
+        self.candidate_count
+            .fetch_add(probe_matched.len(), Ordering::Relaxed);
+
+        // --- Phase 2: construct geometries (parse build + probe) ---
+        let t_construct = Instant::now();
         let build_positions: Vec<(usize, usize)> = build_matched
             .iter()
             .map(|&geo_id| self.batch_positions[geo_id])
             .collect();
-        let build_parsed = self.parsed_geos.get_or_parse(&build_positions);
-        let mut probe_parsed: HashMap<usize, ParsedGeometry> = HashMap::new();
+        let build_geos = self.joinable_geos.get_or_parse(&build_positions)?;
+        let mut probe_geos: HashMap<usize, JoinableGeo> = HashMap::new();
         for &probe_id in &probe_matched {
-            probe_parsed
-                .entry(probe_id)
-                .or_insert_with(|| ParsedGeometry::from_wkb(wkb_at(probe_geo_array, probe_id)));
+            if !probe_geos.contains_key(&probe_id) {
+                let geo = JoinableGeo::from_wkb(wkb_at(probe_geo_array, probe_id))?;
+                probe_geos.insert(probe_id, geo);
+            }
         }
+        self.construct_nanos
+            .fetch_add(t_construct.elapsed().as_nanos() as u64, Ordering::Relaxed);
 
+        // --- Phase 3: refinement ---
+        let t_refine = Instant::now();
         let mut probe_out = Vec::new();
         let mut build_out = Vec::new();
 
         for ((&probe_id, &geo_id), build_geo) in probe_matched
             .iter()
             .zip(build_matched.iter())
-            .zip(build_parsed.iter())
+            .zip(build_geos.iter().copied())
         {
-            let probe_geo = &probe_parsed[&probe_id];
-            if build_geo.join_with_known_bbox(probe_geo, predicate, side) {
+            let probe_geo = &probe_geos[&probe_id];
+            if evaluate_relation(predicate, build_geo, probe_geo, side) {
                 probe_out.push(probe_id);
                 build_out.push(geo_id);
             }
         }
+        self.refine_nanos
+            .fetch_add(t_refine.elapsed().as_nanos() as u64, Ordering::Relaxed);
 
-        (probe_out, build_out)
+        self.join_nanos
+            .fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+
+        Ok((probe_out, build_out))
     }
 
     fn resolve(&self, geo_id: usize) -> (usize, usize) {
@@ -538,12 +470,17 @@ impl IndexedBuildSideBuilder {
         });
 
         IndexedBuildSide {
-            parsed_geos: CachedParsedGeos::new(self.geo_arrays.clone()),
+            joinable_geos: CachedJoinableGeo::new(self.geo_arrays.clone()),
             tree,
             batch_positions: self.batch_positions,
             batches: self.batches,
             visited,
             remaining_probes: AtomicUsize::new(num_probe_partitions),
+            candidate_count: AtomicUsize::new(0),
+            join_nanos: AtomicU64::new(0),
+            traverse_nanos: AtomicU64::new(0),
+            construct_nanos: AtomicU64::new(0),
+            refine_nanos: AtomicU64::new(0),
         }
     }
 }
@@ -669,13 +606,15 @@ mod indexed_build_side_tests {
         probe_boxed: BBoxedGeoBatch,
         expected_pairs: &[(usize, usize)],
     ) {
-        let (probe_ids, build_ids) = index.traverse_with_refinement(
-            probe_boxed.rects,
-            probe_boxed.geo_ids,
-            &probe_boxed.geo_array,
-            &SpatialRelationType::Within,
-            JoinSide::Right,
-        );
+        let (probe_ids, build_ids) = index
+            .traverse_with_refinement(
+                probe_boxed.rects,
+                probe_boxed.geo_ids,
+                &probe_boxed.geo_array,
+                &SpatialRelationType::Within,
+                JoinSide::Right,
+            )
+            .unwrap();
         let mut pairs: Vec<(usize, usize)> = probe_ids
             .iter()
             .copied()
