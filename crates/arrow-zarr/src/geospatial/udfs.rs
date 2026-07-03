@@ -4,6 +4,9 @@ use datafusion::logical_expr::{
     ColumnarValue, ScalarFunctionArgs, ScalarUDFImpl, Signature, TypeSignature, Volatility,
 };
 
+// For now th stubs only exist so that the query optimizer has something
+// to reference before it converts the nested join loop to a spatial join.
+// Obviously a TODO to actually implement this.
 macro_rules! spatial_predicate_stub {
     ($($struct_name:ident => $udf_name:literal),* $(,)?) => {
         $(
@@ -44,7 +47,8 @@ macro_rules! spatial_predicate_stub {
 }
 
 spatial_predicate_stub! {
-StWithinUdf => "st_within",}
+StWithinUdf => "st_within",
+StContainsUdf => "st_contains",}
 
 #[cfg(test)]
 mod udf_tests {

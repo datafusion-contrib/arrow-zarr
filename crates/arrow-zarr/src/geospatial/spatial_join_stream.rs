@@ -21,37 +21,45 @@ use super::boxed_geo_batch::{BBoxedGeoBatch, BBoxedGeoStream};
 use super::indexed_build_side::IndexedBuildSide;
 use super::spatial_predicate::RelationPredicate;
 
+// Hard coded build side. That has to match what the optimizer
+// does, how it defines the build side.
 const BUILD_SIDE_JOIN_SIDE: JoinSide = JoinSide::Left;
-/// Probe rows per traverse/refine call (bounds the parsed-geometry memory peak).
+
+// Probe rows per traverse/refine call (bounds the parsed-geometry
+// memory peak).
 const PROBE_CHUNK_SIZE: usize = 512;
-/// Output rows per emitted batch (bounds the output-assembly memory peak).
+
+// Output rows per emitted batch (bounds the output-assembly
+// memory peak).
 const BATCH_SIZE: usize = 8192;
 
 pub(crate) type SharedIndexFuture =
     Shared<BoxFuture<'static, Result<Arc<IndexedBuildSide>, Arc<DataFusionError>>>>;
 
-/// A `(build, probe)` output row. `None` on a side means null that side's columns:
-/// matched = `(Some, Some)`, unmatched probe = `(None, Some)`, unmatched build = `(Some, None)`.
+/// A (build, probe) output row.
 type Pair = (Option<usize>, Option<usize>);
 
 enum SpatialJoinState {
     FetchingProbeBatch,
     ProcessingProbeBatch {
-        /// Remaining probe rows; drained one chunk at a time via `pop_chunk`.
+        // Remaining probe rows; drained one chunk at a time via `pop_chunk`.
         geo_batch: BBoxedGeoBatch,
         acc: Vec<Pair>,
     },
     OutputtingBatch {
-        /// `Some` = probe processing (resume + assemble against its batch);
-        /// `None` = unmatched-build output (terminal, probe columns null).
+        // Some = probe processing (resume + assemble against its batch);
+        // None = unmatched-build output (probe columns null).
         geo_batch: Option<BBoxedGeoBatch>,
         acc: Vec<Pair>,
-        /// Source fully drained — flush the remaining accumulator.
+
+        // Source fully drained — flush the remaining accumulator.
         last_batch: bool,
     },
     Done,
 }
 
+// The inner stream that the outer stream will wrap in a !try_stream
+// to expose the stream trait.
 struct InnerSpatialJoinStream {
     schema: Arc<Schema>,
     join_type: JoinType,
@@ -60,9 +68,13 @@ struct InnerSpatialJoinStream {
     column_indices: Vec<ColumnIndex>,
     build_side_fut: SharedIndexFuture,
     predicate: RelationPredicate,
-    /// Populated on first poll by awaiting `build_side_fut`.
+
+    // Tt's an option so that the next_batch method can take ownership
+    // of the state.
+    state: Option<SpatialJoinState>,
+
+    // Populated on first poll by awaiting `build_side_fut`.
     build_side: Option<Arc<IndexedBuildSide>>,
-    state: SpatialJoinState,
 }
 
 impl InnerSpatialJoinStream {
@@ -85,7 +97,7 @@ impl InnerSpatialJoinStream {
             build_side_fut,
             predicate,
             build_side: None,
-            state: SpatialJoinState::FetchingProbeBatch,
+            state: Some(SpatialJoinState::FetchingProbeBatch),
         }
     }
 
@@ -95,9 +107,10 @@ impl InnerSpatialJoinStream {
             .ok_or_else(|| DataFusionError::Internal("build_side not initialized".to_string()))
     }
 
-    /// Traverses + refines one chunk of probe rows and returns the output pairs:
-    /// surviving matches as `(Some(build), Some(probe))`, plus (for Right/Full) every probe
-    /// row in the chunk's `[min, max]` range with no surviving match as `(None, Some(probe))`.
+    // Traverses and refines one chunk of probe rows against the build side.
+    // Surviving matches returned as (Some(build), Some(probe)), and for right
+    // joins every probe row with no surviving match returned as (None,
+    // Some(probe)).
     fn join(
         &self,
         probe_rects: Vec<Rect<f32>>,
@@ -105,7 +118,8 @@ impl InnerSpatialJoinStream {
         probe_geo_array: &ArrayRef,
         probe_batch: &RecordBatch,
     ) -> Result<Vec<Pair>> {
-        // Record the chunk's contiguous probe-row range before anything consumes the ids.
+        // Record the chunk's contiguous probe-row range before anything
+        // consumes the ids, for right joins.
         let range = match (probe_ids.iter().min(), probe_ids.iter().max()) {
             (Some(&lo), Some(&hi)) => Some((lo, hi)),
             _ => None,
@@ -166,7 +180,8 @@ impl InnerSpatialJoinStream {
             .map(|(&b, &p)| (Some(b), Some(p)))
             .collect();
 
-        // Right/Full: pad probe rows in the chunk's range that have no surviving match.
+        // Right join: pad probe rows in the chunk's range that have no
+        // surviving match.
         if matches!(self.join_type, JoinType::Right | JoinType::Full) {
             if let Some((lo, hi)) = range {
                 let matched: HashSet<usize> = probe_kept.iter().copied().collect();
@@ -181,7 +196,7 @@ impl InnerSpatialJoinStream {
         Ok(pairs)
     }
 
-    /// All unmatched build rows (Left/Full) as `(Some(build), None)` pairs.
+    // All unmatched build rows as (Some(build), None) pairs for left joins.
     fn unmatched_build_side(&self) -> Vec<Pair> {
         self.build_side
             .as_ref()
@@ -192,9 +207,8 @@ impl InnerSpatialJoinStream {
             .collect()
     }
 
-    /// Assembles an output `RecordBatch` from `(build, probe)` pairs against the given
-    /// column layout. `None` on a side yields null columns for that row. `probe_batch` may
-    /// be `None` only when every probe entry is `None` (unmatched-build output).
+    // Assembles an output RecordBatch from (build, probe) pairs against the
+    // given column layout. None on a side yields null columns for that row.
     fn assemble(
         &self,
         probe_batch: Option<&RecordBatch>,
@@ -227,7 +241,8 @@ impl InnerSpatialJoinStream {
         Ok(RecordBatch::try_new(Arc::clone(schema), columns)?)
     }
 
-    /// Assembles a final output batch using the stream's projected schema/columns.
+    // Assembles a final output batch using the stream's projected
+    // schema/columns.
     fn build_batch(
         &self,
         probe_batch: Option<&RecordBatch>,
@@ -248,16 +263,18 @@ impl InnerSpatialJoinStream {
         }
 
         loop {
-            // Take the state out (replaced with Done as a safe sentinel).
-            let state = std::mem::replace(&mut self.state, SpatialJoinState::Done);
+            let state = self
+                .state
+                .take()
+                .expect("next_batch: state should always be Some at the top of the loop");
 
             match state {
                 SpatialJoinState::FetchingProbeBatch => match self.probe_stream.try_next().await? {
                     Some(geo_batch) => {
-                        self.state = SpatialJoinState::ProcessingProbeBatch {
+                        self.state = Some(SpatialJoinState::ProcessingProbeBatch {
                             geo_batch,
                             acc: Vec::new(),
-                        };
+                        });
                     }
                     None => {
                         let build = self.build_side.as_ref().unwrap();
@@ -270,15 +287,15 @@ impl InnerSpatialJoinStream {
                             Vec::new()
                         };
                         if acc.is_empty() {
-                            self.state = SpatialJoinState::Done;
+                            self.state = Some(SpatialJoinState::Done);
                             return Ok(None);
                         }
-                        // Unmatched-build output: no probe batch, terminal once drained.
-                        self.state = SpatialJoinState::OutputtingBatch {
+                        // Unmatched-build output: no probe batch.
+                        self.state = Some(SpatialJoinState::OutputtingBatch {
                             geo_batch: None,
                             acc,
                             last_batch: true,
-                        };
+                        });
                     }
                 },
 
@@ -291,11 +308,11 @@ impl InnerSpatialJoinStream {
                     acc.extend(pairs);
 
                     let last_batch = geo_batch.is_empty();
-                    self.state = SpatialJoinState::OutputtingBatch {
+                    self.state = Some(SpatialJoinState::OutputtingBatch {
                         geo_batch: Some(geo_batch),
                         acc,
                         last_batch,
-                    };
+                    });
                 }
 
                 SpatialJoinState::OutputtingBatch {
@@ -308,11 +325,11 @@ impl InnerSpatialJoinStream {
                     if acc.len() >= BATCH_SIZE {
                         let chunk = acc.split_off(acc.len() - BATCH_SIZE);
                         let out_batch = self.build_batch(probe_batch, &chunk)?;
-                        self.state = SpatialJoinState::OutputtingBatch {
+                        self.state = Some(SpatialJoinState::OutputtingBatch {
                             geo_batch,
                             acc,
                             last_batch,
-                        };
+                        });
                         return Ok(Some(out_batch));
                     } else if last_batch {
                         // Flush the remainder (if any), then move on. A carried probe batch
@@ -323,11 +340,11 @@ impl InnerSpatialJoinStream {
                         } else {
                             Some(self.build_batch(probe_batch, &acc)?)
                         };
-                        self.state = if geo_batch.is_some() {
+                        self.state = Some(if geo_batch.is_some() {
                             SpatialJoinState::FetchingProbeBatch
                         } else {
                             SpatialJoinState::Done
-                        };
+                        });
                         match out_batch {
                             Some(batch) => return Ok(Some(batch)),
                             None => continue,
@@ -335,12 +352,13 @@ impl InnerSpatialJoinStream {
                     } else {
                         // Not the last chunk: resume processing (geo_batch is always Some here).
                         let geo_batch = geo_batch.expect("probe processing has a geo_batch");
-                        self.state = SpatialJoinState::ProcessingProbeBatch { geo_batch, acc };
+                        self.state =
+                            Some(SpatialJoinState::ProcessingProbeBatch { geo_batch, acc });
                     }
                 }
 
                 SpatialJoinState::Done => {
-                    self.state = SpatialJoinState::Done;
+                    self.state = Some(SpatialJoinState::Done);
                     return Ok(None);
                 }
             }
@@ -348,6 +366,9 @@ impl InnerSpatialJoinStream {
     }
 }
 
+// The outer stream, not much the see here, just wraps the inner stream
+// to use try_stream and wraps a poll_next around the inner stream's
+// poll next.
 pub(crate) struct SpatialJoinStream {
     schema: Arc<Schema>,
     stream: BoxStream<'static, Result<RecordBatch, DataFusionError>>,

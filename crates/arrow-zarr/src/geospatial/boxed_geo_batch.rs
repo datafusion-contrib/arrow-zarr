@@ -14,6 +14,8 @@ use geo_traits::{
 use geo_types::{Coord, Rect};
 use wkb::reader::Wkb;
 
+// Packages a record batch and all the data necessary to interact with the
+// geometry objects in one of the columns.
 pub(crate) struct BBoxedGeoBatch {
     pub(crate) batch: RecordBatch,
     pub(crate) geo_array: ArrayRef,
@@ -87,9 +89,8 @@ impl BBoxedGeoBatch {
         })
     }
 
-    /// Splits up to `n` `(rect, geo_id)` pairs off the back of the batch and returns them.
-    /// Popping from the back is cheap (the retained prefix never moves) and chunk order is
-    /// irrelevant to the caller. `rects` and `geo_ids` stay parallel within the chunk.
+    // Splits up to n (rect, geo_id) pairs off the back of the batch and returns
+    // them. rects and geo_ids stay parallel within the chunk.
     pub(crate) fn pop_chunk(&mut self, n: usize) -> (Vec<Rect<f32>>, Vec<usize>) {
         let start = self.geo_ids.len().saturating_sub(n);
         let rects = self.rects.split_off(start);
@@ -102,6 +103,10 @@ impl BBoxedGeoBatch {
     }
 }
 
+// Precomputes the bounding box of each geometry. Those will also be computed when
+// the geometries are parsed, but we only parse a geometry after we've determined
+// it matches another geo on the probe side based on its bounding box, so we need
+// the bbox first.
 fn bbox_of(wkb: &Wkb) -> Option<Rect<f32>> {
     let mut min_x = f32::INFINITY;
     let mut min_y = f32::INFINITY;

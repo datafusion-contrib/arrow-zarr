@@ -33,14 +33,14 @@ pub struct SpatialJoinExec {
     projection: Option<Vec<usize>>,
     props: PlanProperties,
 
-    /// Lazily initialised on the first `execute()` call, then shared across all probe partitions.
+    // Lazily initialized on the first `execute()` call, then shared
+    // across all probe partitions, and of of the partitions will
+    // await it while the others just wait for the result that will
+    // get cached in the shared future.
     build_side_shared: Arc<Mutex<Option<SharedIndexFuture>>>,
 }
 
 impl SpatialJoinExec {
-    /// Create a new [`BulkSpatialJoinExec`].
-    ///
-    /// `left` is the build side; `right` is the probe side.
     pub fn try_new(
         left: Arc<dyn ExecutionPlan>,
         right: Arc<dyn ExecutionPlan>,
@@ -58,8 +58,7 @@ impl SpatialJoinExec {
             }
         }
 
-        // build the schema and column indices for the final
-        // record batch.
+        // Build the schema and column indices for the final record batch.
         let left_schema = left.schema();
         let right_schema = right.schema();
         check_join_is_valid(&left_schema, &right_schema, &[])?;
@@ -67,7 +66,6 @@ impl SpatialJoinExec {
             build_join_schema(&left_schema, &right_schema, &join_type);
         let join_schema = Arc::new(join_schema);
 
-        // cache the plan properties.
         let props = Self::compute_properties(
             &left,
             &right,
@@ -76,7 +74,7 @@ impl SpatialJoinExec {
             projection.as_ref(),
         )?;
 
-        // the project is kept because when calling new_with_chilldren,
+        // The project is kept because when calling new_with_chilldren,
         // the projection needs to be applied again.
         Ok(Self {
             left,
@@ -131,13 +129,13 @@ impl SpatialJoinExec {
             _ => unreachable!(),
         };
 
-        // if left is unbounded, since you need to build the spatial
+        // Ff left is unbounded, since you need to build the spatial
         // index first, the plan doesn't really make sense, but
         // technically you can say it's a Final emission, though in
         // practice you would just consume left side batches forever.
         //
-        // other than that, you just get the probe side emission type,
-        // exect that for a left join, the unvisted rows are emitted
+        // Other than that, you just get the probe side emission type,
+        // except that for a left join, the unvisited rows are emitted
         // once at the very end, with the last batch of the last partition,
         // hence the Both case.
         let emission_type = if left.boundedness().is_unbounded() {
@@ -152,7 +150,7 @@ impl SpatialJoinExec {
             right.pipeline_behavior()
         };
 
-        // basically inherit the most "unbounded" from left and right.
+        // Basically inherit the most "unbounded" from left and right.
         // unbounded (infinite) > unbounded (finite) > bounded.
         let lb = left.boundedness();
         let rb = right.boundedness();
@@ -180,7 +178,7 @@ impl SpatialJoinExec {
             Boundedness::Bounded
         };
 
-        // the projection can modified the paritioning and the
+        // The projection can modify the paritioning and the
         // equivalence because it can drop columns that the partitions
         // were hashed on or that were equivalent, or it can shift the
         // index of those that stay after other columns were dropped.
@@ -278,6 +276,11 @@ impl ExecutionPlan for SpatialJoinExec {
         )?))
     }
 
+    // The main method, produces streams that will produce record
+    // batches. Not much here, the main logic is to drain all
+    // the build side streams to build the indexed build side,
+    // which is done in parallel (see build_from_streams) in a future
+    // that gets awaited when the probe streams run.
     fn execute(
         &self,
         partition: usize,

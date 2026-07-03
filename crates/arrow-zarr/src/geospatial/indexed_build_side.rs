@@ -1,7 +1,6 @@
-use std::collections::{HashMap, VecDeque};
-use std::ops::Range;
-use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, AtomicUsize, Ordering};
-use std::time::Instant;
+use std::collections::hash_map::Entry;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
 
 use arrow::compute::{interleave, nullif};
 use arrow_array::{
@@ -14,41 +13,15 @@ use futures::TryStreamExt;
 use geo_index::rtree::sort::HilbertSort;
 use geo_index::rtree::{Node, RTree as GeoRTree, RTreeBuilder, RTreeIndex};
 use geo_types::Rect;
-use rstar::{RTreeObject, AABB};
 
 use super::boxed_geo_batch::{BBoxedGeoBatch, BBoxedGeoStream};
 use super::joinable_geo::{GeoError, JoinableGeo};
 use super::spatial_predicate::SpatialRelationType;
-use super::st_within::st_within;
+use super::st_within::{st_contains, st_within};
 
-// NOTE: the rstar-based `CustomTree` and its helpers below are superseded by the
-// geo-index R-tree used in `IndexedBuildSide`, but kept around for now (dead code).
-#[allow(dead_code)]
-struct GeoItem {
-    geo_id: u32,
-    rect: Rect<f32>,
-}
-
-impl RTreeObject for GeoItem {
-    type Envelope = AABB<[f32; 2]>;
-    fn envelope(&self) -> Self::Envelope {
-        let min = self.rect.min();
-        let max = self.rect.max();
-        AABB::from_corners([min.x, min.y], [max.x, max.y])
-    }
-}
-
-// An r-tree to support vectorized traversal, with a flat layout
-// suited for batch processing.
-#[allow(dead_code)]
-pub(crate) enum NodeContent {
-    Internal(Range<usize>),
-    Leaf(Range<usize>),
-}
-
-/// In-place partition of the first `boundary` probe entries: keep those whose rect overlaps
-/// the given node bbox by swapping survivors to the front; returns the survivor count.
-/// (geo-index variant of `partition_rows`, taking raw bbox bounds instead of a `TreeNode`.)
+// In-place partition of the first boundary probe entries: keep those whose
+// rect overlaps the given node bbox by swapping survivors to the front; returns
+// the survivor count.
 fn partition_bbox(
     rects: &mut [Rect<f32>],
     ids: &mut [usize],
@@ -76,11 +49,10 @@ fn partition_bbox(
     w
 }
 
-/// Vectorized multi-probe DFS over a geo-index R-tree node. Partitions the live probe prefix
-/// `[0..boundary)` against `node`'s bbox; on a leaf (one geometry) emits surviving probes
-/// paired with the leaf's `insertion_index` (the build geo-id); on a parent recurses into
-/// each child with the narrowed boundary. Recursion (not an explicit stack) is used because
-/// `children()` borrows the parent node.
+// Vectorized multi-probe DFS over a geo-index R-tree node. Partitions the live
+// probe prefix [0..boundary) against node's bbox; on a leaf (one geometry) emits
+// surviving probes paired with the leaf's insertion_index (the build geo-id);
+// on a parent recurses into each child with the narrowed boundary.
 fn descend<T: RTreeIndex<f32>>(
     node: Node<'_, f32, T>,
     rects: &mut [Rect<f32>],
@@ -131,16 +103,11 @@ fn wkb_at(array: &ArrayRef, row_idx: usize) -> &[u8] {
     }
 }
 
-// Lazy, thread-safe cache of parsed build-side `JoinableGeo`s (one slot per geometry, populated
-// on first use). Mirrors `CachedParsedGeos`, but parsing is fallible so `get_or_parse` returns a
-// `Result` carrying any `GeoError`.
+// Lazy, thread-safe cache of parsed build-side JoinableGeo's.
 pub(crate) struct CachedJoinableGeo {
     geo_arrays: Vec<ArrayRef>,
     cache: Vec<Vec<AtomicPtr<JoinableGeo>>>,
 }
-
-unsafe impl Send for CachedJoinableGeo {}
-unsafe impl Sync for CachedJoinableGeo {}
 
 impl CachedJoinableGeo {
     pub(crate) fn new(geo_arrays: Vec<ArrayRef>) -> Self {
@@ -200,23 +167,23 @@ impl Drop for CachedJoinableGeo {
     }
 }
 
-// Evaluates a spatial relation between a matched (build, probe) geometry pair. `side` is which
-// side the build geometry occupies, so the relation's operands are ordered accordingly.
+// Evaluates a spatial relation between a matched (build, probe) geometry pair.
+// side is which side the build geometry occupies.
 fn evaluate_relation(
     predicate: &SpatialRelationType,
     build: &JoinableGeo,
     probe: &JoinableGeo,
     side: JoinSide,
-) -> bool {
+) -> Result<bool, GeoError> {
     let (left, right) = match side {
         JoinSide::Left => (build, probe),
         JoinSide::Right => (probe, build),
-        JoinSide::None => panic!("JoinSide::None is not valid for a spatial join"),
+        JoinSide::None => return Err(GeoError::InvalidJoinSide),
     };
-    match predicate {
+    Ok(match predicate {
         SpatialRelationType::Within => st_within(left, right),
-        _ => unimplemented!("only Within is supported for now"),
-    }
+        SpatialRelationType::Contains => st_contains(left, right),
+    })
 }
 
 pub(crate) struct IndexedBuildSide {
@@ -226,48 +193,11 @@ pub(crate) struct IndexedBuildSide {
     batches: Vec<RecordBatch>,
     visited: Option<Vec<Vec<AtomicBool>>>,
     remaining_probes: AtomicUsize,
-    /// DIAG: total bbox candidate pairs produced by `traverse` (pre-refinement), summed
-    /// across all probe batches. Printed on drop to compare with SedonaDB's
-    /// `join_result_candidates`.
-    candidate_count: AtomicUsize,
-    /// DIAG: total nanoseconds spent in `traverse_with_refinement` (probe-geo parsing +
-    /// traverse + refinement), summed across all probe streams. Comparable to SedonaDB's
-    /// `join_time` (minus output assembly, which happens in the stream).
-    join_nanos: AtomicU64,
-    /// DIAG: sub-phase breakdown of `join_nanos`, summed across streams.
-    traverse_nanos: AtomicU64,
-    construct_nanos: AtomicU64,
-    refine_nanos: AtomicU64,
-}
-
-impl Drop for IndexedBuildSide {
-    fn drop(&mut self) {
-        println!(
-            "[DIAG] total bbox candidates (pre-refinement): {}",
-            self.candidate_count.load(Ordering::Relaxed)
-        );
-        println!(
-            "[DIAG] total traverse+refine time (summed across streams): {:.3}s",
-            self.join_nanos.load(Ordering::Relaxed) as f64 / 1e9
-        );
-        println!(
-            "[DIAG]   - traverse:  {:.3}s",
-            self.traverse_nanos.load(Ordering::Relaxed) as f64 / 1e9
-        );
-        println!(
-            "[DIAG]   - construct: {:.3}s",
-            self.construct_nanos.load(Ordering::Relaxed) as f64 / 1e9
-        );
-        println!(
-            "[DIAG]   - refine:    {:.3}s",
-            self.refine_nanos.load(Ordering::Relaxed) as f64 / 1e9
-        );
-    }
 }
 
 impl IndexedBuildSide {
-    /// Vectorized bbox traversal of the geo-index R-tree: returns parallel
-    /// `(probe_ids, build_geo_ids)` candidate pairs whose bboxes overlap.
+    // Vectorized bbox traversal of the geo-index R-tree: returns parallel
+    // (probe_ids, build_geo_ids) candidate pairs whose bboxes overlap.
     pub(crate) fn traverse(
         &self,
         mut probe_rects: Vec<Rect<f32>>,
@@ -298,19 +228,11 @@ impl IndexedBuildSide {
         predicate: &SpatialRelationType,
         side: JoinSide,
     ) -> Result<(Vec<usize>, Vec<usize>), GeoError> {
-        let start = Instant::now();
-
-        // --- Phase 1: traverse ---
-        let t_traverse = Instant::now();
+        // First find build side - probe side pairs to check
         let (probe_matched, build_matched) = self.traverse(probe_rects, probe_ids);
-        self.traverse_nanos
-            .fetch_add(t_traverse.elapsed().as_nanos() as u64, Ordering::Relaxed);
 
-        self.candidate_count
-            .fetch_add(probe_matched.len(), Ordering::Relaxed);
-
-        // --- Phase 2: construct geometries (parse build + probe) ---
-        let t_construct = Instant::now();
+        // Second, construct the geometries from teh binaty arrays (if they
+        // they have not already been parsed, that's the lazy part).
         let build_positions: Vec<(usize, usize)> = build_matched
             .iter()
             .map(|&geo_id| self.batch_positions[geo_id])
@@ -318,16 +240,14 @@ impl IndexedBuildSide {
         let build_geos = self.joinable_geos.get_or_parse(&build_positions)?;
         let mut probe_geos: HashMap<usize, JoinableGeo> = HashMap::new();
         for &probe_id in &probe_matched {
-            if !probe_geos.contains_key(&probe_id) {
+            if let Entry::Vacant(e) = probe_geos.entry(probe_id) {
                 let geo = JoinableGeo::from_wkb(wkb_at(probe_geo_array, probe_id))?;
-                probe_geos.insert(probe_id, geo);
+                e.insert(geo);
             }
         }
-        self.construct_nanos
-            .fetch_add(t_construct.elapsed().as_nanos() as u64, Ordering::Relaxed);
 
-        // --- Phase 3: refinement ---
-        let t_refine = Instant::now();
+        // This, check each matched pairs to see if they actually pass the
+        // predicate.
         let mut probe_out = Vec::new();
         let mut build_out = Vec::new();
 
@@ -337,16 +257,11 @@ impl IndexedBuildSide {
             .zip(build_geos.iter().copied())
         {
             let probe_geo = &probe_geos[&probe_id];
-            if evaluate_relation(predicate, build_geo, probe_geo, side) {
+            if evaluate_relation(predicate, build_geo, probe_geo, side)? {
                 probe_out.push(probe_id);
                 build_out.push(geo_id);
             }
         }
-        self.refine_nanos
-            .fetch_add(t_refine.elapsed().as_nanos() as u64, Ordering::Relaxed);
-
-        self.join_nanos
-            .fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
 
         Ok((probe_out, build_out))
     }
@@ -355,8 +270,8 @@ impl IndexedBuildSide {
         self.batch_positions[geo_id]
     }
 
-    /// Gathers `col_idx` from the build batches for the given geo-ids. `None` entries become
-    /// null rows (used for unmatched-probe rows in outer joins).
+    // Gathers `col_idx` from the build batches for the given geo-ids. None entries
+    // become null rows (used for unmatched-probe rows in outer joins).
     pub(crate) fn interleave_column_opt(
         &self,
         geo_ids: &[Option<usize>],
@@ -368,13 +283,13 @@ impl IndexedBuildSide {
             .map(|b| b.column(col_idx).as_ref())
             .collect();
 
-        // All-null shortcut (also avoids the (0,0) placeholder when the build side is empty).
+        // All-null shortcut.
         if geo_ids.iter().all(|id| id.is_none()) {
             let data_type = arrays[0].data_type().clone();
             return Ok(new_null_array(&data_type, geo_ids.len()));
         }
 
-        // `None` entries use a (0,0) placeholder position and are nulled out afterwards.
+        // None entries use a (0,0) placeholder position and are nulled out afterwards.
         let indices: Vec<(usize, usize)> = geo_ids
             .iter()
             .map(|id| id.map(|id| self.resolve(id)).unwrap_or((0, 0)))
@@ -417,7 +332,11 @@ impl IndexedBuildSide {
     }
 }
 
-pub(crate) struct IndexedBuildSideBuilder {
+// Indexed build side builder, that accumulates batches of data that contain
+// a geo column, and builds all the machinery to be able to join that data
+// against the probe side. The data model here is that a partition can
+// contain multiple batches.
+struct IndexedBuildSideBuilder {
     batches: Vec<RecordBatch>,
     geo_arrays: Vec<ArrayRef>,
     batch_positions: Vec<(usize, usize)>,
@@ -425,7 +344,7 @@ pub(crate) struct IndexedBuildSideBuilder {
 }
 
 impl IndexedBuildSideBuilder {
-    pub(crate) fn new() -> Self {
+    fn new() -> Self {
         Self {
             batches: Vec::new(),
             geo_arrays: Vec::new(),
@@ -434,7 +353,7 @@ impl IndexedBuildSideBuilder {
         }
     }
 
-    pub(crate) fn add_partition(&mut self, batches: Vec<BBoxedGeoBatch>) {
+    fn add_partition(&mut self, batches: Vec<BBoxedGeoBatch>) {
         for batch in batches {
             self.add_batch(batch);
         }
@@ -449,13 +368,10 @@ impl IndexedBuildSideBuilder {
         self.geo_arrays.push(boxed.geo_array);
     }
 
-    pub(crate) fn build(
-        self,
-        needs_visited: bool,
-        num_probe_partitions: usize,
-    ) -> IndexedBuildSide {
-        // Build the geo-index R-tree. `add` returns the insertion index in call order, so
-        // adding rects in geo-id order makes `insertion_index == geo_id` during traversal.
+    fn build(self, needs_visited: bool, num_probe_partitions: usize) -> IndexedBuildSide {
+        // Build the geo-index R-tree. add returns the insertion index in call
+        // order, so adding rects in geo-id order makes insertion_index == geo_id
+        // during traversal.
         let mut builder = RTreeBuilder::<f32>::new(self.rects.len() as u32);
         for rect in &self.rects {
             builder.add(rect.min().x, rect.min().y, rect.max().x, rect.max().y);
@@ -476,11 +392,6 @@ impl IndexedBuildSideBuilder {
             batches: self.batches,
             visited,
             remaining_probes: AtomicUsize::new(num_probe_partitions),
-            candidate_count: AtomicUsize::new(0),
-            join_nanos: AtomicU64::new(0),
-            traverse_nanos: AtomicU64::new(0),
-            construct_nanos: AtomicU64::new(0),
-            refine_nanos: AtomicU64::new(0),
         }
     }
 }

@@ -45,6 +45,8 @@ impl PhysicalOptimizerRule for SpatialJoinPhysicalOptimizer {
 }
 
 fn try_optimize_join(plan: Arc<dyn ExecutionPlan>) -> Result<Transformed<Arc<dyn ExecutionPlan>>> {
+    // Only nested loops gets reorganized as a spatial join (i.e. not hash
+    // joins, those stay the same with the spatial predicate as a filter.)
     let Some(nlj) = plan.as_any().downcast_ref::<NestedLoopJoinExec>() else {
         return Ok(Transformed::no(plan));
     };
@@ -86,6 +88,11 @@ fn try_convert_to_spatial_join(nlj: &NestedLoopJoinExec) -> Result<Option<Arc<dy
     Ok(Some(Arc::new(exec)))
 }
 
+// Re-arrange the join predicate so that if we have other conditions than
+// the spatial join (and the conditions did not give a hash join, at this
+// point in the code the original join has to be a nested loop), that other
+// condition(s) are moved to a join filter, and the spatial predicate now
+// drives the join logic.
 fn transform_join_filter(jf: &JoinFilter) -> Option<(RelationPredicate, Option<JoinFilter>)> {
     let (predicate, remainder_expr) =
         extract_spatial_predicate(jf.expression(), jf.column_indices())?;
@@ -182,6 +189,11 @@ fn match_relation_predicate(
     match (side0, side1) {
         (JoinSide::Left, JoinSide::Right) => {
             Some(RelationPredicate::new(arg0, arg1, relation_type))
+        }
+        // Arguments reference the join sides in reverse (right-first).  Order by
+        // swapping the operands and using the opposite relation.
+        (JoinSide::Right, JoinSide::Left) => {
+            Some(RelationPredicate::new(arg1, arg0, relation_type.opposite()))
         }
         _ => None,
     }
@@ -356,15 +368,17 @@ mod optimizer_tests {
     }
 
     #[test]
-    fn test_optimizer_does_not_convert_inverted_args() {
-        // st_within(right.geom, left.geom) — args deliberately inverted
+    fn test_optimizer_flips_inverted_args() {
+        // st_within(right.geom, left.geom) — args reference the sides in reverse, so the
+        // optimizer expresses it left-first as st_contains(left, right) instead of rejecting it.
         let optimized = run_optimizer(JoinType::Inner, 1, 0);
-        assert!(
-            optimized
-                .as_any()
-                .downcast_ref::<SpatialJoinExec>()
-                .is_none(),
-            "inverted st_within(right, left) should not be converted to SpatialJoinExec"
+        let spatial = optimized
+            .as_any()
+            .downcast_ref::<SpatialJoinExec>()
+            .expect("inverted st_within(right, left) should convert to a flipped SpatialJoinExec");
+        assert_eq!(
+            spatial.predicate.relation_type,
+            SpatialRelationType::Contains
         );
     }
 }
