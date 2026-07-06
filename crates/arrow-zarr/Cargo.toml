@@ -53,12 +53,6 @@ aws-sdk-s3 = { version = "1.78.0" }
 criterion = { version = "0.7.0", features = ["async_tokio"] }
 walkdir = { version = "2.5.0" }
 
-
-[[bin]]
-name = "spatial_bench"
-path = "src/bin/spatial_bench.rs"
-required-features = ["datafusion"]
-
 [[bench]]
 name = "s3_bench"
 harness = false
