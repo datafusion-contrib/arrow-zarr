@@ -90,7 +90,9 @@ pub(crate) fn make_geo_stream(
         let batch = RecordBatch::try_new(
             Arc::clone(&schema),
             vec![
-                Arc::new(BinaryArray::from_iter_values(wkbs.iter().map(|b| b.as_slice()))),
+                Arc::new(BinaryArray::from_iter_values(
+                    wkbs.iter().map(|b| b.as_slice()),
+                )),
                 Arc::new(Int32Array::from(values)),
             ],
         )
@@ -99,7 +101,10 @@ pub(crate) fn make_geo_stream(
         row_offset += chunk.len() as i32;
     }
 
-    Box::pin(MockGeoStream { schema, batches: batches.into_iter() })
+    Box::pin(MockGeoStream {
+        schema,
+        batches: batches.into_iter(),
+    })
 }
 
 pub(crate) fn col1_gte_col2_filter() -> JoinFilter {
@@ -115,8 +120,14 @@ pub(crate) fn col1_gte_col2_filter() -> JoinFilter {
     JoinFilter::new(
         expr,
         vec![
-            ColumnIndex { index: 1, side: JoinSide::Left },
-            ColumnIndex { index: 1, side: JoinSide::Right },
+            ColumnIndex {
+                index: 1,
+                side: JoinSide::Left,
+            },
+            ColumnIndex {
+                index: 1,
+                side: JoinSide::Right,
+            },
         ],
         schema,
     )
