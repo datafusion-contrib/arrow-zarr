@@ -955,6 +955,7 @@ impl JoinableGeo {
     // Order-independent descent: lockstep dual descent when both sides are indexed,
     // otherwise a single descent (iterate self, descend/scan other), same traversal a
     // fold_single call would produce.
+    #[allow(dead_code)] // used once more predicates (e.g. st_intersects) are implemented
     pub(crate) fn fold_for_unordered_check(&self, other: &JoinableGeo, acc: &mut impl Accumulator) {
         match self {
             JoinableGeo::Point { points } => dual_into(points, None, other, acc),
@@ -998,6 +999,7 @@ fn single_into<LC: Bboxable, A: Accumulator>(left: &[LC], other: &JoinableGeo, a
 
 // Resolves other for an order-independent descent: dual descent when both sides are indexed,
 // else fall back to a single descent (iterating left).
+#[allow(dead_code)] // used once more predicates (e.g. st_intersects) are implemented
 fn dual_into<LC: Bboxable, A: Accumulator>(
     left: &[LC],
     left_index: Option<&NaturalIndex>,

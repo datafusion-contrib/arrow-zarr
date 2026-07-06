@@ -1,11 +1,7 @@
 use std::ffi::CString;
 use std::sync::Arc;
 
-use arrow::pyarrow::ToPyArrow;
-// use arrow_zarr::geospatial::{SpatialJoinPhysicalOptimizer, StContainsUdf, StWithinUdf};
 use arrow_zarr::table::ZarrTable;
-use datafusion::execution::SessionStateBuilder;
-use datafusion::logical_expr::ScalarUDF;
 use datafusion::prelude::SessionContext;
 use datafusion_ffi::table_provider::FFI_TableProvider;
 use pyo3::prelude::*;
@@ -77,6 +73,7 @@ impl PyIcechunkTableProvider {
     module = "zarr_datafusion._internal"
 )]
 pub struct PyGeospatialSessionContext {
+    #[allow(dead_code)] // retained for upcoming geospatial session methods
     ctx: SessionContext,
 }
 

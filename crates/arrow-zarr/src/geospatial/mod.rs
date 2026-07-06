@@ -10,7 +10,7 @@ pub(crate) mod udfs;
 
 pub use spatial_join_exec::SpatialJoinExec;
 pub use spatial_join_optimizer::SpatialJoinPhysicalOptimizer;
-pub use udfs::StWithinUdf;
+pub use udfs::{StContainsUdf, StWithinUdf};
 
 // #[cfg(test)]
 pub(crate) mod test_utils;

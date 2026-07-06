@@ -57,5 +57,6 @@ mod udf_tests {
     #[test]
     fn test_udf_names() {
         assert_eq!(StWithinUdf::default().name(), "st_within");
+        assert_eq!(StContainsUdf::default().name(), "st_contains");
     }
 }

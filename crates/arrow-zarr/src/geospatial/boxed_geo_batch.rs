@@ -198,7 +198,7 @@ impl BBoxedGeoStream {
 impl Stream for BBoxedGeoStream {
     type Item = Result<BBoxedGeoBatch>;
 
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
         match Pin::new(&mut this.inner).poll_next(cx) {
             Poll::Ready(Some(Ok(batch))) => {
