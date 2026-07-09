@@ -21,14 +21,12 @@ arrow = { workspace = true }
 arrow-array = { workspace = true }
 arrow-schema = { workspace = true }
 async-stream = "0.3"
-bitflags = "2"
 async-trait = { version = "0.1.89" }
-bytes = { version = "1.10.1" }
+bytes = { version = "1.12.1" }
 chrono = { version = "0.4.42" }
 datafusion = { workspace = true, optional = true }
 futures = { version = "0.3.31" }
 futures-util = { version = "0.3.31" }
-rstar = { version = "0.12" }
 geo-index = "0.3"
 geo-traits = {version = "0.3.0" }
 geo-types = { version = "0.7.18" }
