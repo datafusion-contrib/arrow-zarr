@@ -1,28 +1,27 @@
 mod shared;
 
 use std::collections::HashMap;
-use std::env;
 use std::sync::Arc;
 
 use criterion::{criterion_group, criterion_main, Criterion};
 use datafusion::datasource::listing::ListingTableUrl;
 use futures::{StreamExt, TryStreamExt};
-use icechunk::config::{S3Credentials, S3Options};
+use icechunk::config::GcsCredentials;
 use icechunk::{ObjectStorage, Repository};
-use object_store::aws::{AmazonS3, AmazonS3Builder};
+use object_store::gcp::{GoogleCloudStorage, GoogleCloudStorageBuilder};
 use object_store::path::Path;
 use object_store::ObjectStore;
 use shared::{run_benchmark_group, CloudStorageBenchBackend, TestFixture};
 use zarrs_icechunk::AsyncIcechunkStore;
 
-struct S3BenchBackend {
+struct GCSBenchBackend {
     prefix: String,
-    store: AmazonS3,
+    store: GoogleCloudStorage,
 }
 
-impl S3BenchBackend {
+impl GCSBenchBackend {
     async fn new(bucket: String, prefix: String) -> Self {
-        let store = AmazonS3Builder::from_env()
+        let store = GoogleCloudStorageBuilder::from_env()
             .with_bucket_name(bucket)
             .build()
             .unwrap();
@@ -31,37 +30,30 @@ impl S3BenchBackend {
 }
 
 #[async_trait::async_trait]
-impl CloudStorageBenchBackend for S3BenchBackend {
+impl CloudStorageBenchBackend for GCSBenchBackend {
     async fn create_icechunk_store(url: &str) -> Arc<AsyncIcechunkStore> {
         let listing_url = ListingTableUrl::parse(url).unwrap();
         let bucket = listing_url
             .object_store()
             .as_str()
-            .replace("s3://", "")
+            .replace("gs://", "")
             .trim_end_matches("/")
             .to_string();
 
-        let credentials = S3Credentials::FromEnv;
-        let config = S3Options {
-            region: env::var("AWS_DEFAULT_REGION").ok(),
-            endpoint_url: None,
-            anonymous: false,
-            allow_http: false,
-            force_path_style: false,
-            network_stream_timeout_seconds: None,
-            requester_pays: false,
-        };
+        let credentials = GcsCredentials::FromEnv;
 
-        let store = ObjectStorage::new_s3(
-            bucket,
-            Some(listing_url.prefix().as_ref().to_string()),
-            Some(credentials),
-            Some(config),
-        )
-        .await
-        .unwrap();
+        let store = Arc::new(
+            ObjectStorage::new_gcs(
+                bucket,
+                Some(listing_url.prefix().as_ref().to_string()),
+                Some(credentials),
+                None,
+            )
+            .await
+            .unwrap(),
+        );
 
-        let repo = Repository::create(None, Arc::new(store), HashMap::new())
+        let repo = Repository::create(None, store, HashMap::new())
             .await
             .unwrap();
         let session = repo.writable_session("main").await.unwrap();
@@ -85,17 +77,17 @@ impl CloudStorageBenchBackend for S3BenchBackend {
     }
 }
 
-fn s3_benchmark_group(c: &mut Criterion) {
+fn gcs_benchmark_group(c: &mut Criterion) {
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let url = "s3://zarr-unit-tests/test_data_s3";
+    let url = "gs://zarr-unit-tests/test_data_gcs";
 
     let fixture = rt.block_on(async {
-        let backend = S3BenchBackend::new("zarr-unit-tests".into(), "test_data_s3".into()).await;
+        let backend = GCSBenchBackend::new("zarr-unit-tests".into(), "test_data_gcs".into()).await;
         TestFixture::new(backend, url).await
     });
 
-    run_benchmark_group(fixture.get_session(), c, "s3_benchmarks");
+    run_benchmark_group(fixture.get_session(), c, "gcs_benchmarks");
 }
 
-criterion_group!(s3_benches, s3_benchmark_group);
-criterion_main!(s3_benches);
+criterion_group!(gcs_benches, gcs_benchmark_group);
+criterion_main!(gcs_benches);
