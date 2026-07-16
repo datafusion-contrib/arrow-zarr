@@ -31,6 +31,8 @@ use datafusion::logical_expr::{CreateExternalTable, Expr, TableProviderFilterPus
 use datafusion::physical_expr::create_physical_expr;
 use datafusion::physical_plan::ExecutionPlan;
 
+#[cfg(feature = "icechunk")]
+use super::config::IcechunkVersion;
 use super::config::ZarrTableConfig;
 use super::scanner::ZarrScan;
 use crate::table::config::ZarrTableUrl;
@@ -51,21 +53,45 @@ impl ZarrTable {
         Self { table_config }
     }
 
-    pub async fn from_path(path: String) -> Self {
-        let table_url = ListingTableUrl::parse(path).unwrap();
+    pub async fn from_path(path: String) -> DfResult<Self> {
+        let table_url = ListingTableUrl::parse(path)?;
         let zarr_url = ZarrTableUrl::ZarrStore(table_url);
-        let schema = zarr_url.infer_schema().await.unwrap();
+        let schema = zarr_url.infer_schema().await?;
         let table_config = ZarrTableConfig::new(zarr_url, schema);
-        Self { table_config }
+        Ok(Self { table_config })
     }
 
     #[cfg(feature = "icechunk")]
-    pub async fn from_path_to_icechunk(path: String) -> Self {
-        let table_url = ListingTableUrl::parse(path).unwrap();
-        let zarr_url = ZarrTableUrl::IcechunkRepo(table_url);
-        let schema = zarr_url.infer_schema().await.unwrap();
+    pub async fn from_path_to_icechunk(path: String) -> DfResult<Self> {
+        let table_url = ListingTableUrl::parse(path)?;
+        let zarr_url = ZarrTableUrl::IcechunkRepo(table_url, IcechunkVersion::default());
+        let schema = zarr_url.infer_schema().await?;
         let table_config = ZarrTableConfig::new(zarr_url, schema);
-        Self { table_config }
+        Ok(Self { table_config })
+    }
+
+    // Read the icechunk repo at the tip of the given branch.
+    #[cfg(feature = "icechunk")]
+    pub fn with_icechunk_branchtip(self, branch: String) -> DfResult<Self> {
+        self.with_icechunk_version(IcechunkVersion::BranchTip(branch))
+    }
+
+    // Read the icechunk repo at the given tag.
+    #[cfg(feature = "icechunk")]
+    pub fn with_icechunk_reftag(self, tag: String) -> DfResult<Self> {
+        self.with_icechunk_version(IcechunkVersion::RefTag(tag))
+    }
+
+    // Read the icechunk repo at the given snapshot id.
+    #[cfg(feature = "icechunk")]
+    pub fn with_icechunk_snapshot_id(self, snapshot_id: String) -> DfResult<Self> {
+        self.with_icechunk_version(IcechunkVersion::SnapshotId(snapshot_id))
+    }
+
+    #[cfg(feature = "icechunk")]
+    fn with_icechunk_version(mut self, version: IcechunkVersion) -> DfResult<Self> {
+        self.table_config = self.table_config.with_icechunk_version(version)?;
+        Ok(self)
     }
 }
 
@@ -135,7 +161,10 @@ impl TableProviderFactory for ZarrTableFactory {
         let table_url = match cmd.file_type.as_str() {
             "ZARR_STORE" => ZarrTableUrl::ZarrStore(ListingTableUrl::parse(&cmd.location)?),
             #[cfg(feature = "icechunk")]
-            "ICECHUNK_REPO" => ZarrTableUrl::IcechunkRepo(ListingTableUrl::parse(&cmd.location)?),
+            "ICECHUNK_REPO" => {
+                let version = icechunk_version_from_options(&cmd.options)?;
+                ZarrTableUrl::IcechunkRepo(ListingTableUrl::parse(&cmd.location)?, version)
+            }
             _ => {
                 return Err(DataFusionError::Execution(format!(
                     "Unsupported file type {}",
@@ -168,6 +197,39 @@ impl TableProviderFactory for ZarrTableFactory {
     }
 }
 
+// Parse the icechunk version selector out of a `CREATE EXTERNAL TABLE`'s
+// `OPTIONS`. At most one selector key may be set; recognized keys are
+// `branch`, `tag`, and `snapshot_id`. An empty options map defaults to the
+// tip of the `main` branch.
+#[cfg(feature = "icechunk")]
+fn icechunk_version_from_options(
+    options: &std::collections::HashMap<String, String>,
+) -> DfResult<IcechunkVersion> {
+    if options.is_empty() {
+        return Ok(IcechunkVersion::default());
+    }
+    if options.len() > 1 {
+        return Err(DataFusionError::Execution(
+            "at most one of the icechunk version options (branch, tag, snapshot_id) may be set"
+                .into(),
+        ));
+    }
+
+    let (key, value) = options.iter().next().expect("options is non-empty");
+    // datafusion's sql parser prefixes any OPTIONS key that doesn't already
+    // contain a '.' with "format.", so e.g. 'snapshot_id' arrives here as
+    // 'format.snapshot_id'. strip that prefix before matching.
+    let key = key.strip_prefix("format.").unwrap_or(key);
+    match key {
+        "branch" => Ok(IcechunkVersion::BranchTip(value.clone())),
+        "tag" => Ok(IcechunkVersion::RefTag(value.clone())),
+        "snapshot_id" => Ok(IcechunkVersion::SnapshotId(value.clone())),
+        other => Err(DataFusionError::Execution(format!(
+            "unknown icechunk version option '{other}', expected one of: branch, tag, snapshot_id"
+        ))),
+    }
+}
+
 #[cfg(test)]
 mod table_provider_tests {
     use std::collections::HashMap;
@@ -182,16 +244,13 @@ mod table_provider_tests {
 
     use super::*;
     use crate::table::table_provider::ZarrTable;
-    #[cfg(feature = "icechunk")]
-    use crate::test_utils::get_local_icechunk_repo;
     use crate::test_utils::{
         extract_col, get_local_zarr_store, validate_names_and_types, validate_primitive_column,
     };
+    #[cfg(feature = "icechunk")]
+    use crate::test_utils::{get_local_icechunk_repo, get_local_icechunk_repo_multiple_commits};
 
-    async fn read_and_validate(table_url: ZarrTableUrl, schema: SchemaRef) {
-        let config = ZarrTableConfig::new(table_url, schema);
-
-        let table_provider = ZarrTable::new(config);
+    async fn read_and_validate(table_provider: ZarrTable, shift: f64) {
         let state = SessionStateBuilder::new().build();
         let session = SessionContext::new();
 
@@ -227,11 +286,11 @@ mod table_provider_tests {
                 -120.0, -119.0, -118.0, -120.0, -119.0, -118.0, -120.0, -119.0, -118.0,
             ],
         );
-        validate_primitive_column::<Float64Type, f64>(
-            "data",
-            &records[0],
-            &[0.0, 1.0, 2.0, 8.0, 9.0, 10.0, 16.0, 17.0, 18.0],
-        );
+        let data_targets: Vec<f64> = [0.0, 1.0, 2.0, 8.0, 9.0, 10.0, 16.0, 17.0, 18.0]
+            .iter()
+            .map(|v| v + shift)
+            .collect();
+        validate_primitive_column::<Float64Type, f64>("data", &records[0], &data_targets);
     }
 
     #[tokio::test]
@@ -240,8 +299,9 @@ mod table_provider_tests {
         let (wrapper, schema) = get_local_zarr_store(true, 0.0, "lat_lon_data_for_provider").await;
         let path = wrapper.get_store_path();
         let table_url = ZarrTableUrl::ZarrStore(ListingTableUrl::parse(path).unwrap());
+        let table = ZarrTable::new(ZarrTableConfig::new(table_url, schema));
 
-        read_and_validate(table_url, schema).await;
+        read_and_validate(table, 0.0).await;
 
         // a local icechunk repo.
         #[cfg(feature = "icechunk")]
@@ -249,10 +309,49 @@ mod table_provider_tests {
             let (wrapper, schema) =
                 get_local_icechunk_repo(true, 0.0, "lat_lon_repo_for_provider").await;
             let path = wrapper.get_store_path();
-            let table_url = ZarrTableUrl::IcechunkRepo(ListingTableUrl::parse(path).unwrap());
+            let table_url = ZarrTableUrl::IcechunkRepo(
+                ListingTableUrl::parse(path).unwrap(),
+                IcechunkVersion::default(),
+            );
+            let table = ZarrTable::new(ZarrTableConfig::new(table_url, schema));
 
-            read_and_validate(table_url, schema).await;
+            read_and_validate(table, 0.0).await;
         }
+    }
+
+    // reads the same icechunk repo at three different versions (a snapshot id, a
+    // tag, and the main branch tip), each of which was committed with a different
+    // shift applied to the data (0, 1 and 2 respectively).
+    #[cfg(feature = "icechunk")]
+    #[tokio::test]
+    async fn read_data_with_icechunk_commits_test() {
+        let (wrapper, _schema, snapshot_id, tag) =
+            get_local_icechunk_repo_multiple_commits("lat_lon_repo_multiple_commits").await;
+        let path = wrapper.get_store_path();
+
+        // the snapshot id points at the first commit, with a shift of 0.
+        let table = ZarrTable::from_path_to_icechunk(path.clone())
+            .await
+            .unwrap()
+            .with_icechunk_snapshot_id(snapshot_id)
+            .unwrap();
+        read_and_validate(table, 0.0).await;
+
+        // the tag points at the second commit, with a shift of 1.
+        let table = ZarrTable::from_path_to_icechunk(path.clone())
+            .await
+            .unwrap()
+            .with_icechunk_reftag(tag)
+            .unwrap();
+        read_and_validate(table, 1.0).await;
+
+        // the main branch tip is the third commit, with a shift of 2.
+        let table = ZarrTable::from_path_to_icechunk(path)
+            .await
+            .unwrap()
+            .with_icechunk_branchtip("main".to_string())
+            .unwrap();
+        read_and_validate(table, 2.0).await;
     }
 
     #[tokio::test]
@@ -286,13 +385,13 @@ mod table_provider_tests {
         assert_eq!(batch.num_columns(), 2);
         assert_eq!(batch.num_rows(), 64);
 
-        // nw we want the full table so we can just register the table
+        // now we want the full table so we can just register the table
         // directly on the session context.
         let session = SessionContext::new_with_state(state.clone());
         session
             .register_table(
                 "zarr_table",
-                Arc::new(ZarrTable::from_path(table_path.clone()).await),
+                Arc::new(ZarrTable::from_path(table_path.clone()).await.unwrap()),
             )
             .unwrap();
 
@@ -356,7 +455,7 @@ mod table_provider_tests {
             session
                 .register_table(
                     "zarr_table_icechunk",
-                    Arc::new(ZarrTable::from_path_to_icechunk(table_path).await),
+                    Arc::new(ZarrTable::from_path_to_icechunk(table_path).await.unwrap()),
                 )
                 .unwrap();
 
@@ -371,6 +470,52 @@ mod table_provider_tests {
         }
     }
 
+    // creates a table via a CREATE EXTERNAL TABLE statement for each of the three
+    // committed versions of the icechunk repo (a snapshot id, a tag, and the main
+    // branch tip), exercising the OPTIONS-based version selection. we only check
+    // the shape of the result (all 3 columns, all 64 rows).
+    #[cfg(feature = "icechunk")]
+    #[tokio::test]
+    async fn create_table_provider_icechunk_test() {
+        let (wrapper, _schema, snapshot_id, tag) =
+            get_local_icechunk_repo_multiple_commits("lat_lon_repo_for_factory_commits").await;
+        let table_path = wrapper.get_store_path();
+
+        let mut state = SessionStateBuilder::new().build();
+        state
+            .table_factories_mut()
+            .insert("ICECHUNK_REPO".into(), Arc::new(ZarrTableFactory {}));
+
+        // one CREATE EXTERNAL TABLE per commit, selecting the version via OPTIONS.
+        let cases = [
+            (
+                "zarr_table_snapshot",
+                format!("OPTIONS ('snapshot_id' '{}')", snapshot_id),
+            ),
+            ("zarr_table_tag", format!("OPTIONS ('tag' '{}')", tag)),
+            ("zarr_table_branch", "OPTIONS ('branch' 'main')".to_string()),
+        ];
+
+        for (table_name, options) in cases {
+            let query = format!(
+                "CREATE EXTERNAL TABLE {} STORED AS ICECHUNK_REPO LOCATION '{}' {}",
+                table_name, table_path, options,
+            );
+
+            let session = SessionContext::new_with_state(state.clone());
+            session.sql(&query).await.unwrap();
+
+            let query = format!("SELECT lat, lon, data FROM {}", table_name);
+            let df = session.sql(&query).await.unwrap();
+            let batches = df.collect().await.unwrap();
+
+            let schema = batches[0].schema();
+            let batch = concat_batches(&schema, &batches).unwrap();
+            assert_eq!(batch.num_columns(), 3);
+            assert_eq!(batch.num_rows(), 64);
+        }
+    }
+
     #[tokio::test]
     async fn partial_coordinates_query() {
         let (wrapper, _) =
@@ -382,7 +527,7 @@ mod table_provider_tests {
         session
             .register_table(
                 "zarr_table",
-                Arc::new(ZarrTable::from_path(table_path).await),
+                Arc::new(ZarrTable::from_path(table_path).await.unwrap()),
             )
             .unwrap();
 
@@ -408,7 +553,7 @@ mod table_provider_tests {
         session
             .register_table(
                 "zarr_table",
-                Arc::new(ZarrTable::from_path(table_path).await),
+                Arc::new(ZarrTable::from_path(table_path).await.unwrap()),
             )
             .unwrap();
 
