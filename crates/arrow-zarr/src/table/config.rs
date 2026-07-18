@@ -72,6 +72,12 @@ impl ZarrTableConfig {
         self
     }
 
+    #[cfg(feature = "icechunk")]
+    pub(crate) fn with_icechunk_version(mut self, version: IcechunkVersion) -> DfResult<Self> {
+        self.table_url = self.table_url.with_icechunk_version(version)?;
+        Ok(self)
+    }
+
     pub(crate) fn get_projection(&self) -> Option<Vec<usize>> {
         self.projection.clone()
     }
@@ -93,13 +99,63 @@ impl ZarrTableConfig {
     }
 }
 
-/// We can create a table based on a directory with a supported zarr
-/// file/folder structure, or from an icechunk repo.
+// Selects which version of an icechunk repo to read: a branch tip,
+// a tag, or an exact snapshot id.
+#[cfg(feature = "icechunk")]
+#[derive(Clone, Debug)]
+pub(crate) enum IcechunkVersion {
+    BranchTip(String),
+    RefTag(String),
+    SnapshotId(String),
+}
+
+#[cfg(feature = "icechunk")]
+impl Default for IcechunkVersion {
+    fn default() -> Self {
+        Self::BranchTip("main".to_string())
+    }
+}
+
+#[cfg(feature = "icechunk")]
+impl IcechunkVersion {
+    // Resolve into an icechunk `VersionInfo`, parsing the snapshot id if needed.
+    fn to_version_info(&self) -> DfResult<icechunk::repository::VersionInfo> {
+        use icechunk::format::SnapshotId;
+        use icechunk::repository::VersionInfo;
+
+        Ok(match self {
+            Self::BranchTip(branch) => VersionInfo::BranchTipRef(branch.clone()),
+            Self::RefTag(tag) => VersionInfo::TagRef(tag.clone()),
+            Self::SnapshotId(id) => {
+                VersionInfo::SnapshotId(SnapshotId::try_from(id.as_str()).map_err(|e| {
+                    DataFusionError::Execution(format!("invalid icechunk snapshot id '{id}': {e}"))
+                })?)
+            }
+        })
+    }
+}
+
+// We can create a table based on a directory with a supported zarr
+// file/folder structure, or from an icechunk repo.
 #[derive(Clone, Debug)]
 pub(crate) enum ZarrTableUrl {
     ZarrStore(ListingTableUrl),
     #[cfg(feature = "icechunk")]
-    IcechunkRepo(ListingTableUrl),
+    IcechunkRepo(ListingTableUrl, IcechunkVersion),
+}
+
+#[cfg(feature = "icechunk")]
+impl ZarrTableUrl {
+    // Set the icechunk version selector. Errors if this is not an
+    // icechunk repo.
+    pub(crate) fn with_icechunk_version(self, version: IcechunkVersion) -> DfResult<Self> {
+        match self {
+            Self::IcechunkRepo(url, _) => Ok(Self::IcechunkRepo(url, version)),
+            Self::ZarrStore(_) => Err(DataFusionError::Execution(
+                "cannot set an icechunk version selector on a plain zarr store".into(),
+            )),
+        }
+    }
 }
 
 impl ZarrTableUrl {
@@ -147,10 +203,9 @@ impl ZarrTableUrl {
                 ))),
             },
 
-            // this is for the case of an icechunk repo. note that here we hard code
-            // reading from the main branch, and "as of" now.
+            // this is for the case of an icechunk repo.
             #[cfg(feature = "icechunk")]
-            Self::IcechunkRepo(table_url) => {
+            Self::IcechunkRepo(table_url, version) => {
                 let object_storage = match table_url.scheme() {
                     "file" => {
                         let path = PathBuf::from("/".to_owned() + table_url.prefix().as_ref());
@@ -219,11 +274,9 @@ impl ZarrTableUrl {
                 let repo = Repository::open(None, Arc::new(object_storage), HashMap::new())
                     .await
                     .map_err(|e| DataFusionError::External(Box::new(e)))?;
+                let version_info = version.to_version_info()?;
                 let session = repo
-                    .readonly_session(&icechunk::repository::VersionInfo::AsOf {
-                        branch: "main".into(),
-                        at: chrono::Utc::now(),
-                    })
+                    .readonly_session(&version_info)
                     .await
                     .map_err(|e| DataFusionError::External(Box::new(e)))?;
                 Ok((Arc::new(AsyncIcechunkStore::new(session)), None))
@@ -340,7 +393,7 @@ mod zarr_config_tests {
             let path = wrapper.get_store_path();
 
             let table_url = ListingTableUrl::parse(path).unwrap();
-            let zarr_table_url = ZarrTableUrl::IcechunkRepo(table_url);
+            let zarr_table_url = ZarrTableUrl::IcechunkRepo(table_url, IcechunkVersion::default());
             let inferred_schema = zarr_table_url.infer_schema().await.unwrap();
             assert_eq!(inferred_schema, schema);
         }

@@ -23,7 +23,9 @@ impl PyZarrTableProvider {
     #[new]
     pub fn new(path: &str) -> PyResult<Self> {
         let path = path.to_string();
-        let table = get_tokio_runtime().block_on(async { ZarrTable::from_path(path).await });
+        let table = get_tokio_runtime()
+            .block_on(async { ZarrTable::from_path(path).await })
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
         Ok(Self {
             table: Arc::new(table),
         })
@@ -50,8 +52,9 @@ impl PyIcechunkTableProvider {
     #[new]
     pub fn new(path: &str) -> PyResult<Self> {
         let path = path.to_string();
-        let table =
-            get_tokio_runtime().block_on(async { ZarrTable::from_path_to_icechunk(path).await });
+        let table = get_tokio_runtime()
+            .block_on(async { ZarrTable::from_path_to_icechunk(path).await })
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
         Ok(Self {
             table: Arc::new(table),
         })

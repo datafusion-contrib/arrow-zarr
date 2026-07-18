@@ -475,4 +475,100 @@ mod test_utils {
 
         (wrapper, schema)
     }
+
+    // writes only the "/data" array (matching the data written by
+    // write_lat_lon_data_to_store), with the given shift added to the values.
+    #[cfg(all(feature = "icechunk", feature = "datafusion"))]
+    async fn write_shifted_data_array(
+        store: Arc<dyn AsyncReadableWritableListableStorageTraits>,
+        shift: f64,
+    ) {
+        let data: Vec<f64> = (0..64).map(|i| i as f64 + shift).collect();
+        write_2d_float_array(
+            Some(data),
+            0.0,
+            (8, 8),
+            (3, 3),
+            store,
+            "/data",
+            Some(["lat".into(), "lon".into()].to_vec()),
+        )
+        .await;
+    }
+
+    // builds a local icechunk repo with three commits: the data is written with a
+    // shift of 0, then 1, then 2. we record the snapshot id after the first push,
+    // and create a tag.
+    #[cfg(all(feature = "icechunk", feature = "datafusion"))]
+    pub(crate) async fn get_local_icechunk_repo_multiple_commits(
+        dir_name: &str,
+    ) -> (LocalIcechunkRepoWrapper, SchemaRef, String, String) {
+        if dir_name.is_empty() {
+            panic!("name for test icechunk repo cannot be empty!")
+        }
+        let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(dir_name);
+        fs::create_dir(p.clone()).unwrap();
+        let repo = Repository::create(
+            None,
+            Arc::new(ObjectStorage::new_local_filesystem(&p).await.unwrap()),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+        // first push, with a shift of 0. record the snapshot id.
+        let store = Arc::new(AsyncIcechunkStore::new(
+            repo.writable_session("main").await.unwrap(),
+        ));
+        write_lat_lon_data_to_store(store.clone(), true, 0.0).await;
+        let snapshot_id = store
+            .session()
+            .write()
+            .await
+            .commit("first commit, shift 0", None)
+            .await
+            .unwrap();
+
+        // second push, with a shift of 1. tag the resulting snapshot.
+        let store = Arc::new(AsyncIcechunkStore::new(
+            repo.writable_session("main").await.unwrap(),
+        ));
+        write_shifted_data_array(store.clone(), 1.0).await;
+        let tagged_snapshot = store
+            .session()
+            .write()
+            .await
+            .commit("second commit, shift 1", None)
+            .await
+            .unwrap();
+        repo.create_tag("test_tag", &tagged_snapshot).await.unwrap();
+
+        // third push, with a shift of 2. this becomes the main branch tip.
+        let store = Arc::new(AsyncIcechunkStore::new(
+            repo.writable_session("main").await.unwrap(),
+        ));
+        write_shifted_data_array(store.clone(), 2.0).await;
+        let _ = store
+            .session()
+            .write()
+            .await
+            .commit("third commit, shift 2", None)
+            .await
+            .unwrap();
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("data", ArrowDataType::Float64, true),
+            Field::new("lat", ArrowDataType::Float64, true),
+            Field::new("lon", ArrowDataType::Float64, true),
+        ]));
+
+        let wrapper = LocalIcechunkRepoWrapper { store, path: p };
+
+        (
+            wrapper,
+            schema,
+            String::from(&snapshot_id),
+            "test_tag".to_string(),
+        )
+    }
 }
