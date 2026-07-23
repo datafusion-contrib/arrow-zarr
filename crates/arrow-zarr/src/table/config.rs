@@ -444,9 +444,7 @@ impl ZarrTableUrl {
                     )),
                 }?;
 
-                // capture the array's shape and dimension names for statistics. dimension names
-                // are treated as absent (falling back to positional keys) if the array has none
-                // or if any are null.
+                // capture the array's shape and dimension names for statistics.
                 let dim_names: Option<Vec<String>> = arr
                     .dimension_names()
                     .clone()
