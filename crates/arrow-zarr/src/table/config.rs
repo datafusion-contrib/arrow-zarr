@@ -15,7 +15,6 @@
 // specific language governing permissions and limitations
 // under the License.
 
-#[cfg(feature = "icechunk")]
 use std::collections::HashMap;
 #[cfg(all(feature = "icechunk", feature = "s3"))]
 use std::env;
@@ -23,6 +22,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use arrow_schema::{DataType, Field, Fields, Schema, SchemaRef};
+use datafusion::common::stats::Precision;
+use datafusion::common::Statistics;
 use datafusion::datasource::listing::ListingTableUrl;
 use datafusion::error::{DataFusionError, Result as DfResult};
 #[cfg(feature = "icechunk")]
@@ -41,12 +42,106 @@ use zarrs_metadata::v3::MetadataV3;
 use zarrs_metadata::ArrayMetadata;
 use zarrs_object_store::AsyncObjectStore;
 use zarrs_storage::{AsyncReadableListableStorageTraits, StorePrefix};
+
+// Cached, projection-independent ingredients for computing scan statistics.
+//
+// The two maps mirror the reader's two regimes (see `ZarrCoordinates::new`
+// / `resolve_vector` in `zarr_data_stream.rs`): dimension names only trigger
+// when every relevant array is named; with partial or absent names the reader
+// does no broadcasting and simply requires the shapes to match.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ZarrStatsBase {
+    column_dim_names: HashMap<String, Vec<String>>,
+    column_dims: HashMap<String, Vec<u64>>,
+}
+
+impl ZarrStatsBase {
+    // Record one array's contribution. The raw shape is always stored,
+    // dimension names are stored only when the array has them. Dimension
+    // lengths aren't stored separately, they are recovered from `column_dims`
+    // (a dim's length is the shape entry at its position).
+    fn add_array(&mut self, column: &str, shape: &[u64], dim_names: Option<Vec<String>>) {
+        self.column_dims.insert(column.to_string(), shape.to_vec());
+        if let Some(names) = dim_names {
+            self.column_dim_names.insert(column.to_string(), names);
+        }
+    }
+
+    // Build DataFusion statistics for a projected schema. `num_rows` is computed
+    // to match the reader's two regimes; everything else (byte size, per-column stats)
+    // is left `Absent`.
+    pub(crate) fn to_datafusion_statistics(
+        &self,
+        projected_schema: &SchemaRef,
+    ) -> DfResult<Statistics> {
+        let columns: Vec<&str> = projected_schema
+            .fields()
+            .iter()
+            .map(|f| f.name().as_str())
+            .collect();
+
+        let stats = Statistics::new_unknown(projected_schema);
+        if columns.is_empty() {
+            return Ok(stats);
+        }
+
+        let num_rows = if columns
+            .iter()
+            .all(|c| self.column_dim_names.contains_key(*c))
+        {
+            // first case, union the named dimensions and multiply their lengths. a dim's length
+            // is read from the shape of any column that spans it (the shape entry at the dim's
+            // position); same-dim entries agree, so overwriting is harmless.
+            let mut dim_lengths: HashMap<&str, u64> = HashMap::new();
+            for c in &columns {
+                for (name, len) in self.column_dim_names[*c]
+                    .iter()
+                    .zip(self.column_dims[*c].iter())
+                {
+                    dim_lengths.insert(name.as_str(), *len);
+                }
+            }
+            dim_lengths.values().product::<u64>()
+        } else {
+            // second case, no broadcasting, so every projected column must share
+            // one shape.
+            let mut shape: Option<&Vec<u64>> = None;
+            for c in &columns {
+                let Some(col_shape) = self.column_dims.get(*c) else {
+                    // every array is recorded in `column_dims` at schema inference, and the
+                    // projection is always a subset of the inferred schema, so a missing entry
+                    // means the stats base and schema are out of sync.
+                    return Err(DataFusionError::Internal(format!(
+                        "zarr stats base is missing shape info for projected column '{c}'"
+                    )));
+                };
+                match shape {
+                    Some(s) if s != col_shape => {
+                        return Err(DataFusionError::Execution(
+                            "Cannot compute zarr statistics: selected arrays without consistent \
+                             dimension names have mismatched shapes"
+                                .into(),
+                        ));
+                    }
+                    _ => shape = Some(col_shape),
+                }
+            }
+            shape
+                .map(|s| s.iter().product::<u64>())
+                .expect("non-empty projection always resolves a shape")
+        };
+
+        Ok(stats.with_num_rows(Precision::Exact(num_rows as usize)))
+    }
+}
+
 /// A zarr table configuration.
 #[derive(Clone, Debug)]
 pub struct ZarrTableConfig {
     schema_ref: SchemaRef,
     table_url: ZarrTableUrl,
     projection: Option<Vec<usize>>,
+    stats_base: Option<ZarrStatsBase>,
 }
 
 impl ZarrTableConfig {
@@ -55,6 +150,22 @@ impl ZarrTableConfig {
             schema_ref,
             table_url,
             projection: None,
+            stats_base: None,
+        }
+    }
+
+    pub(crate) fn with_stats_base(mut self, stats_base: ZarrStatsBase) -> Self {
+        self.stats_base = Some(stats_base);
+        self
+    }
+
+    // Statistics for the (projected) scan output. Falls back to all-unknown when
+    // no stats base was captured (e.g. configs built directly in tests).
+    pub(crate) fn statistics(&self) -> DfResult<Statistics> {
+        let projected_schema = self.get_projected_schema_ref();
+        match &self.stats_base {
+            Some(base) => base.to_datafusion_statistics(&projected_schema),
+            None => Ok(Statistics::new_unknown(&projected_schema)),
         }
     }
 
@@ -284,7 +395,7 @@ impl ZarrTableUrl {
         }
     }
 
-    pub(crate) async fn infer_schema(&self) -> DfResult<SchemaRef> {
+    pub(crate) async fn infer_schema(&self) -> DfResult<(SchemaRef, ZarrStatsBase)> {
         let (store, store_prefix) = self.get_store_pointer_and_prefix().await?;
         let store_prefix = store_prefix
             .as_ref()
@@ -298,6 +409,7 @@ impl ZarrTableUrl {
             .await
             .map_err(|e| DataFusionError::External(Box::new(e)))?;
         let mut fields = Vec::with_capacity(prefixes.len());
+        let mut stats_base = ZarrStatsBase::default();
 
         for prefix in prefixes {
             if prefix.as_str().contains("zarr.json") {
@@ -332,6 +444,15 @@ impl ZarrTableUrl {
                     )),
                 }?;
 
+                // capture the array's shape and dimension names for statistics. dimension names
+                // are treated as absent (falling back to positional keys) if the array has none
+                // or if any are null.
+                let dim_names: Option<Vec<String>> = arr
+                    .dimension_names()
+                    .clone()
+                    .and_then(|names| names.into_iter().collect::<Option<Vec<String>>>());
+                stats_base.add_array(&field_name, arr.shape(), dim_names);
+
                 fields.push(Field::new(
                     field_name,
                     get_schema_type(&meta.data_type)?,
@@ -340,7 +461,7 @@ impl ZarrTableUrl {
             }
         }
 
-        Ok(Arc::new(Schema::new(Fields::from(fields))))
+        Ok((Arc::new(Schema::new(Fields::from(fields))), stats_base))
     }
 }
 
@@ -372,7 +493,7 @@ mod zarr_config_tests {
     use super::*;
     #[cfg(feature = "icechunk")]
     use crate::test_utils::get_local_icechunk_repo;
-    use crate::test_utils::get_local_zarr_store;
+    use crate::test_utils::{get_local_zarr_store, get_local_zarr_store_mix_dims};
 
     #[tokio::test]
     async fn schema_inference_tests() {
@@ -382,7 +503,7 @@ mod zarr_config_tests {
 
         let table_url = ListingTableUrl::parse(path).unwrap();
         let zarr_table_url = ZarrTableUrl::ZarrStore(table_url);
-        let inferred_schema = zarr_table_url.infer_schema().await.unwrap();
+        let (inferred_schema, _stats) = zarr_table_url.infer_schema().await.unwrap();
         assert_eq!(inferred_schema, schema);
 
         // local icechunk repo.
@@ -394,8 +515,62 @@ mod zarr_config_tests {
 
             let table_url = ListingTableUrl::parse(path).unwrap();
             let zarr_table_url = ZarrTableUrl::IcechunkRepo(table_url, IcechunkVersion::default());
-            let inferred_schema = zarr_table_url.infer_schema().await.unwrap();
+            let (inferred_schema, _stats) = zarr_table_url.infer_schema().await.unwrap();
             assert_eq!(inferred_schema, schema);
+        }
+    }
+
+    #[tokio::test]
+    async fn statistics_tests() {
+        // local zarr directory with mixed-dimension coordinates: `lat` is a 2D (8x8)
+        // broadcasted coordinate, `lon` is 1D (8), and `data` is 2D (8x8). so `lat` and
+        // `data` span both dimensions (64 rows), while `lon` spans a single one (8 rows).
+        let (wrapper, schema) = get_local_zarr_store_mix_dims(0.0, "data_for_config_stats").await;
+        let path = wrapper.get_store_path();
+        let table_url = ZarrTableUrl::ZarrStore(ListingTableUrl::parse(path).unwrap());
+        let (inferred_schema, stats_base) = table_url.infer_schema().await.unwrap();
+        assert_eq!(inferred_schema, schema);
+
+        let base =
+            ZarrTableConfig::new(table_url, inferred_schema.clone()).with_stats_base(stats_base);
+        let num_rows = |cols: &[&str]| {
+            let projection: Vec<usize> = cols
+                .iter()
+                .map(|c| inferred_schema.index_of(c).unwrap())
+                .collect();
+            base.clone()
+                .with_projection(projection)
+                .statistics()
+                .unwrap()
+                .num_rows
+        };
+
+        assert_eq!(num_rows(&["lat"]), Precision::Exact(64));
+        assert_eq!(num_rows(&["lon"]), Precision::Exact(8));
+        assert_eq!(num_rows(&["data"]), Precision::Exact(64));
+        assert_eq!(num_rows(&["data", "lat", "lon"]), Precision::Exact(64));
+
+        // local icechunk repo with 1D `lat`/`lon` coordinates and 2D `data`. selecting
+        // both coordinates broadcasts them to the full 2D grid -> 64 rows.
+        #[cfg(feature = "icechunk")]
+        {
+            let (wrapper, _schema) =
+                get_local_icechunk_repo(true, 0.0, "data_for_config_stats_repo").await;
+            let path = wrapper.get_store_path();
+            let table_url = ZarrTableUrl::IcechunkRepo(
+                ListingTableUrl::parse(path).unwrap(),
+                IcechunkVersion::default(),
+            );
+            let (inferred_schema, stats_base) = table_url.infer_schema().await.unwrap();
+
+            let projection = vec![
+                inferred_schema.index_of("lat").unwrap(),
+                inferred_schema.index_of("lon").unwrap(),
+            ];
+            let config = ZarrTableConfig::new(table_url, inferred_schema)
+                .with_stats_base(stats_base)
+                .with_projection(projection);
+            assert_eq!(config.statistics().unwrap().num_rows, Precision::Exact(64));
         }
     }
 }
