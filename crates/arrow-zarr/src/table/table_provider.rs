@@ -56,8 +56,8 @@ impl ZarrTable {
     pub async fn from_path(path: String) -> DfResult<Self> {
         let table_url = ListingTableUrl::parse(path)?;
         let zarr_url = ZarrTableUrl::ZarrStore(table_url);
-        let schema = zarr_url.infer_schema().await?;
-        let table_config = ZarrTableConfig::new(zarr_url, schema);
+        let (schema, stats_base) = zarr_url.infer_schema().await?;
+        let table_config = ZarrTableConfig::new(zarr_url, schema).with_stats_base(stats_base);
         Ok(Self { table_config })
     }
 
@@ -65,8 +65,8 @@ impl ZarrTable {
     pub async fn from_path_to_icechunk(path: String) -> DfResult<Self> {
         let table_url = ListingTableUrl::parse(path)?;
         let zarr_url = ZarrTableUrl::IcechunkRepo(table_url, IcechunkVersion::default());
-        let schema = zarr_url.infer_schema().await?;
-        let table_config = ZarrTableConfig::new(zarr_url, schema);
+        let (schema, stats_base) = zarr_url.infer_schema().await?;
+        let table_config = ZarrTableConfig::new(zarr_url, schema).with_stats_base(stats_base);
         Ok(Self { table_config })
     }
 
@@ -173,7 +173,7 @@ impl TableProviderFactory for ZarrTableFactory {
             }
         };
 
-        let inferred_schema = table_url.infer_schema().await?;
+        let (inferred_schema, stats_base) = table_url.infer_schema().await?;
         let schema = if cmd.schema.fields().is_empty() {
             inferred_schema
         } else {
@@ -191,7 +191,7 @@ impl TableProviderFactory for ZarrTableFactory {
             Arc::new(provided_schema)
         };
 
-        let zarr_config = ZarrTableConfig::new(table_url, schema);
+        let zarr_config = ZarrTableConfig::new(table_url, schema).with_stats_base(stats_base);
         let table_provider = ZarrTable::new(zarr_config);
         Ok(Arc::new(table_provider))
     }
@@ -628,5 +628,51 @@ mod table_provider_tests {
                 );
             }
         }
+    }
+
+    #[tokio::test]
+    async fn stats_and_metrics_test() {
+        use datafusion::common::stats::Precision;
+
+        let (wrapper, _schema) =
+            get_local_zarr_store(true, 0.0, "lat_lon_data_provider_stats_metrics").await;
+        let path = wrapper.get_store_path();
+        // build via `from_path` so the config carries the inferred stats base.
+        let table = ZarrTable::from_path(path).await.unwrap();
+
+        let state = SessionStateBuilder::new().build();
+        let session = SessionContext::new();
+        let scan = table.scan(&state, None, &Vec::new(), None).await.unwrap();
+
+        let stats = scan.partition_statistics(None).unwrap();
+        assert_eq!(stats.num_rows, Precision::Exact(64));
+
+        let records: Vec<_> = scan
+            .execute(0, session.task_ctx())
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        assert_eq!(records.len(), 9);
+
+        let snapshot = scan.metrics().unwrap();
+        for name in [
+            "io_time",
+            "decode_time",
+            "total_time",
+            "chunks_looked_at",
+            "chunks_read",
+            "rows_produced",
+        ] {
+            assert!(
+                snapshot.sum_by_name(name).is_some(),
+                "metric {name} missing from the metrics set"
+            );
+        }
+
+        let value = |name: &str| snapshot.sum_by_name(name).unwrap().as_usize();
+        assert_eq!(value("chunks_looked_at"), 9);
+        assert_eq!(value("chunks_read"), 9);
+        assert_eq!(value("rows_produced"), 64);
     }
 }

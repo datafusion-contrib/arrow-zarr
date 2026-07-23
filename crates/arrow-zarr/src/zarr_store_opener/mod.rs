@@ -17,8 +17,10 @@
 
 pub(crate) mod filter;
 pub(crate) mod io_runtime;
+pub(crate) mod metrics;
 pub(crate) mod zarr_data_stream;
 pub(crate) mod zarr_errors;
 
 pub use filter::{ZarrArrowPredicate, ZarrChunkFilter};
+pub use metrics::ZarrMetrics;
 pub use zarr_data_stream::ZarrRecordBatchStream;

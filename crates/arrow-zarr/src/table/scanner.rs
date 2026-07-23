@@ -18,6 +18,7 @@
 use std::any::Any;
 use std::sync::Arc;
 
+use datafusion::common::Statistics;
 use datafusion::datasource::listing::PartitionedFile;
 use datafusion::datasource::physical_plan::{
     FileGroup, FileScanConfigBuilder, FileSource, FileStream,
@@ -25,7 +26,7 @@ use datafusion::datasource::physical_plan::{
 use datafusion::execution::object_store::ObjectStoreUrl;
 use datafusion::physical_expr::{EquivalenceProperties, Partitioning};
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
-use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
+use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, PhysicalExpr, PlanProperties,
     SendableRecordBatchStream,
@@ -40,6 +41,7 @@ pub struct ZarrScan {
     zarr_config: ZarrTableConfig,
     filters: Option<Arc<dyn PhysicalExpr>>,
     plan_properties: PlanProperties,
+    metrics: ExecutionPlanMetricsSet,
 }
 
 impl ZarrScan {
@@ -58,6 +60,7 @@ impl ZarrScan {
             zarr_config,
             filters,
             plan_properties,
+            metrics: ExecutionPlanMetricsSet::default(),
         }
     }
 }
@@ -92,6 +95,27 @@ impl ExecutionPlan for ZarrScan {
         &self.plan_properties
     }
 
+    fn metrics(&self) -> Option<MetricsSet> {
+        Some(self.metrics.clone_inner())
+    }
+
+    fn partition_statistics(
+        &self,
+        partition: Option<usize>,
+    ) -> datafusion::error::Result<Statistics> {
+        match partition {
+            // whole-plan statistics (all partitions combined).
+            None => self.zarr_config.statistics(),
+            // we can't cheaply give an exact per-partition row count (the
+            // reader slices the chunk grid into contiguous ranges and edge
+            // chunks vary in size), so we report unknown for a specific
+            // partition.
+            Some(_) => Ok(Statistics::new_unknown(
+                &self.zarr_config.get_projected_schema_ref(),
+            )),
+        }
+    }
+
     fn repartitioned(
         &self,
         target_partitions: usize,
@@ -118,8 +142,12 @@ impl ExecutionPlan for ZarrScan {
             }
         };
 
-        let zarr_source =
-            ZarrSource::new(self.zarr_config.clone(), n_partitions, self.filters.clone());
+        let zarr_source = ZarrSource::new(
+            self.zarr_config.clone(),
+            n_partitions,
+            self.filters.clone(),
+            self.metrics.clone(),
+        );
         // dummy file group, it's needed to re-use some of the datafusion code,
         // but it doesn't really apply for a zarr store.
         let file_groups = vec![FileGroup::new(vec![PartitionedFile::new("", 0)])];
@@ -135,13 +163,20 @@ impl ExecutionPlan for ZarrScan {
         let dummy_object_store = Arc::new(LocalFileSystem::new());
         let file_opener =
             zarr_source.create_file_opener(dummy_object_store, &file_scan_config, partition);
-        let metrics = ExecutionPlanMetricsSet::default();
 
         // Note: the "partition" argument is hardcoded to 0 here. We are not making
         // use of most of the logic in the file stream, for example the partitioning
         // logic is handled in the zarr stream object, so we need to effectively
         // "disable" it in the file stream obejct by always setting it to 0.
-        let file_stream = FileStream::new(&file_scan_config, 0, file_opener, &metrics).unwrap();
+        // Passing in dummy metrics because the real metrics are computed directly
+        // from the data stream, don't want to create any confusion around that.
+        let file_stream = FileStream::new(
+            &file_scan_config,
+            0,
+            file_opener,
+            &ExecutionPlanMetricsSet::default(),
+        )
+        .unwrap();
 
         Ok(Box::pin(file_stream))
     }
@@ -237,5 +272,96 @@ mod scanner_tests {
         ]);
         validate_names_and_types(&target_types, &records[0]);
         assert_eq!(records.len(), 4);
+    }
+
+    // reads the row-count statistics off the exec plan for different sets of selected
+    // columns (by passing a different schema into the config each time). the icechunk
+    // store has 1D `lat`/`lon` coordinates and a 2D `data` array, so `lat` alone spans a
+    // single dimension (8 rows) while any projection including a second dimension (e.g.
+    // `lon` or `data`) broadcasts to the full 2D grid (64 rows).
+    #[cfg(feature = "icechunk")]
+    #[tokio::test]
+    async fn statistics_test() {
+        use arrow_schema::{Field, Schema};
+        use datafusion::common::stats::Precision;
+
+        use crate::table::config::IcechunkVersion;
+        use crate::test_utils::get_local_icechunk_repo;
+
+        let (wrapper, _schema) =
+            get_local_icechunk_repo(true, 0.0, "lat_lon_data_for_scan_stats").await;
+        let path = wrapper.get_store_path();
+        let table_url = ZarrTableUrl::IcechunkRepo(
+            ListingTableUrl::parse(path).unwrap(),
+            IcechunkVersion::default(),
+        );
+        let (inferred_schema, stats_base) = table_url.infer_schema().await.unwrap();
+
+        let num_rows = |names: &[&str]| {
+            let fields: Vec<Field> = names
+                .iter()
+                .map(|n| inferred_schema.field_with_name(n).unwrap().clone())
+                .collect();
+            let config = ZarrTableConfig::new(table_url.clone(), Arc::new(Schema::new(fields)))
+                .with_stats_base(stats_base.clone());
+            ZarrScan::new(config, None)
+                .partition_statistics(None)
+                .unwrap()
+                .num_rows
+        };
+
+        assert_eq!(num_rows(&["lat"]), Precision::Exact(8));
+        assert_eq!(num_rows(&["lat", "lon"]), Precision::Exact(64));
+        assert_eq!(num_rows(&["data", "lat", "lon"]), Precision::Exact(64));
+    }
+
+    // runs a full scan (all three columns, no filter) and reads the runtime metrics back
+    // off the exec plan. the store is a 8x8 grid split into 3x3 chunks -> 9 chunks, all of
+    // which are read (no filter), for 64 rows.
+    #[cfg(feature = "icechunk")]
+    #[tokio::test]
+    async fn metrics_test() {
+        use crate::table::config::IcechunkVersion;
+        use crate::test_utils::get_local_icechunk_repo;
+
+        let (wrapper, schema) =
+            get_local_icechunk_repo(true, 0.0, "lat_lon_data_for_scan_metrics").await;
+        let path = wrapper.get_store_path();
+        let table_url = ZarrTableUrl::IcechunkRepo(
+            ListingTableUrl::parse(path).unwrap(),
+            IcechunkVersion::default(),
+        );
+        let config = ZarrTableConfig::new(table_url, schema);
+
+        let session = SessionContext::new();
+        let scan = ZarrScan::new(config, None);
+        let records: Vec<_> = scan
+            .execute(0, session.task_ctx())
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        assert_eq!(records.len(), 9);
+
+        // the scan owns the metrics set the reader registered into, so we can read it back.
+        let snapshot = scan.metrics().unwrap();
+        for name in [
+            "io_time",
+            "decode_time",
+            "total_time",
+            "chunks_looked_at",
+            "chunks_read",
+            "rows_produced",
+        ] {
+            assert!(
+                snapshot.sum_by_name(name).is_some(),
+                "metric {name} missing from the metrics set"
+            );
+        }
+
+        let value = |name: &str| snapshot.sum_by_name(name).unwrap().as_usize();
+        assert_eq!(value("chunks_looked_at"), 9);
+        assert_eq!(value("chunks_read"), 9);
+        assert_eq!(value("rows_produced"), 64);
     }
 }

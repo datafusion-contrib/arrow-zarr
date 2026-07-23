@@ -22,6 +22,7 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use std::time::Instant;
 
 use arrow::array::*;
 use arrow::datatypes::*;
@@ -40,6 +41,7 @@ use zarrs_storage::AsyncReadableListableStorageTraits;
 
 use super::filter::ZarrChunkFilter;
 use super::io_runtime::IoRuntime;
+use super::metrics::ZarrMetrics;
 use super::zarr_errors::{ZarrQueryError, ZarrQueryResult};
 
 /// this function handles having multiple values for a given vector,
@@ -634,6 +636,7 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrStore<T> {
         chk_idx: Vec<u64>,
         use_cached_value: bool,
         next_chunk_idx: Option<Vec<u64>>,
+        metrics: &ZarrMetrics,
     ) -> ZarrQueryResult<ZarrInMemoryChunk> {
         if cols.is_empty() {
             return Err(ZarrQueryError::InvalidColumnRequest(
@@ -663,7 +666,9 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrStore<T> {
 
             while let Some((data, arr_interface)) = rx.recv().await {
                 let data = data?;
+                let decode_start = Instant::now();
                 let data = arr_interface.decode_data(data)?;
+                metrics.add_decode_time(decode_start.elapsed());
                 chk_data.add_data(arr_interface.name, data);
             }
         }
@@ -675,14 +680,19 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrStore<T> {
             let (tx, mut rx) = tokio::sync::mpsc::channel(arr_interfaces.len());
             for arr_interface in arr_interfaces {
                 let tx_copy = tx.clone();
+                let io_metrics = metrics.clone();
                 let io_task = async move {
+                    let read_start = Instant::now();
                     let b = arr_interface.read_bytes().await;
+                    io_metrics.add_io_time(read_start.elapsed());
                     let _ = tx_copy.send((b, arr_interface)).await;
                 };
                 self.join_set.spawn_on(io_task, self.io_runtime.handle());
 
                 if let Some((Ok(d), arr_int)) = rx.recv().await {
+                    let decode_start = Instant::now();
                     let data = arr_int.decode_data(d)?;
+                    metrics.add_decode_time(decode_start.elapsed());
                     chk_data.add_data(arr_int.name, data);
                 } else {
                     return Err(ZarrQueryError::InvalidCompute(
@@ -701,8 +711,11 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrStore<T> {
             let (tx, rx) = tokio::sync::mpsc::channel(arr_interfaces.len());
             for arr_interface in arr_interfaces {
                 let tx_copy = tx.clone();
+                let io_metrics = metrics.clone();
                 let io_task = async move {
+                    let read_start = Instant::now();
                     let b = arr_interface.read_bytes().await;
+                    io_metrics.add_io_time(read_start.elapsed());
                     let _ = tx_copy.send((b, arr_interface)).await;
                 };
                 self.join_set.spawn_on(io_task, self.io_runtime.handle());
@@ -725,6 +738,7 @@ struct ZarrRecordBatchStreamInner<T: AsyncReadableListableStorageTraits + ?Sized
     schema_without_filter_cols: Option<SchemaRef>,
     filter: Option<ZarrChunkFilter>,
     chunk_indices: VecDeque<Vec<u64>>,
+    metrics: ZarrMetrics,
 }
 
 impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrRecordBatchStreamInner<T> {
@@ -739,6 +753,7 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrRecordBatchSt
         projection: Option<Vec<usize>>,
         n_partitions: usize,
         partition: usize,
+        metrics: ZarrMetrics,
     ) -> ZarrQueryResult<Self> {
         // quick check to make sure the partition we're reading from does
         // not exceed the number of partitions.
@@ -822,6 +837,7 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrRecordBatchSt
             filter: None,
             chunk_indices,
             schema_without_filter_cols: None,
+            metrics,
         })
     }
 
@@ -843,6 +859,9 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrRecordBatchSt
         // query, because the next time we read some data it would be for the
         // fitler, not for the main query.
 
+        // wall-clock timer for the whole batch-producing body.
+        let total_start = Instant::now();
+
         let mut chunk_index: Option<Vec<u64>> = None;
         let mut filter_zarr_chunk: Option<ZarrInMemoryChunk> = None;
 
@@ -861,7 +880,13 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrRecordBatchSt
                         .collect();
                     let zarr_chunk = Arc::get_mut(&mut self.zarr_store)
                         .expect("Zarr store pointer unexpectedly not unique")
-                        .get_chunk(column_names, chunk_index.clone(), true, next_chnk_idx)
+                        .get_chunk(
+                            column_names,
+                            chunk_index.clone(),
+                            true,
+                            next_chnk_idx,
+                            &self.metrics,
+                        )
                         .await?;
                     filter_passed = zarr_chunk.check_filter(&filter)?;
                     filter_zarr_chunk = Some(zarr_chunk);
@@ -890,7 +915,7 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrRecordBatchSt
                     .collect();
                 zarr_chunk = Arc::get_mut(&mut self.zarr_store)
                     .expect("Zarr store pointer unexpectedly not unique")
-                    .get_chunk(column_names, chunk_index, false, None)
+                    .get_chunk(column_names, chunk_index, false, None, &self.metrics)
                     .await?;
                 zarr_chunk.combine(filter_zarr_chunk);
             } else {
@@ -904,13 +929,23 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrRecordBatchSt
 
                 zarr_chunk = Arc::get_mut(&mut self.zarr_store)
                     .expect("Zarr store pointer unexpectedly not unique")
-                    .get_chunk(column_names, chunk_index, true, next_chnk_idx)
+                    .get_chunk(
+                        column_names,
+                        chunk_index,
+                        true,
+                        next_chnk_idx,
+                        &self.metrics,
+                    )
                     .await?;
             }
 
             let record_batch = zarr_chunk.into_record_batch(&self.projected_schema_ref)?;
+            self.metrics.inc_chunks_read();
+            self.metrics.add_rows(record_batch.num_rows());
+            self.metrics.add_total_time(total_start.elapsed());
             Ok(Some(record_batch))
         } else {
+            self.metrics.add_total_time(total_start.elapsed());
             Ok(None)
         }
     }
@@ -928,7 +963,11 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrRecordBatchSt
     }
 
     fn pop_chunk_idx(&mut self) -> Option<Vec<u64>> {
-        self.chunk_indices.pop_front()
+        let chunk_idx = self.chunk_indices.pop_front();
+        if chunk_idx.is_some() {
+            self.metrics.inc_chunks_looked_at();
+        }
+        chunk_idx
     }
 
     fn see_chunk_idx(&self) -> Option<Vec<u64>> {
@@ -976,6 +1015,7 @@ pub struct ZarrRecordBatchStream {
 
 impl ZarrRecordBatchStream {
     /// Create a new ZarrRecordBatchStream.
+    #[allow(clippy::too_many_arguments)]
     pub async fn try_new<T: AsyncReadableListableStorageTraits + ?Sized + 'static>(
         store: Arc<T>,
         schema_ref: SchemaRef,
@@ -984,6 +1024,7 @@ impl ZarrRecordBatchStream {
         n_partitions: usize,
         partition: usize,
         filter: Option<ZarrChunkFilter>,
+        metrics: ZarrMetrics,
     ) -> ZarrQueryResult<Self> {
         let mut inner = ZarrRecordBatchStreamInner::new(
             store,
@@ -992,6 +1033,7 @@ impl ZarrRecordBatchStream {
             projection,
             n_partitions,
             partition,
+            metrics,
         )
         .await?;
 
@@ -1059,9 +1101,18 @@ mod zarr_stream_tests {
         let (wrapper, schema) = get_local_zarr_store(true, 0.0, "lat_lon_data").await;
         let store = wrapper.get_store();
 
-        let stream = ZarrRecordBatchStream::try_new(store, schema, None, None, 1, 0, None)
-            .await
-            .unwrap();
+        let stream = ZarrRecordBatchStream::try_new(
+            store,
+            schema,
+            None,
+            None,
+            1,
+            0,
+            None,
+            ZarrMetrics::disconnected(),
+        )
+        .await
+        .unwrap();
         let records: Vec<_> = stream.try_collect().await.unwrap();
 
         let target_types = HashMap::from([
@@ -1131,9 +1182,18 @@ mod zarr_stream_tests {
         let (wrapper, schema) = get_local_zarr_store_no_coords(0.0, "data_no_coords").await;
         let store = wrapper.get_store();
 
-        let stream = ZarrRecordBatchStream::try_new(store, schema.clone(), None, None, 1, 0, None)
-            .await
-            .unwrap();
+        let stream = ZarrRecordBatchStream::try_new(
+            store,
+            schema.clone(),
+            None,
+            None,
+            1,
+            0,
+            None,
+            ZarrMetrics::disconnected(),
+        )
+        .await
+        .unwrap();
         let records: Vec<_> = stream.try_collect().await.unwrap();
 
         let target_types = HashMap::from([
@@ -1174,9 +1234,18 @@ mod zarr_stream_tests {
             .unwrap(),
         );
 
-        let stream = ZarrRecordBatchStream::try_new(store, schema, None, None, 1, 0, filter)
-            .await
-            .unwrap();
+        let stream = ZarrRecordBatchStream::try_new(
+            store,
+            schema,
+            None,
+            None,
+            1,
+            0,
+            filter,
+            ZarrMetrics::disconnected(),
+        )
+        .await
+        .unwrap();
         let records: Vec<_> = stream.try_collect().await.unwrap();
 
         let target_types = HashMap::from([
@@ -1209,9 +1278,18 @@ mod zarr_stream_tests {
         let (wrapper, schema) = get_local_zarr_store_mix_dims(0.0, "lat_lon_mixed_dims_data").await;
         let store = wrapper.get_store();
 
-        let stream = ZarrRecordBatchStream::try_new(store, schema, None, None, 1, 0, None)
-            .await
-            .unwrap();
+        let stream = ZarrRecordBatchStream::try_new(
+            store,
+            schema,
+            None,
+            None,
+            1,
+            0,
+            None,
+            ZarrMetrics::disconnected(),
+        )
+        .await
+        .unwrap();
         let records: Vec<_> = stream.try_collect().await.unwrap();
 
         let target_types = HashMap::from([
@@ -1248,9 +1326,18 @@ mod zarr_stream_tests {
         let (wrapper, schema) = get_local_zarr_store(false, fillvalue, "lat_lon_empty_data").await;
         let store = wrapper.get_store();
 
-        let stream = ZarrRecordBatchStream::try_new(store, schema, None, None, 1, 0, None)
-            .await
-            .unwrap();
+        let stream = ZarrRecordBatchStream::try_new(
+            store,
+            schema,
+            None,
+            None,
+            1,
+            0,
+            None,
+            ZarrMetrics::disconnected(),
+        )
+        .await
+        .unwrap();
         let records: Vec<_> = stream.try_collect().await.unwrap();
 
         let target_types = HashMap::from([
@@ -1289,17 +1376,34 @@ mod zarr_stream_tests {
             ("data".to_string(), DataType::Float64),
         ]);
 
-        let stream =
-            ZarrRecordBatchStream::try_new(store.clone(), schema.clone(), None, None, 2, 0, None)
-                .await
-                .unwrap();
+        let stream = ZarrRecordBatchStream::try_new(
+            store.clone(),
+            schema.clone(),
+            None,
+            None,
+            2,
+            0,
+            None,
+            ZarrMetrics::disconnected(),
+        )
+        .await
+        .unwrap();
         let records: Vec<_> = stream.try_collect().await.unwrap();
         validate_names_and_types(&target_types, &records[0]);
         assert_eq!(records.len(), 5);
 
-        let stream = ZarrRecordBatchStream::try_new(store, schema, None, None, 2, 1, None)
-            .await
-            .unwrap();
+        let stream = ZarrRecordBatchStream::try_new(
+            store,
+            schema,
+            None,
+            None,
+            2,
+            1,
+            None,
+            ZarrMetrics::disconnected(),
+        )
+        .await
+        .unwrap();
         let records: Vec<_> = stream.try_collect().await.unwrap();
         validate_names_and_types(&target_types, &records[0]);
         assert_eq!(records.len(), 4);
@@ -1334,31 +1438,117 @@ mod zarr_stream_tests {
         // there are only 9 chunks, asking for 20 partitions, so each partition up to
         // the 9th parittion should have one batch in them, after that there should be
         // no data returned by the streams.
-        let stream =
-            ZarrRecordBatchStream::try_new(store.clone(), schema.clone(), None, None, 20, 0, None)
-                .await
-                .unwrap();
+        let stream = ZarrRecordBatchStream::try_new(
+            store.clone(),
+            schema.clone(),
+            None,
+            None,
+            20,
+            0,
+            None,
+            ZarrMetrics::disconnected(),
+        )
+        .await
+        .unwrap();
         let records: Vec<_> = stream.try_collect().await.unwrap();
         assert_eq!(records.len(), 1);
 
-        let stream =
-            ZarrRecordBatchStream::try_new(store.clone(), schema.clone(), None, None, 20, 8, None)
-                .await
-                .unwrap();
+        let stream = ZarrRecordBatchStream::try_new(
+            store.clone(),
+            schema.clone(),
+            None,
+            None,
+            20,
+            8,
+            None,
+            ZarrMetrics::disconnected(),
+        )
+        .await
+        .unwrap();
         let records: Vec<_> = stream.try_collect().await.unwrap();
         assert_eq!(records.len(), 1);
 
-        let stream =
-            ZarrRecordBatchStream::try_new(store.clone(), schema.clone(), None, None, 20, 10, None)
-                .await
-                .unwrap();
+        let stream = ZarrRecordBatchStream::try_new(
+            store.clone(),
+            schema.clone(),
+            None,
+            None,
+            20,
+            10,
+            None,
+            ZarrMetrics::disconnected(),
+        )
+        .await
+        .unwrap();
         let records: Vec<_> = stream.try_collect().await.unwrap();
         assert_eq!(records.len(), 0);
 
-        let stream = ZarrRecordBatchStream::try_new(store, schema, None, None, 20, 19, None)
-            .await
-            .unwrap();
+        let stream = ZarrRecordBatchStream::try_new(
+            store,
+            schema,
+            None,
+            None,
+            20,
+            19,
+            None,
+            ZarrMetrics::disconnected(),
+        )
+        .await
+        .unwrap();
         let records: Vec<_> = stream.try_collect().await.unwrap();
         assert_eq!(records.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn metrics_test() {
+        use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
+
+        let (wrapper, schema) = get_local_zarr_store(true, 0.0, "lat_lon_data_with_metrics").await;
+        let store = wrapper.get_store();
+
+        let filter = Some(
+            ZarrChunkFilter::new(
+                vec![Box::new(DummyPredicate {})],
+                Arc::new(schema.project(&[1, 2]).unwrap()),
+            )
+            .unwrap(),
+        );
+
+        // the metrics set is created here so we can read the registered
+        // metrics back out after draining the stream.
+        let metrics_set = ExecutionPlanMetricsSet::new();
+        let metrics = ZarrMetrics::new(&metrics_set, 0);
+
+        let stream =
+            ZarrRecordBatchStream::try_new(store, schema, None, None, 1, 0, filter, metrics)
+                .await
+                .unwrap();
+        let records: Vec<_> = stream.try_collect().await.unwrap();
+        assert_eq!(records.len(), 4);
+
+        let snapshot = metrics_set.clone_inner();
+
+        for name in [
+            "io_time",
+            "decode_time",
+            "total_time",
+            "chunks_looked_at",
+            "chunks_read",
+            "rows_produced",
+        ] {
+            assert!(
+                snapshot.sum_by_name(name).is_some(),
+                "metric {name} missing from the metrics set"
+            );
+        }
+
+        // we can't assert anything meaningful on the timings, but the counts are
+        // deterministic: all 9 chunks are examined, 4 pass the filter, and those
+        // 4 chunks (two of which are 3x2 edge chunks on the right of the grid)
+        // hold 30 rows total.
+        let value = |name: &str| snapshot.sum_by_name(name).unwrap().as_usize();
+        assert_eq!(value("chunks_looked_at"), 9);
+        assert_eq!(value("chunks_read"), 4);
+        assert_eq!(value("rows_produced"), 30);
     }
 }

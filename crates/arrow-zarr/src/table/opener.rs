@@ -34,6 +34,7 @@ use object_store::ObjectStore;
 
 use super::config::ZarrTableConfig;
 use super::datafusion_filters::create_zarr_chunk_filter;
+use crate::zarr_store_opener::metrics::ZarrMetrics;
 use crate::ZarrRecordBatchStream;
 
 /// Implementation of [`FileOpener`] for zarr.
@@ -42,6 +43,7 @@ pub(crate) struct ZarrOpener {
     n_partitions: usize,
     partition: usize,
     filter_expr: Option<Arc<dyn PhysicalExpr>>,
+    exec_plan_metrics: ExecutionPlanMetricsSet,
 }
 
 impl ZarrOpener {
@@ -50,12 +52,14 @@ impl ZarrOpener {
         n_partitions: usize,
         partition: usize,
         filter_expr: Option<Arc<dyn PhysicalExpr>>,
+        exec_plan_metrics: ExecutionPlanMetricsSet,
     ) -> Self {
         Self {
             config,
             n_partitions,
             partition,
             filter_expr,
+            exec_plan_metrics,
         }
     }
 }
@@ -70,6 +74,7 @@ impl FileOpener for ZarrOpener {
     fn open(&self, _file_meta: FileMeta, _file: PartitionedFile) -> DfResult<FileOpenFuture> {
         let config = self.config.clone();
         let (n_partitions, partition) = (self.n_partitions, self.partition);
+        let metrics = ZarrMetrics::new(&self.exec_plan_metrics, partition);
 
         let filter = if let Some(filter_expr) = &self.filter_expr {
             Some(create_zarr_chunk_filter(
@@ -90,6 +95,7 @@ impl FileOpener for ZarrOpener {
                 n_partitions,
                 partition,
                 filter,
+                metrics,
             )
             .await
             .map_err(|e| DataFusionError::External(Box::new(e)))?;
@@ -114,11 +120,12 @@ impl ZarrSource {
         config: ZarrTableConfig,
         n_partitions: usize,
         filter_expr: Option<Arc<dyn PhysicalExpr>>,
+        exec_plan_metrics: ExecutionPlanMetricsSet,
     ) -> Self {
         Self {
             config,
             n_partitions,
-            exec_plan_metrics: ExecutionPlanMetricsSet::default(),
+            exec_plan_metrics,
             filter_expr,
         }
     }
@@ -138,6 +145,7 @@ impl FileSource for ZarrSource {
             self.n_partitions,
             partition,
             self.filter_expr.clone(),
+            self.exec_plan_metrics.clone(),
         );
         Arc::new(file_opener)
     }
@@ -208,7 +216,7 @@ mod file_opener_tests {
         let table_url = ZarrTableUrl::ZarrStore(ListingTableUrl::parse(path).unwrap());
 
         let zarr_config = ZarrTableConfig::new(table_url, schema.clone());
-        let zarr_souce = ZarrSource::new(zarr_config, 1, None);
+        let zarr_souce = ZarrSource::new(zarr_config, 1, None, ExecutionPlanMetricsSet::default());
 
         let file_groups = vec![FileGroup::new(vec![PartitionedFile::new("", 0)])];
         let file_scan_config = FileScanConfigBuilder::new(
