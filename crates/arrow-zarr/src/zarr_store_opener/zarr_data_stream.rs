@@ -31,7 +31,7 @@ use arrow_schema::ArrowError;
 use async_stream::try_stream;
 use bytes::Bytes;
 use futures::stream::{BoxStream, Stream};
-use itertools::iproduct;
+use itertools::Itertools;
 use tokio::sync::mpsc::Receiver;
 use tokio::task::JoinSet;
 use zarrs::array::codec::{ArrayToBytesCodecTraits, CodecOptions};
@@ -248,38 +248,24 @@ impl ZarrCoordinates {
         data: Vec<T>,
         full_chunk_shape: &[u64],
     ) -> ZarrQueryResult<Vec<T>> {
-        let dim_idx = self.get_coord_position(coord_name);
-        if dim_idx.is_none() || full_chunk_shape.len() == 1 {
-            return Ok(data);
-        }
-        let dim_idx = dim_idx.unwrap();
+        let dim_idx = match self.get_coord_position(coord_name) {
+            Some(dim_idx) if full_chunk_shape.len() > 1 => dim_idx,
+            // not a coordinate, or 1D data: nothing to broadcast.
+            _ => return Ok(data),
+        };
 
-        match (full_chunk_shape.len(), dim_idx) {
-            (2, 0) => Ok(data
-                .into_iter()
-                .flat_map(|v| std::iter::repeat_n(v, full_chunk_shape[1] as usize))
-                .collect()),
-            (2, 1) => Ok(vec![&data[..]; full_chunk_shape[0] as usize].concat()),
-            (3, 0) => Ok(data
-                .into_iter()
-                .flat_map(|v| {
-                    std::iter::repeat_n(v, (full_chunk_shape[1] * full_chunk_shape[2]) as usize)
-                })
-                .collect()),
-            (3, 1) => {
-                let v: Vec<_> = data
-                    .into_iter()
-                    .flat_map(|v| std::iter::repeat_n(v, full_chunk_shape[2] as usize))
-                    .collect();
-                Ok(vec![&v[..]; full_chunk_shape[0] as usize].concat())
-            }
-            (3, 2) => {
-                Ok(vec![&data[..]; (full_chunk_shape[0] * full_chunk_shape[1]) as usize].concat())
-            }
-            _ => Err(ZarrQueryError::InvalidCompute(
-                "Invalid dimensionality when trying to broadcast dimension".into(),
-            )),
-        }
+        // in a row-major (C-order) flattened array, a coordinate along dimension
+        // dim_idx has a value that depends only on that dimension's index. so we
+        // repeat each value across all the faster-varying (inner) dimensions, then
+        // tile that whole block across all the slower-varying (outer) dimensions.
+        let inner = full_chunk_shape[dim_idx + 1..].iter().product::<u64>() as usize;
+        let outer = full_chunk_shape[..dim_idx].iter().product::<u64>() as usize;
+
+        let block: Vec<T> = data
+            .into_iter()
+            .flat_map(|v| std::iter::repeat_n(v, inner))
+            .collect();
+        Ok(vec![&block[..]; outer].concat())
     }
 }
 
@@ -796,27 +782,13 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrRecordBatchSt
 
         // this creates all the chunk indices we will be reading from.
         let chk_grid_shape = &zarr_store.chunk_grid_shape;
-        let mut chunk_indices: Vec<_> = match chk_grid_shape.len() {
-            1 => (0..chk_grid_shape[0]).map(|i| vec![i]).collect(),
-            2 => {
-                let d0: Vec<_> = (0..chk_grid_shape[0]).collect();
-                let d1: Vec<_> = (0..chk_grid_shape[1]).collect();
-                iproduct!(d0, d1).map(|(x, y)| vec![x, y]).collect()
-            }
-            3 => {
-                let d0: Vec<_> = (0..chk_grid_shape[0]).collect();
-                let d1: Vec<_> = (0..chk_grid_shape[1]).collect();
-                let d2: Vec<_> = (0..chk_grid_shape[2]).collect();
-                iproduct!(d0, d1, d2)
-                    .map(|(x, y, z)| vec![x, y, z])
-                    .collect()
-            }
-            _ => {
-                return Err(ZarrQueryError::InvalidMetadata(
-                    "Only 1, 2 or 3D arrays supported".into(),
-                ))
-            }
-        };
+        // enumerate every chunk index over the N-D grid (last dimension varies
+        // fastest, matching the row-major layout of the data).
+        let mut chunk_indices: Vec<Vec<u64>> = chk_grid_shape
+            .iter()
+            .map(|&n| 0..n)
+            .multi_cartesian_product()
+            .collect();
         let chunks_per_partitions = chunk_indices.len().div_ceil(n_partitions);
         let max_idx = chunk_indices.len();
         let start = chunks_per_partitions * partition;
@@ -1073,8 +1045,9 @@ mod zarr_stream_tests {
 
     use super::*;
     use crate::test_utils::{
-        extract_col, get_local_zarr_store, get_local_zarr_store_mix_dims,
-        get_local_zarr_store_no_coords, validate_names_and_types, validate_primitive_column,
+        extract_col, get_local_zarr_store, get_local_zarr_store_3d, get_local_zarr_store_4d,
+        get_local_zarr_store_mix_dims, get_local_zarr_store_no_coords, validate_names_and_types,
+        validate_primitive_column,
     };
     use crate::zarr_store_opener::ZarrArrowPredicate;
 
@@ -1317,6 +1290,229 @@ mod zarr_stream_tests {
             "data",
             &records[0],
             &[0.0, 1.0, 2.0, 8.0, 9.0, 10.0, 16.0, 17.0, 18.0],
+        );
+    }
+
+    #[tokio::test]
+    async fn read_3d_data_test() {
+        // 6 x 5 x 4 data with dims (lat, lon, height), 2 x 2 x 2 chunks, so a
+        // 3 x 3 x 2 = 18 chunk grid. lat/lon are 1D coordinates broadcast up to
+        // the full 3D chunk, height is the innermost dim.
+        let (wrapper, schema) = get_local_zarr_store_3d(0.0, "lat_lon_height_data").await;
+        let store = wrapper.get_store();
+
+        let stream = ZarrRecordBatchStream::try_new(
+            store,
+            schema,
+            None,
+            None,
+            1,
+            0,
+            None,
+            ZarrMetrics::disconnected(),
+        )
+        .await
+        .unwrap();
+        let records: Vec<_> = stream.try_collect().await.unwrap();
+
+        let target_types = HashMap::from([
+            ("lat".to_string(), DataType::Float64),
+            ("lon".to_string(), DataType::Float64),
+            ("height".to_string(), DataType::Float64),
+            ("data".to_string(), DataType::Float64),
+        ]);
+        validate_names_and_types(&target_types, &records[0]);
+        assert_eq!(records.len(), 18);
+
+        // the first chunk, full 2 x 2 x 2.
+        validate_primitive_column::<Float64Type, f64>(
+            "lat",
+            &records[0],
+            &[35., 35., 35., 35., 36., 36., 36., 36.],
+        );
+        validate_primitive_column::<Float64Type, f64>(
+            "lon",
+            &records[0],
+            &[-120., -120., -119., -119., -120., -120., -119., -119.],
+        );
+        validate_primitive_column::<Float64Type, f64>(
+            "height",
+            &records[0],
+            &[100., 200., 100., 200., 100., 200., 100., 200.],
+        );
+        validate_primitive_column::<Float64Type, f64>(
+            "data",
+            &records[0],
+            &[0., 1., 4., 5., 20., 21., 24., 25.],
+        );
+
+        // the 5th chunk [0, 2, 0] is the first edge chunk: lon has 5 values
+        // with a chunk size of 2, so its last chunk is a partial one, only
+        // spanning lon index 4.
+        validate_primitive_column::<Float64Type, f64>("lat", &records[4], &[35., 35., 36., 36.]);
+        validate_primitive_column::<Float64Type, f64>(
+            "lon",
+            &records[4],
+            &[-116., -116., -116., -116.],
+        );
+        validate_primitive_column::<Float64Type, f64>(
+            "height",
+            &records[4],
+            &[100., 200., 100., 200.],
+        );
+        validate_primitive_column::<Float64Type, f64>("data", &records[4], &[16., 17., 36., 37.]);
+    }
+
+    #[tokio::test]
+    async fn read_4d_data_test() {
+        // 6 x 5 x 4 x 3 data with dims (lat, lon, height, time), 2 x 2 x 2 x 2
+        // chunks, so a 3 x 3 x 2 x 2 = 36 chunk grid. lat/lon/height/time are 1D
+        // coordinates broadcast up to the full 4D chunk, time is an int64 column.
+        let (wrapper, schema) = get_local_zarr_store_4d(0.0, "lat_lon_height_time_data").await;
+        let store = wrapper.get_store();
+
+        let stream = ZarrRecordBatchStream::try_new(
+            store,
+            schema,
+            None,
+            None,
+            1,
+            0,
+            None,
+            ZarrMetrics::disconnected(),
+        )
+        .await
+        .unwrap();
+        let records: Vec<_> = stream.try_collect().await.unwrap();
+
+        let target_types = HashMap::from([
+            ("lat".to_string(), DataType::Float64),
+            ("lon".to_string(), DataType::Float64),
+            ("height".to_string(), DataType::Float64),
+            ("time".to_string(), DataType::Int64),
+            ("data".to_string(), DataType::Float64),
+        ]);
+        validate_names_and_types(&target_types, &records[0]);
+        assert_eq!(records.len(), 36);
+
+        // the first chunk, full 2 x 2 x 2 x 2, spanning lat {0,1}, lon {0,1},
+        // height {0,1}, time {0,1}. same broadcasting logic as the 3D case, just
+        // with an extra (innermost) dimension changing the repeat/tile counts.
+        validate_primitive_column::<Float64Type, f64>(
+            "lat",
+            &records[0],
+            &[
+                35., 35., 35., 35., 35., 35., 35., 35., 36., 36., 36., 36., 36., 36., 36., 36.,
+            ],
+        );
+        validate_primitive_column::<Float64Type, f64>(
+            "lon",
+            &records[0],
+            &[
+                -120., -120., -120., -120., -119., -119., -119., -119., -120., -120., -120., -120.,
+                -119., -119., -119., -119.,
+            ],
+        );
+        validate_primitive_column::<Float64Type, f64>(
+            "height",
+            &records[0],
+            &[
+                100., 100., 200., 200., 100., 100., 200., 200., 100., 100., 200., 200., 100., 100.,
+                200., 200.,
+            ],
+        );
+        validate_primitive_column::<Int64Type, i64>(
+            "time",
+            &records[0],
+            &[
+                1_700_000_000,
+                1_700_000_001,
+                1_700_000_000,
+                1_700_000_001,
+                1_700_000_000,
+                1_700_000_001,
+                1_700_000_000,
+                1_700_000_001,
+                1_700_000_000,
+                1_700_000_001,
+                1_700_000_000,
+                1_700_000_001,
+                1_700_000_000,
+                1_700_000_001,
+                1_700_000_000,
+                1_700_000_001,
+            ],
+        );
+        validate_primitive_column::<Float64Type, f64>(
+            "data",
+            &records[0],
+            &[
+                0., 1., 3., 4., 12., 13., 15., 16., 60., 61., 63., 64., 72., 73., 75., 76.,
+            ],
+        );
+
+        // the 9th chunk [0, 2, 0, 0] is an edge chunk along the 2nd dimension:
+        // lon has 5 values with a chunk size of 2, so its last chunk is partial,
+        // only spanning lon index 4. the full chunk shape is 2 x 1 x 2 x 2.
+        validate_primitive_column::<Float64Type, f64>(
+            "lat",
+            &records[8],
+            &[35., 35., 35., 35., 36., 36., 36., 36.],
+        );
+        validate_primitive_column::<Float64Type, f64>(
+            "lon",
+            &records[8],
+            &[-116., -116., -116., -116., -116., -116., -116., -116.],
+        );
+        validate_primitive_column::<Float64Type, f64>(
+            "height",
+            &records[8],
+            &[100., 100., 200., 200., 100., 100., 200., 200.],
+        );
+        validate_primitive_column::<Int64Type, i64>(
+            "time",
+            &records[8],
+            &[
+                1_700_000_000,
+                1_700_000_001,
+                1_700_000_000,
+                1_700_000_001,
+                1_700_000_000,
+                1_700_000_001,
+                1_700_000_000,
+                1_700_000_001,
+            ],
+        );
+        validate_primitive_column::<Float64Type, f64>(
+            "data",
+            &records[8],
+            &[48., 49., 51., 52., 108., 109., 111., 112.],
+        );
+
+        // the last chunk [2, 2, 1, 1] is partial along two dimensions at once:
+        // lon (size 5) and time (size 3) are both non-multiples of the chunk
+        // size 2, so each collapses to width 1. lat and height stay full width.
+        // the full chunk shape is 2 x 1 x 2 x 1.
+        validate_primitive_column::<Float64Type, f64>("lat", &records[35], &[39., 39., 40., 40.]);
+        validate_primitive_column::<Float64Type, f64>(
+            "lon",
+            &records[35],
+            &[-116., -116., -116., -116.],
+        );
+        validate_primitive_column::<Float64Type, f64>(
+            "height",
+            &records[35],
+            &[300., 400., 300., 400.],
+        );
+        validate_primitive_column::<Int64Type, i64>(
+            "time",
+            &records[35],
+            &[1_700_000_002, 1_700_000_002, 1_700_000_002, 1_700_000_002],
+        );
+        validate_primitive_column::<Float64Type, f64>(
+            "data",
+            &records[35],
+            &[296., 299., 356., 359.],
         );
     }
 

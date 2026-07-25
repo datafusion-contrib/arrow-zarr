@@ -41,10 +41,10 @@ mod test_utils {
     #[cfg(all(feature = "icechunk", feature = "datafusion"))]
     use icechunk::{ObjectStorage, Repository};
     use itertools::enumerate;
-    use ndarray::{Array, Array1, Array2};
+    use ndarray::{Array, Array1, Array2, Array3, Array4};
     use object_store::local::LocalFileSystem;
     use walkdir::WalkDir;
-    use zarrs::array::{codec, ArrayBuilder, DataType, FillValue};
+    use zarrs::array::{codec, ArrayBuilder, DataType, Element, FillValue};
     use zarrs::array_subset::ArraySubset;
     #[cfg(all(feature = "icechunk", feature = "datafusion"))]
     use zarrs_icechunk::AsyncIcechunkStore;
@@ -170,21 +170,22 @@ mod test_utils {
         .unwrap()
     }
 
-    pub(crate) async fn write_1d_float_array(
-        data: Vec<f64>,
-        fillvalue: f64,
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn write_1d_array<T>(
+        data: Vec<T>,
+        data_type: DataType,
+        fillvalue: T,
         shape: u64,
         chunk: u64,
         store: Arc<dyn AsyncReadableWritableListableStorageTraits>,
         path: &str,
         dimensions: Option<Vec<String>>,
-    ) {
-        let mut array_builder = ArrayBuilder::new(
-            vec![shape],
-            [chunk],
-            DataType::Float64,
-            FillValue::from(fillvalue),
-        );
+    ) where
+        T: Element + Clone + Send + Sync,
+        FillValue: From<T>,
+    {
+        let mut array_builder =
+            ArrayBuilder::new(vec![shape], [chunk], data_type, FillValue::from(fillvalue));
         let mut builder_ref = &mut array_builder;
         let codec = get_lz4_compressor();
         builder_ref = builder_ref.bytes_to_bytes_codecs(vec![Arc::new(codec)]);
@@ -195,12 +196,34 @@ mod test_utils {
         let arr = builder_ref.build(store, path).unwrap();
         arr.async_store_metadata().await.unwrap();
 
-        let arr_data: Array1<f64> = Array::from_vec(data)
+        let arr_data: Array1<T> = Array::from_vec(data)
             .into_shape_with_order(shape as usize)
             .unwrap();
         arr.async_store_array_subset_ndarray(&[0], arr_data)
             .await
             .unwrap();
+    }
+
+    pub(crate) async fn write_1d_float_array(
+        data: Vec<f64>,
+        fillvalue: f64,
+        shape: u64,
+        chunk: u64,
+        store: Arc<dyn AsyncReadableWritableListableStorageTraits>,
+        path: &str,
+        dimensions: Option<Vec<String>>,
+    ) {
+        write_1d_array(
+            data,
+            DataType::Float64,
+            fillvalue,
+            shape,
+            chunk,
+            store,
+            path,
+            dimensions,
+        )
+        .await;
     }
 
     pub(crate) async fn write_2d_float_array(
@@ -235,6 +258,90 @@ mod test_utils {
                 .unwrap();
             arr.async_store_array_subset_ndarray(
                 ArraySubset::new_with_ranges(&[0..shape.0, 0..shape.1]).start(),
+                arr_data,
+            )
+            .await
+            .unwrap();
+        }
+    }
+
+    pub(crate) async fn write_3d_float_array(
+        data: Option<Vec<f64>>,
+        fillvalue: f64,
+        shape: (u64, u64, u64),
+        chunk: (u64, u64, u64),
+        store: Arc<dyn AsyncReadableWritableListableStorageTraits>,
+        path: &str,
+        dimensions: Option<Vec<String>>,
+    ) {
+        let mut array_builder = ArrayBuilder::new(
+            vec![shape.0, shape.1, shape.2],
+            [chunk.0, chunk.1, chunk.2],
+            DataType::Float64,
+            FillValue::from(fillvalue),
+        );
+
+        let mut builder_ref = &mut array_builder;
+        let codec = get_lz4_compressor();
+        builder_ref = builder_ref.bytes_to_bytes_codecs(vec![Arc::new(codec)]);
+        if let Some(dimensions) = dimensions {
+            builder_ref = builder_ref.dimension_names(dimensions.into());
+        }
+
+        let arr = builder_ref.build(store, path).unwrap();
+        arr.async_store_metadata().await.unwrap();
+
+        if let Some(data) = data {
+            let arr_data: Array3<f64> = Array::from_vec(data)
+                .into_shape_with_order((shape.0 as usize, shape.1 as usize, shape.2 as usize))
+                .unwrap();
+            arr.async_store_array_subset_ndarray(
+                ArraySubset::new_with_ranges(&[0..shape.0, 0..shape.1, 0..shape.2]).start(),
+                arr_data,
+            )
+            .await
+            .unwrap();
+        }
+    }
+
+    pub(crate) async fn write_4d_float_array(
+        data: Option<Vec<f64>>,
+        fillvalue: f64,
+        shape: (u64, u64, u64, u64),
+        chunk: (u64, u64, u64, u64),
+        store: Arc<dyn AsyncReadableWritableListableStorageTraits>,
+        path: &str,
+        dimensions: Option<Vec<String>>,
+    ) {
+        let mut array_builder = ArrayBuilder::new(
+            vec![shape.0, shape.1, shape.2, shape.3],
+            [chunk.0, chunk.1, chunk.2, chunk.3],
+            DataType::Float64,
+            FillValue::from(fillvalue),
+        );
+
+        let mut builder_ref = &mut array_builder;
+        let codec = get_lz4_compressor();
+        builder_ref = builder_ref.bytes_to_bytes_codecs(vec![Arc::new(codec)]);
+        if let Some(dimensions) = dimensions {
+            builder_ref = builder_ref.dimension_names(dimensions.into());
+        }
+
+        let arr = builder_ref.build(store, path).unwrap();
+        arr.async_store_metadata().await.unwrap();
+
+        if let Some(data) = data {
+            let arr_data: Array4<f64> = Array::from_vec(data)
+                .into_shape_with_order((
+                    shape.0 as usize,
+                    shape.1 as usize,
+                    shape.2 as usize,
+                    shape.3 as usize,
+                ))
+                .unwrap();
+            arr.async_store_array_subset_ndarray(
+                ArraySubset::new_with_ranges(&[0..shape.0, 0..shape.1, 0..shape.2, 0..shape.3])
+                    .start(),
                 arr_data,
             )
             .await
@@ -397,6 +504,172 @@ mod test_utils {
             Some(["lat".into(), "lon".into()].to_vec()),
         )
         .await;
+    }
+
+    async fn write_lat_lon_height_data_to_store(
+        store: Arc<dyn AsyncReadableWritableListableStorageTraits>,
+        fillvalue: f64,
+    ) {
+        // distinct sizes per dimension (6 x 5 x 4) so a bug that mixes up
+        // axes can't hide behind equal dimension lengths.
+        let lats = vec![35.0, 36.0, 37.0, 38.0, 39.0, 40.0];
+        write_1d_float_array(
+            lats,
+            0.0,
+            6,
+            2,
+            store.clone(),
+            "/lat",
+            Some(vec!["lat".into()]),
+        )
+        .await;
+
+        let lons = vec![-120.0, -119.0, -118.0, -117.0, -116.0];
+        write_1d_float_array(
+            lons,
+            0.0,
+            5,
+            2,
+            store.clone(),
+            "/lon",
+            Some(vec!["lon".into()]),
+        )
+        .await;
+
+        let heights = vec![100.0, 200.0, 300.0, 400.0];
+        write_1d_float_array(
+            heights,
+            0.0,
+            4,
+            2,
+            store.clone(),
+            "/height",
+            Some(vec!["height".into()]),
+        )
+        .await;
+
+        let data = (0..120).map(|i| i as f64).collect();
+        write_3d_float_array(
+            Some(data),
+            fillvalue,
+            (6, 5, 4),
+            (2, 2, 2),
+            store.clone(),
+            "/data",
+            Some(vec!["lat".into(), "lon".into(), "height".into()]),
+        )
+        .await;
+    }
+
+    async fn write_lat_lon_height_time_data_to_store(
+        store: Arc<dyn AsyncReadableWritableListableStorageTraits>,
+        fillvalue: f64,
+    ) {
+        // distinct sizes per dimension (6 x 5 x 4 x 3) so a bug that mixes up
+        // axes can't hide behind equal dimension lengths.
+        let lats = vec![35.0, 36.0, 37.0, 38.0, 39.0, 40.0];
+        write_1d_float_array(
+            lats,
+            0.0,
+            6,
+            2,
+            store.clone(),
+            "/lat",
+            Some(vec!["lat".into()]),
+        )
+        .await;
+
+        let lons = vec![-120.0, -119.0, -118.0, -117.0, -116.0];
+        write_1d_float_array(
+            lons,
+            0.0,
+            5,
+            2,
+            store.clone(),
+            "/lon",
+            Some(vec!["lon".into()]),
+        )
+        .await;
+
+        let heights = vec![100.0, 200.0, 300.0, 400.0];
+        write_1d_float_array(
+            heights,
+            0.0,
+            4,
+            2,
+            store.clone(),
+            "/height",
+            Some(vec!["height".into()]),
+        )
+        .await;
+
+        // time is an integer epoch-seconds timestamp, the exact values don't matter.
+        let times: Vec<i64> = vec![1_700_000_000, 1_700_000_001, 1_700_000_002];
+        write_1d_array(
+            times,
+            DataType::Int64,
+            0,
+            3,
+            2,
+            store.clone(),
+            "/time",
+            Some(vec!["time".into()]),
+        )
+        .await;
+
+        let data = (0..360).map(|i| i as f64).collect();
+        write_4d_float_array(
+            Some(data),
+            fillvalue,
+            (6, 5, 4, 3),
+            (2, 2, 2, 2),
+            store.clone(),
+            "/data",
+            Some(vec![
+                "lat".into(),
+                "lon".into(),
+                "height".into(),
+                "time".into(),
+            ]),
+        )
+        .await;
+    }
+
+    pub(crate) async fn get_local_zarr_store_3d(
+        fillvalue: f64,
+        dir_name: &str,
+    ) -> (LocalZarrStoreWrapper, SchemaRef) {
+        let wrapper = LocalZarrStoreWrapper::new(dir_name.into());
+        let store = wrapper.get_store();
+
+        write_lat_lon_height_data_to_store(store, fillvalue).await;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("data", ArrowDataType::Float64, true),
+            Field::new("height", ArrowDataType::Float64, true),
+            Field::new("lat", ArrowDataType::Float64, true),
+            Field::new("lon", ArrowDataType::Float64, true),
+        ]));
+
+        (wrapper, schema)
+    }
+
+    pub(crate) async fn get_local_zarr_store_4d(
+        fillvalue: f64,
+        dir_name: &str,
+    ) -> (LocalZarrStoreWrapper, SchemaRef) {
+        let wrapper = LocalZarrStoreWrapper::new(dir_name.into());
+        let store = wrapper.get_store();
+
+        write_lat_lon_height_time_data_to_store(store, fillvalue).await;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("data", ArrowDataType::Float64, true),
+            Field::new("height", ArrowDataType::Float64, true),
+            Field::new("lat", ArrowDataType::Float64, true),
+            Field::new("lon", ArrowDataType::Float64, true),
+            Field::new("time", ArrowDataType::Int64, true),
+        ]));
+
+        (wrapper, schema)
     }
 
     pub(crate) async fn get_local_zarr_store(

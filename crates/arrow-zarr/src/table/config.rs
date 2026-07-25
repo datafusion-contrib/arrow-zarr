@@ -401,6 +401,10 @@ impl ZarrTableUrl {
             .as_ref()
             .map_or("".into(), |p| p.to_owned() + "/");
 
+        // zarr has no inherent column order, so we need to impose a deterministic
+        // one. `list_prefix` returns the array prefixes in lexicographic order, so
+        // the fields below end up sorted by array name without an explicit sort.
+        // downstream code (and the test helpers) rely on this alphabetical ordering.
         let prefixes = store
             .list_prefix(
                 &StorePrefix::new(store_prefix.to_owned())
