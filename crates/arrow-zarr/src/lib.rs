@@ -29,6 +29,7 @@ mod test_utils {
     use std::collections::HashMap;
     use std::fmt::Debug;
     use std::fs;
+    use std::num::NonZeroU32;
     use std::path::PathBuf;
     use std::sync::Arc;
 
@@ -46,6 +47,7 @@ mod test_utils {
     use walkdir::WalkDir;
     use zarrs::array::{codec, ArrayBuilder, DataType, Element, FillValue};
     use zarrs::array_subset::ArraySubset;
+    use zarrs::metadata_ext::data_type::NumpyTimeUnit;
     #[cfg(all(feature = "icechunk", feature = "datafusion"))]
     use zarrs_icechunk::AsyncIcechunkStore;
     use zarrs_object_store::AsyncObjectStore;
@@ -603,11 +605,15 @@ mod test_utils {
         )
         .await;
 
-        // time is an integer epoch-seconds timestamp, the exact values don't matter.
+        // time is a numpy.datetime64 with seconds resolution, storing epoch-seconds;
+        // the exact values don't matter.
         let times: Vec<i64> = vec![1_700_000_000, 1_700_000_001, 1_700_000_002];
         write_1d_array(
             times,
-            DataType::Int64,
+            DataType::NumpyDateTime64 {
+                unit: NumpyTimeUnit::Second,
+                scale_factor: NonZeroU32::new(1).unwrap(),
+            },
             0,
             3,
             2,
@@ -666,7 +672,11 @@ mod test_utils {
             Field::new("height", ArrowDataType::Float64, true),
             Field::new("lat", ArrowDataType::Float64, true),
             Field::new("lon", ArrowDataType::Float64, true),
-            Field::new("time", ArrowDataType::Int64, true),
+            Field::new(
+                "time",
+                ArrowDataType::Timestamp(arrow_schema::TimeUnit::Second, None),
+                true,
+            ),
         ]));
 
         (wrapper, schema)

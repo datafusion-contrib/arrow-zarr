@@ -37,6 +37,7 @@ use tokio::task::JoinSet;
 use zarrs::array::codec::{ArrayToBytesCodecTraits, CodecOptions};
 use zarrs::array::{Array, ArrayBytes, ArraySize, DataType as zDataType, ElementOwned};
 use zarrs::array_subset::ArraySubset;
+use zarrs::metadata_ext::data_type::NumpyTimeUnit;
 use zarrs_storage::AsyncReadableListableStorageTraits;
 
 use super::filter::ZarrChunkFilter;
@@ -416,11 +417,54 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ArrayInterface<T>
             zDataType::Float32 => return_array_ref!(PrimitiveArray<Float32Type>, f32),
             zDataType::Float64 => return_array_ref!(PrimitiveArray<Float64Type>, f64),
             zDataType::String => return_array_ref!(StringArray, String),
+
+            // numpy.datetime64 and numpy.timedelta64 both decode as i64 (the same
+            // ElementOwned path as Int64); only the arrow array type differs, based on
+            // the temporal unit.
+            zDataType::NumpyDateTime64 { unit, scale_factor } => {
+                ensure_unit_scale(t, scale_factor.get())?;
+                match unit {
+                    NumpyTimeUnit::Second => return_array_ref!(TimestampSecondArray, i64),
+                    NumpyTimeUnit::Millisecond => {
+                        return_array_ref!(TimestampMillisecondArray, i64)
+                    }
+                    NumpyTimeUnit::Microsecond => {
+                        return_array_ref!(TimestampMicrosecondArray, i64)
+                    }
+                    NumpyTimeUnit::Nanosecond => return_array_ref!(TimestampNanosecondArray, i64),
+                    _ => Err(ZarrQueryError::InvalidType(format!(
+                        "Unsupported datetime64 unit {unit} from zarr metadata"
+                    ))),
+                }
+            }
+            zDataType::NumpyTimeDelta64 { unit, scale_factor } => {
+                ensure_unit_scale(t, scale_factor.get())?;
+                match unit {
+                    NumpyTimeUnit::Second => return_array_ref!(DurationSecondArray, i64),
+                    NumpyTimeUnit::Millisecond => return_array_ref!(DurationMillisecondArray, i64),
+                    NumpyTimeUnit::Microsecond => return_array_ref!(DurationMicrosecondArray, i64),
+                    NumpyTimeUnit::Nanosecond => return_array_ref!(DurationNanosecondArray, i64),
+                    _ => Err(ZarrQueryError::InvalidType(format!(
+                        "Unsupported timedelta64 unit {unit} from zarr metadata"
+                    ))),
+                }
+            }
             _ => Err(ZarrQueryError::InvalidType(format!(
                 "Unsupported type {t} from zarr metadata"
             ))),
         }
     }
+}
+
+// arrow's timestamp/duration types can't represent a scale factor other than 1,
+// so we reject anything else rather than silently reading wrong values.
+fn ensure_unit_scale(t: &zDataType, scale_factor: u32) -> ZarrQueryResult<()> {
+    if scale_factor != 1 {
+        return Err(ZarrQueryError::InvalidType(format!(
+            "Unsupported scale factor {scale_factor} for type {t} from zarr metadata"
+        )));
+    }
+    Ok(())
 }
 
 /// A structure to accumulate zarr array data until we can output
@@ -1367,7 +1411,8 @@ mod zarr_stream_tests {
     async fn read_4d_data_test() {
         // 6 x 5 x 4 x 3 data with dims (lat, lon, height, time), 2 x 2 x 2 x 2
         // chunks, so a 3 x 3 x 2 x 2 = 36 chunk grid. lat/lon/height/time are 1D
-        // coordinates broadcast up to the full 4D chunk, time is an int64 column.
+        // coordinates broadcast up to the full 4D chunk, time is a datetime64[s]
+        // column decoded as an arrow Timestamp(Second, None).
         let (wrapper, schema) = get_local_zarr_store_4d(0.0, "lat_lon_height_time_data").await;
         let store = wrapper.get_store();
 
@@ -1389,7 +1434,10 @@ mod zarr_stream_tests {
             ("lat".to_string(), DataType::Float64),
             ("lon".to_string(), DataType::Float64),
             ("height".to_string(), DataType::Float64),
-            ("time".to_string(), DataType::Int64),
+            (
+                "time".to_string(),
+                DataType::Timestamp(TimeUnit::Second, None),
+            ),
             ("data".to_string(), DataType::Float64),
         ]);
         validate_names_and_types(&target_types, &records[0]);
@@ -1421,7 +1469,7 @@ mod zarr_stream_tests {
                 200., 200.,
             ],
         );
-        validate_primitive_column::<Int64Type, i64>(
+        validate_primitive_column::<TimestampSecondType, i64>(
             "time",
             &records[0],
             &[
@@ -1469,7 +1517,7 @@ mod zarr_stream_tests {
             &records[8],
             &[100., 100., 200., 200., 100., 100., 200., 200.],
         );
-        validate_primitive_column::<Int64Type, i64>(
+        validate_primitive_column::<TimestampSecondType, i64>(
             "time",
             &records[8],
             &[
@@ -1504,7 +1552,7 @@ mod zarr_stream_tests {
             &records[35],
             &[300., 400., 300., 400.],
         );
-        validate_primitive_column::<Int64Type, i64>(
+        validate_primitive_column::<TimestampSecondType, i64>(
             "time",
             &records[35],
             &[1_700_000_002, 1_700_000_002, 1_700_000_002, 1_700_000_002],
