@@ -21,7 +21,7 @@ use std::env;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use arrow_schema::{DataType, Field, Fields, Schema, SchemaRef};
+use arrow_schema::{DataType, Field, Fields, Schema, SchemaRef, TimeUnit};
 use datafusion::common::stats::Precision;
 use datafusion::common::Statistics;
 use datafusion::datasource::listing::ListingTableUrl;
@@ -35,6 +35,7 @@ use object_store::gcp::GoogleCloudStorageBuilder;
 use object_store::local::LocalFileSystem;
 use zarrs::array::data_type::DataType as zarr_dtype;
 use zarrs::array::Array;
+use zarrs::metadata_ext::data_type::NumpyTimeUnit;
 use zarrs::registry::ExtensionAliases;
 #[cfg(feature = "icechunk")]
 use zarrs_icechunk::AsyncIcechunkStore;
@@ -484,8 +485,38 @@ fn get_schema_type(value: &MetadataV3) -> DfResult<DataType> {
         zarr_dtype::Float32 => Ok(DataType::Float32),
         zarr_dtype::Float64 => Ok(DataType::Float64),
         zarr_dtype::String => Ok(DataType::Utf8),
+        // datetime64 -> Timestamp (no timezone; zarr datetime64 carries none),
+        // timedelta64 -> Duration. these must agree with the arrays produced by the
+        // reader's decode_data, or the produced batch won't match the declared schema.
+        zarr_dtype::NumpyDateTime64 { unit, scale_factor } => Ok(DataType::Timestamp(
+            map_time_unit(unit, scale_factor.get())?,
+            None,
+        )),
+        zarr_dtype::NumpyTimeDelta64 { unit, scale_factor } => {
+            Ok(DataType::Duration(map_time_unit(unit, scale_factor.get())?))
+        }
         _ => Err(DataFusionError::Execution(format!(
             "Unsupported type {value} from zarr metadata"
+        ))),
+    }
+}
+
+// maps a numpy temporal unit to an arrow [`TimeUnit`], requiring an exact match and a
+// scale factor of 1. arrow can't represent the coarser/finer numpy units or a scale
+// multiplier, so anything else is an error.
+fn map_time_unit(unit: NumpyTimeUnit, scale_factor: u32) -> DfResult<TimeUnit> {
+    if scale_factor != 1 {
+        return Err(DataFusionError::Execution(format!(
+            "Unsupported scale factor {scale_factor} for temporal type from zarr metadata"
+        )));
+    }
+    match unit {
+        NumpyTimeUnit::Second => Ok(TimeUnit::Second),
+        NumpyTimeUnit::Millisecond => Ok(TimeUnit::Millisecond),
+        NumpyTimeUnit::Microsecond => Ok(TimeUnit::Microsecond),
+        NumpyTimeUnit::Nanosecond => Ok(TimeUnit::Nanosecond),
+        _ => Err(DataFusionError::Execution(format!(
+            "Unsupported temporal unit {unit} from zarr metadata"
         ))),
     }
 }
