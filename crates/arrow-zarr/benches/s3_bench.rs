@@ -44,7 +44,7 @@ impl CloudStorageBenchBackend for S3BenchBackend {
         let credentials = S3Credentials::FromEnv;
         // S3Options is #[non_exhaustive]; only override the region.
         let mut config = S3Options::default();
-        if let Some(region) = env::var("AWS_DEFAULT_REGION").ok() {
+        if let Ok(region) = env::var("AWS_DEFAULT_REGION") {
             config = config.with_region(region);
         }
 
