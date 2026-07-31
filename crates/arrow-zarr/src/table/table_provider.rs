@@ -15,7 +15,6 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use std::any::Any;
 use std::fmt::Debug;
 use std::sync::Arc;
 
@@ -97,10 +96,6 @@ impl ZarrTable {
 
 #[async_trait]
 impl TableProvider for ZarrTable {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> SchemaRef {
         self.table_config.get_schema_ref()
     }
@@ -177,7 +172,7 @@ impl TableProviderFactory for ZarrTableFactory {
         let schema = if cmd.schema.fields().is_empty() {
             inferred_schema
         } else {
-            let provided_schema: Schema = cmd.schema.as_ref().into();
+            let provided_schema: Schema = cmd.schema.as_arrow().to_owned();
             for field in provided_schema.fields() {
                 let target_type = inferred_schema.field_with_name(field.name())?.data_type();
                 if field.data_type() != target_type {

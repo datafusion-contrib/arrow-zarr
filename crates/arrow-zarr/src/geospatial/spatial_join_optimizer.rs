@@ -47,7 +47,7 @@ impl PhysicalOptimizerRule for SpatialJoinPhysicalOptimizer {
 fn try_optimize_join(plan: Arc<dyn ExecutionPlan>) -> Result<Transformed<Arc<dyn ExecutionPlan>>> {
     // Only nested loops gets reorganized as a spatial join (i.e. not hash
     // joins, those stay the same with the spatial predicate as a filter.)
-    let Some(nlj) = plan.as_any().downcast_ref::<NestedLoopJoinExec>() else {
+    let Some(nlj) = plan.downcast_ref::<NestedLoopJoinExec>() else {
         return Ok(Transformed::no(plan));
     };
     let Some(spatial_join) = try_convert_to_spatial_join(nlj)? else {
@@ -65,7 +65,7 @@ fn try_convert_to_spatial_join(nlj: &NestedLoopJoinExec) -> Result<Option<Arc<dy
     };
 
     let left = nlj.left();
-    let left = if let Some(coalesce) = left.as_any().downcast_ref::<CoalescePartitionsExec>() {
+    let left = if let Some(coalesce) = left.downcast_ref::<CoalescePartitionsExec>() {
         coalesce.input()
     } else {
         left
@@ -83,7 +83,7 @@ fn try_convert_to_spatial_join(nlj: &NestedLoopJoinExec) -> Result<Option<Arc<dy
         predicate,
         remainder,
         *nlj.join_type(),
-        nlj.projection().cloned(),
+        nlj.projection().as_ref().map(|p| p.to_vec()),
     )?;
     Ok(Some(Arc::new(exec)))
 }
@@ -133,13 +133,13 @@ fn extract_spatial_predicate(
     expr: &Arc<dyn PhysicalExpr>,
     col_indices: &[ColumnIndex],
 ) -> Option<(RelationPredicate, Option<Arc<dyn PhysicalExpr>>)> {
-    if let Some(f) = expr.as_any().downcast_ref::<ScalarFunctionExpr>() {
+    if let Some(f) = expr.downcast_ref::<ScalarFunctionExpr>() {
         if let Some(pred) = match_relation_predicate(f, col_indices) {
             return Some((pred, None));
         }
     }
 
-    if let Some(bin) = expr.as_any().downcast_ref::<BinaryExpr>() {
+    if let Some(bin) = expr.downcast_ref::<BinaryExpr>() {
         if !matches!(bin.op(), Operator::And) {
             return None;
         }
@@ -205,7 +205,7 @@ fn collect_column_references(
 ) -> Vec<ColumnIndex> {
     let mut out = Vec::new();
     expr.apply(|node| {
-        if let Some(col) = node.as_any().downcast_ref::<Column>() {
+        if let Some(col) = node.downcast_ref::<Column>() {
             out.push(col_indices[col.index()].clone());
         }
         Ok(datafusion::common::tree_node::TreeNodeRecursion::Continue)
@@ -253,7 +253,7 @@ fn reproject_columns(
 ) -> Arc<dyn PhysicalExpr> {
     expr.clone()
         .transform_down(|node| {
-            if let Some(col) = node.as_any().downcast_ref::<Column>() {
+            if let Some(col) = node.downcast_ref::<Column>() {
                 if let Some(&new_idx) = index_map.get(&col.index()) {
                     return Ok(Transformed::yes(
                         Arc::new(Column::new(col.name(), new_idx)) as Arc<dyn PhysicalExpr>
@@ -288,6 +288,7 @@ mod optimizer_tests {
                 Arc::new(Column::new("right_geom", right_idx)),
             ],
             Arc::new(Field::new("result", DataType::Boolean, true)),
+            Arc::new(ConfigOptions::default()),
         ))
     }
 
@@ -335,7 +336,6 @@ mod optimizer_tests {
     fn test_optimizer_converts_nlj_to_spatial_join() {
         let optimized = run_optimizer(JoinType::Inner, 0, 1);
         let spatial = optimized
-            .as_any()
             .downcast_ref::<SpatialJoinExec>()
             .expect("should be converted to SpatialJoinExec");
         assert_eq!(spatial.join_type, JoinType::Inner);
@@ -347,7 +347,6 @@ mod optimizer_tests {
     fn test_optimizer_converts_nlj_to_spatial_join_left() {
         let optimized = run_optimizer(JoinType::Left, 0, 1);
         let spatial = optimized
-            .as_any()
             .downcast_ref::<SpatialJoinExec>()
             .expect("should be converted to SpatialJoinExec");
         assert_eq!(spatial.join_type, JoinType::Left);
@@ -359,7 +358,6 @@ mod optimizer_tests {
     fn test_optimizer_converts_nlj_to_spatial_join_right() {
         let optimized = run_optimizer(JoinType::Right, 0, 1);
         let spatial = optimized
-            .as_any()
             .downcast_ref::<SpatialJoinExec>()
             .expect("should be converted to SpatialJoinExec");
         assert_eq!(spatial.join_type, JoinType::Right);
@@ -373,7 +371,6 @@ mod optimizer_tests {
         // optimizer expresses it left-first as st_contains(left, right) instead of rejecting it.
         let optimized = run_optimizer(JoinType::Inner, 1, 0);
         let spatial = optimized
-            .as_any()
             .downcast_ref::<SpatialJoinExec>()
             .expect("inverted st_within(right, left) should convert to a flipped SpatialJoinExec");
         assert_eq!(

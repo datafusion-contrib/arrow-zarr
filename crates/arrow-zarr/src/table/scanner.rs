@@ -15,13 +15,12 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use std::any::Any;
 use std::sync::Arc;
 
 use datafusion::common::Statistics;
 use datafusion::datasource::listing::PartitionedFile;
 use datafusion::datasource::physical_plan::{
-    FileGroup, FileScanConfigBuilder, FileSource, FileStream,
+    FileGroup, FileScanConfigBuilder, FileSource, FileStreamBuilder,
 };
 use datafusion::execution::object_store::ObjectStoreUrl;
 use datafusion::physical_expr::{EquivalenceProperties, Partitioning};
@@ -40,7 +39,7 @@ use super::opener::ZarrSource;
 pub struct ZarrScan {
     zarr_config: ZarrTableConfig,
     filters: Option<Arc<dyn PhysicalExpr>>,
-    plan_properties: PlanProperties,
+    plan_properties: Arc<PlanProperties>,
     metrics: ExecutionPlanMetricsSet,
 }
 
@@ -59,7 +58,7 @@ impl ZarrScan {
         Self {
             zarr_config,
             filters,
-            plan_properties,
+            plan_properties: Arc::new(plan_properties),
             metrics: ExecutionPlanMetricsSet::default(),
         }
     }
@@ -76,10 +75,6 @@ impl ExecutionPlan for ZarrScan {
         "ZarrScan"
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
         vec![]
     }
@@ -91,7 +86,7 @@ impl ExecutionPlan for ZarrScan {
         Ok(self)
     }
 
-    fn properties(&self) -> &PlanProperties {
+    fn properties(&self) -> &Arc<PlanProperties> {
         &self.plan_properties
     }
 
@@ -102,17 +97,17 @@ impl ExecutionPlan for ZarrScan {
     fn partition_statistics(
         &self,
         partition: Option<usize>,
-    ) -> datafusion::error::Result<Statistics> {
+    ) -> datafusion::error::Result<Arc<Statistics>> {
         match partition {
             // whole-plan statistics (all partitions combined).
-            None => self.zarr_config.statistics(),
+            None => Ok(Arc::new(self.zarr_config.statistics()?)),
             // we can't cheaply give an exact per-partition row count (the
             // reader slices the chunk grid into contiguous ranges and edge
             // chunks vary in size), so we report unknown for a specific
             // partition.
-            Some(_) => Ok(Statistics::new_unknown(
+            Some(_) => Ok(Arc::new(Statistics::new_unknown(
                 &self.zarr_config.get_projected_schema_ref(),
-            )),
+            ))),
         }
     }
 
@@ -122,9 +117,12 @@ impl ExecutionPlan for ZarrScan {
         _config: &datafusion::config::ConfigOptions,
     ) -> datafusion::error::Result<Option<Arc<dyn ExecutionPlan>>> {
         let mut new_plan = self.clone();
-        new_plan.plan_properties = new_plan
+        let props = new_plan
             .plan_properties
+            .as_ref()
+            .clone()
             .with_partitioning(Partitioning::UnknownPartitioning(target_partitions));
+        new_plan.plan_properties = Arc::new(props);
         Ok(Some(Arc::new(new_plan)))
     }
 
@@ -153,16 +151,14 @@ impl ExecutionPlan for ZarrScan {
         let file_groups = vec![FileGroup::new(vec![PartitionedFile::new("", 0)])];
         let file_scan_config = FileScanConfigBuilder::new(
             ObjectStoreUrl::parse("file://").unwrap(),
-            self.zarr_config.get_schema_ref(),
             Arc::new(zarr_source.clone()),
         )
         .with_file_groups(file_groups)
-        .with_projection(self.zarr_config.get_projection())
         .build();
 
         let dummy_object_store = Arc::new(LocalFileSystem::new());
         let file_opener =
-            zarr_source.create_file_opener(dummy_object_store, &file_scan_config, partition);
+            zarr_source.create_file_opener(dummy_object_store, &file_scan_config, partition)?;
 
         // Note: the "partition" argument is hardcoded to 0 here. We are not making
         // use of most of the logic in the file stream, for example the partitioning
@@ -170,13 +166,12 @@ impl ExecutionPlan for ZarrScan {
         // "disable" it in the file stream obejct by always setting it to 0.
         // Passing in dummy metrics because the real metrics are computed directly
         // from the data stream, don't want to create any confusion around that.
-        let file_stream = FileStream::new(
-            &file_scan_config,
-            0,
-            file_opener,
-            &ExecutionPlanMetricsSet::default(),
-        )
-        .unwrap();
+        let dummy_metrics = ExecutionPlanMetricsSet::default();
+        let file_stream = FileStreamBuilder::new(&file_scan_config)
+            .with_partition(0)
+            .with_file_opener(file_opener)
+            .with_metrics(&dummy_metrics)
+            .build()?;
 
         Ok(Box::pin(file_stream))
     }

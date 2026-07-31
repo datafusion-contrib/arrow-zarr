@@ -42,26 +42,24 @@ impl CloudStorageBenchBackend for S3BenchBackend {
             .to_string();
 
         let credentials = S3Credentials::FromEnv;
-        let config = S3Options {
-            region: env::var("AWS_DEFAULT_REGION").ok(),
-            endpoint_url: None,
-            anonymous: false,
-            allow_http: false,
-            force_path_style: false,
-            network_stream_timeout_seconds: None,
-            requester_pays: false,
-        };
+        // S3Options is #[non_exhaustive]; only override the region.
+        let mut config = S3Options::default();
+        if let Some(region) = env::var("AWS_DEFAULT_REGION").ok() {
+            config = config.with_region(region);
+        }
 
         let store = ObjectStorage::new_s3(
             bucket,
             Some(listing_url.prefix().as_ref().to_string()),
             Some(credentials),
             Some(config),
+            Vec::new(),
+            Vec::new(),
         )
         .await
         .unwrap();
 
-        let repo = Repository::create(None, Arc::new(store), HashMap::new())
+        let repo = Repository::create(None, Arc::new(store), HashMap::new(), None, true)
             .await
             .unwrap();
         let session = repo.writable_session("main").await.unwrap();

@@ -18,8 +18,8 @@
 use std::error::Error;
 
 use arrow::error::ArrowError;
-use zarrs::array::codec::CodecError;
-use zarrs::array::{ArrayCreateError, ArrayError};
+use zarrs::array::codec::api::CodecError;
+use zarrs::array::{ArrayCreateError, ArrayError, ElementError};
 use zarrs_storage::{StorageError, StorePrefixError};
 
 #[derive(Debug)]
@@ -74,6 +74,12 @@ impl From<CodecError> for ZarrQueryError {
 
 impl From<ArrayError> for ZarrQueryError {
     fn from(e: ArrayError) -> ZarrQueryError {
+        ZarrQueryError::Zarrs(Box::new(e))
+    }
+}
+
+impl From<ElementError> for ZarrQueryError {
+    fn from(e: ElementError) -> ZarrQueryError {
         ZarrQueryError::Zarrs(Box::new(e))
     }
 }

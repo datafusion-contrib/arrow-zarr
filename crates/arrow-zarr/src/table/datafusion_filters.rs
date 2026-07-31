@@ -24,7 +24,7 @@ use datafusion::common::cast::as_boolean_array;
 use datafusion::common::tree_node::{TreeNode, TreeNodeRecursion, TreeNodeVisitor};
 use datafusion::common::Result as DfResult;
 use datafusion::physical_expr::expressions::Column;
-use datafusion::physical_expr::utils::reassign_predicate_columns;
+use datafusion::physical_expr::utils::reassign_expr_columns;
 use datafusion::physical_expr::{split_conjunction, PhysicalExpr};
 
 use crate::zarr_store_opener::filter::{ZarrArrowPredicate, ZarrChunkFilter};
@@ -44,7 +44,7 @@ impl ZarrFilterExpression {
         // this step is needed.
         let required_columns = pushdown_columns(&physical_expr, table_schema.clone())?;
         let filter_schema = table_schema.project(&required_columns)?;
-        let physical_expr = reassign_predicate_columns(physical_expr, &filter_schema, true)?;
+        let physical_expr = reassign_expr_columns(physical_expr, &filter_schema)?;
 
         Ok(Self {
             physical_expr,
@@ -114,7 +114,7 @@ impl TreeNodeVisitor<'_> for PushdownChecker {
     type Node = Arc<dyn PhysicalExpr>;
 
     fn f_down(&mut self, node: &Self::Node) -> DfResult<TreeNodeRecursion> {
-        if let Some(column) = node.as_any().downcast_ref::<Column>() {
+        if let Some(column) = node.downcast_ref::<Column>() {
             let idx = self.table_schema.index_of(column.name())?;
             self.required_columns.insert(idx);
         }

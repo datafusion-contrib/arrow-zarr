@@ -45,8 +45,8 @@ mod test_utils {
     use ndarray::{Array, Array1, Array2, Array3, Array4};
     use object_store::local::LocalFileSystem;
     use walkdir::WalkDir;
-    use zarrs::array::{codec, ArrayBuilder, DataType, Element, FillValue};
-    use zarrs::array_subset::ArraySubset;
+    use zarrs::array::data_type::{float64, numpy_datetime64};
+    use zarrs::array::{codec, ArrayBuilder, ArraySubset, DataType, Element, FillValue};
     use zarrs::metadata_ext::data_type::NumpyTimeUnit;
     #[cfg(all(feature = "icechunk", feature = "datafusion"))]
     use zarrs_icechunk::AsyncIcechunkStore;
@@ -120,6 +120,8 @@ mod test_utils {
                 None,
                 Arc::new(ObjectStorage::new_local_filesystem(&p).await.unwrap()),
                 HashMap::new(),
+                None,
+                true,
             )
             .await
             .unwrap();
@@ -151,11 +153,32 @@ mod test_utils {
                 panic!("should not be deleting this icechunk repo!")
             }
 
-            //delete the different icechunk repo components one at a time.
-            fs::remove_dir_all(self.path.join("manifests")).unwrap();
-            fs::remove_dir_all(self.path.join("refs")).unwrap();
-            fs::remove_dir_all(self.path.join("snapshots")).unwrap();
-            fs::remove_dir_all(self.path.join("transactions")).unwrap();
+            // Delete the icechunk repo components one at a time (rather than a
+            // bulk remove_dir_all on the whole path) as a safety measure. Not every
+            // entry is present in every repo, so tolerate NotFound.
+            for dir in [
+                "refs",
+                "snapshots",
+                "manifests",
+                "transactions",
+                "chunks",
+                "overwritten",
+            ] {
+                match fs::remove_dir_all(self.path.join(dir)) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => panic!("failed to remove {dir}: {e}"),
+                }
+            }
+            for file in ["config.yaml", "repo"] {
+                match fs::remove_file(self.path.join(file)) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => panic!("failed to remove {file}: {e}"),
+                }
+            }
+            // Non-recursive: fails loudly if a future icechunk bump adds a new
+            // top-level entry, signaling that the list above needs updating.
             fs::remove_dir(self.path.clone()).unwrap();
         }
     }
@@ -201,7 +224,7 @@ mod test_utils {
         let arr_data: Array1<T> = Array::from_vec(data)
             .into_shape_with_order(shape as usize)
             .unwrap();
-        arr.async_store_array_subset_ndarray(&[0], arr_data)
+        arr.async_store_array_subset(&ArraySubset::new_with_shape(vec![shape]), arr_data)
             .await
             .unwrap();
     }
@@ -217,7 +240,7 @@ mod test_utils {
     ) {
         write_1d_array(
             data,
-            DataType::Float64,
+            float64(),
             fillvalue,
             shape,
             chunk,
@@ -240,7 +263,7 @@ mod test_utils {
         let mut array_builder = ArrayBuilder::new(
             vec![shape.0, shape.1],
             [chunk.0, chunk.1],
-            DataType::Float64,
+            float64(),
             FillValue::from(fillvalue),
         );
 
@@ -258,8 +281,8 @@ mod test_utils {
             let arr_data: Array2<f64> = Array::from_vec(data)
                 .into_shape_with_order((shape.0 as usize, shape.1 as usize))
                 .unwrap();
-            arr.async_store_array_subset_ndarray(
-                ArraySubset::new_with_ranges(&[0..shape.0, 0..shape.1]).start(),
+            arr.async_store_array_subset(
+                &ArraySubset::new_with_ranges(&[0..shape.0, 0..shape.1]),
                 arr_data,
             )
             .await
@@ -279,7 +302,7 @@ mod test_utils {
         let mut array_builder = ArrayBuilder::new(
             vec![shape.0, shape.1, shape.2],
             [chunk.0, chunk.1, chunk.2],
-            DataType::Float64,
+            float64(),
             FillValue::from(fillvalue),
         );
 
@@ -297,8 +320,8 @@ mod test_utils {
             let arr_data: Array3<f64> = Array::from_vec(data)
                 .into_shape_with_order((shape.0 as usize, shape.1 as usize, shape.2 as usize))
                 .unwrap();
-            arr.async_store_array_subset_ndarray(
-                ArraySubset::new_with_ranges(&[0..shape.0, 0..shape.1, 0..shape.2]).start(),
+            arr.async_store_array_subset(
+                &ArraySubset::new_with_ranges(&[0..shape.0, 0..shape.1, 0..shape.2]),
                 arr_data,
             )
             .await
@@ -318,7 +341,7 @@ mod test_utils {
         let mut array_builder = ArrayBuilder::new(
             vec![shape.0, shape.1, shape.2, shape.3],
             [chunk.0, chunk.1, chunk.2, chunk.3],
-            DataType::Float64,
+            float64(),
             FillValue::from(fillvalue),
         );
 
@@ -341,9 +364,8 @@ mod test_utils {
                     shape.3 as usize,
                 ))
                 .unwrap();
-            arr.async_store_array_subset_ndarray(
-                ArraySubset::new_with_ranges(&[0..shape.0, 0..shape.1, 0..shape.2, 0..shape.3])
-                    .start(),
+            arr.async_store_array_subset(
+                &ArraySubset::new_with_ranges(&[0..shape.0, 0..shape.1, 0..shape.2, 0..shape.3]),
                 arr_data,
             )
             .await
@@ -610,10 +632,7 @@ mod test_utils {
         let times: Vec<i64> = vec![1_700_000_000, 1_700_000_001, 1_700_000_002];
         write_1d_array(
             times,
-            DataType::NumpyDateTime64 {
-                unit: NumpyTimeUnit::Second,
-                scale_factor: NonZeroU32::new(1).unwrap(),
-            },
+            numpy_datetime64(NumpyTimeUnit::Second, NonZeroU32::new(1).unwrap()),
             0,
             3,
             2,
@@ -747,7 +766,8 @@ mod test_utils {
             .session()
             .write()
             .await
-            .commit("some test data", None)
+            .commit("some test data")
+            .execute()
             .await
             .unwrap();
         let schema = Arc::new(Schema::new(vec![
@@ -795,6 +815,8 @@ mod test_utils {
             None,
             Arc::new(ObjectStorage::new_local_filesystem(&p).await.unwrap()),
             HashMap::new(),
+            None,
+            true,
         )
         .await
         .unwrap();
@@ -808,7 +830,8 @@ mod test_utils {
             .session()
             .write()
             .await
-            .commit("first commit, shift 0", None)
+            .commit("first commit, shift 0")
+            .execute()
             .await
             .unwrap();
 
@@ -821,7 +844,8 @@ mod test_utils {
             .session()
             .write()
             .await
-            .commit("second commit, shift 1", None)
+            .commit("second commit, shift 1")
+            .execute()
             .await
             .unwrap();
         repo.create_tag("test_tag", &tagged_snapshot).await.unwrap();
@@ -835,7 +859,8 @@ mod test_utils {
             .session()
             .write()
             .await
-            .commit("third commit, shift 2", None)
+            .commit("third commit, shift 2")
+            .execute()
             .await
             .unwrap();
 
