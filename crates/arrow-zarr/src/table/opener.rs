@@ -15,17 +15,15 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use std::any::Any;
 use std::fmt;
 use std::fmt::Formatter;
 use std::sync::Arc;
 
-use arrow_schema::SchemaRef;
-use datafusion::common::Statistics;
 use datafusion::datasource::listing::PartitionedFile;
 use datafusion::datasource::physical_plan::{
-    FileMeta, FileOpenFuture, FileOpener, FileScanConfig, FileSource,
+    FileOpenFuture, FileOpener, FileScanConfig, FileSource,
 };
+use datafusion::datasource::table_schema::TableSchema;
 use datafusion::error::{DataFusionError, Result as DfResult};
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion::physical_plan::{DisplayFormatType, PhysicalExpr};
@@ -71,7 +69,7 @@ impl FileOpener for ZarrOpener {
     // There is the option to split the zarr chunks between some number of partitions,
     // but this is again handled inside the zarr stream. We are only implementing
     // this to re-use some of the datafusion functionalities.
-    fn open(&self, _file_meta: FileMeta, _file: PartitionedFile) -> DfResult<FileOpenFuture> {
+    fn open(&self, _file: PartitionedFile) -> DfResult<FileOpenFuture> {
         let config = self.config.clone();
         let (n_partitions, partition) = (self.n_partitions, self.partition);
         let metrics = ZarrMetrics::new(&self.exec_plan_metrics, partition);
@@ -99,7 +97,11 @@ impl FileOpener for ZarrOpener {
             )
             .await
             .map_err(|e| DataFusionError::External(Box::new(e)))?;
-            Ok(inner_stream.boxed())
+            // the file stream now expects a DataFusion-error stream, but the zarr
+            // reader yields arrow errors, so map them at the boundary.
+            Ok(inner_stream
+                .map(|batch| batch.map_err(DataFusionError::from))
+                .boxed())
         });
 
         Ok(stream)
@@ -113,6 +115,7 @@ pub(crate) struct ZarrSource {
     n_partitions: usize,
     exec_plan_metrics: ExecutionPlanMetricsSet,
     filter_expr: Option<Arc<dyn PhysicalExpr>>,
+    table_schema: TableSchema,
 }
 
 impl ZarrSource {
@@ -122,11 +125,16 @@ impl ZarrSource {
         filter_expr: Option<Arc<dyn PhysicalExpr>>,
         exec_plan_metrics: ExecutionPlanMetricsSet,
     ) -> Self {
+        // the zarr reader applies the projection itself, so we expose the
+        // already-projected schema here (no partition columns) and don't push
+        // projection through the file-scan machinery.
+        let table_schema = TableSchema::from_file_schema(config.get_projected_schema_ref());
         Self {
             config,
             n_partitions,
             exec_plan_metrics,
             filter_expr,
+            table_schema,
         }
     }
 }
@@ -139,7 +147,7 @@ impl FileSource for ZarrSource {
         _object_store: Arc<dyn ObjectStore>,
         _base_config: &FileScanConfig,
         partition: usize,
-    ) -> Arc<dyn FileOpener> {
+    ) -> DfResult<Arc<dyn FileOpener>> {
         let file_opener = ZarrOpener::new(
             self.config.clone(),
             self.n_partitions,
@@ -147,11 +155,11 @@ impl FileSource for ZarrSource {
             self.filter_expr.clone(),
             self.exec_plan_metrics.clone(),
         );
-        Arc::new(file_opener)
+        Ok(Arc::new(file_opener))
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
+    fn table_schema(&self) -> &TableSchema {
+        &self.table_schema
     }
 
     // We don't really need most of the below functions, since we're
@@ -160,24 +168,8 @@ impl FileSource for ZarrSource {
         Arc::new(self.clone())
     }
 
-    fn with_schema(&self, _schema: SchemaRef) -> Arc<dyn FileSource> {
-        Arc::new(self.clone())
-    }
-
-    fn with_projection(&self, _config: &FileScanConfig) -> Arc<dyn FileSource> {
-        Arc::new(self.clone())
-    }
-
-    fn with_statistics(&self, _statistics: Statistics) -> Arc<dyn FileSource> {
-        Arc::new(self.clone())
-    }
-
     fn metrics(&self) -> &ExecutionPlanMetricsSet {
         &self.exec_plan_metrics
-    }
-
-    fn statistics(&self) -> DfResult<Statistics> {
-        Ok(Statistics::default())
     }
 
     /// String representation of file source
@@ -198,7 +190,9 @@ mod file_opener_tests {
     use arrow::datatypes::Float64Type;
     use arrow_schema::DataType;
     use datafusion::datasource::listing::ListingTableUrl;
-    use datafusion::datasource::physical_plan::{FileGroup, FileScanConfigBuilder, FileStream};
+    use datafusion::datasource::physical_plan::{
+        FileGroup, FileScanConfigBuilder, FileStreamBuilder,
+    };
     use datafusion::execution::object_store::ObjectStoreUrl;
     use futures_util::TryStreamExt;
     use object_store::local::LocalFileSystem;
@@ -221,16 +215,22 @@ mod file_opener_tests {
         let file_groups = vec![FileGroup::new(vec![PartitionedFile::new("", 0)])];
         let file_scan_config = FileScanConfigBuilder::new(
             ObjectStoreUrl::parse("file://").unwrap(),
-            schema,
             Arc::new(zarr_souce.clone()),
         )
         .with_file_groups(file_groups)
         .build();
         let dummy_object_store = Arc::new(LocalFileSystem::new());
-        let file_opener = zarr_souce.create_file_opener(dummy_object_store, &file_scan_config, 0);
+        let file_opener = zarr_souce
+            .create_file_opener(dummy_object_store, &file_scan_config, 0)
+            .unwrap();
 
         let metrics = ExecutionPlanMetricsSet::default();
-        let file_stream = FileStream::new(&file_scan_config, 0, file_opener, &metrics).unwrap();
+        let file_stream = FileStreamBuilder::new(&file_scan_config)
+            .with_partition(0)
+            .with_file_opener(file_opener)
+            .with_metrics(&metrics)
+            .build()
+            .unwrap();
         let records: Vec<_> = file_stream.try_collect().await.unwrap();
 
         let target_types = HashMap::from([

@@ -10,7 +10,7 @@ use datafusion::logical_expr::{
 macro_rules! spatial_predicate_stub {
     ($($struct_name:ident => $udf_name:literal),* $(,)?) => {
         $(
-            #[derive(Debug)]
+            #[derive(Debug, PartialEq, Eq, Hash)]
             pub struct $struct_name {
                 signature: Signature,
             }
@@ -30,7 +30,6 @@ macro_rules! spatial_predicate_stub {
             }
 
             impl ScalarUDFImpl for $struct_name {
-                fn as_any(&self) -> &dyn std::any::Any { self }
                 fn name(&self) -> &str { $udf_name }
                 fn signature(&self) -> &Signature {
                     &self.signature

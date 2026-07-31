@@ -33,10 +33,13 @@ use object_store::aws::AmazonS3Builder;
 #[cfg(feature = "gcs")]
 use object_store::gcp::GoogleCloudStorageBuilder;
 use object_store::local::LocalFileSystem;
-use zarrs::array::data_type::DataType as zarr_dtype;
-use zarrs::array::Array;
+use zarrs::array::data_type::{
+    BoolDataType, Float32DataType, Float64DataType, Int16DataType, Int32DataType, Int64DataType,
+    Int8DataType, NumpyDateTime64DataType, NumpyTimeDelta64DataType, StringDataType,
+    UInt16DataType, UInt32DataType, UInt64DataType, UInt8DataType,
+};
+use zarrs::array::{Array, DataType as zarr_dtype};
 use zarrs::metadata_ext::data_type::NumpyTimeUnit;
-use zarrs::registry::ExtensionAliases;
 #[cfg(feature = "icechunk")]
 use zarrs_icechunk::AsyncIcechunkStore;
 use zarrs_metadata::v3::MetadataV3;
@@ -336,21 +339,18 @@ impl ZarrTableUrl {
                             .trim_end_matches("/")
                             .to_string();
                         let credentials = S3Credentials::FromEnv;
-                        let config = S3Options {
-                            region: env::var("AWS_DEFAULT_REGION").ok(),
-                            endpoint_url: None,
-                            anonymous: false,
-                            allow_http: false,
-                            force_path_style: false,
-                            network_stream_timeout_seconds: None,
-                            requester_pays: false,
-                        };
+                        let mut config = S3Options::default();
+                        if let Ok(region) = env::var("AWS_DEFAULT_REGION") {
+                            config = config.with_region(region);
+                        }
 
                         ObjectStorage::new_s3(
                             bucket,
                             Some(table_url.prefix().as_ref().to_string()),
                             Some(credentials),
                             Some(config),
+                            Vec::new(),
+                            Vec::new(),
                         )
                         .await
                         .map_err(|e| DataFusionError::External(Box::new(e)))?
@@ -372,8 +372,9 @@ impl ZarrTableUrl {
                             Some(table_url.prefix().as_ref().to_string()),
                             Some(credentials),
                             None,
+                            Vec::new(),
+                            Vec::new(),
                         )
-                        .await
                         .map_err(|e| DataFusionError::External(Box::new(e)))?
                     }
                     _ => {
@@ -469,35 +470,47 @@ impl ZarrTableUrl {
 }
 
 fn get_schema_type(value: &MetadataV3) -> DfResult<DataType> {
-    let data_type = zarr_dtype::from_metadata(value, &ExtensionAliases::default())
-        .map_err(|e| DataFusionError::External(Box::new(e)))?;
+    let data_type =
+        zarr_dtype::from_metadata(value).map_err(|e| DataFusionError::External(Box::new(e)))?;
 
-    match data_type {
-        zarr_dtype::Bool => Ok(DataType::Boolean),
-        zarr_dtype::UInt8 => Ok(DataType::UInt8),
-        zarr_dtype::UInt16 => Ok(DataType::UInt16),
-        zarr_dtype::UInt32 => Ok(DataType::UInt32),
-        zarr_dtype::UInt64 => Ok(DataType::UInt64),
-        zarr_dtype::Int8 => Ok(DataType::Int8),
-        zarr_dtype::Int16 => Ok(DataType::Int16),
-        zarr_dtype::Int32 => Ok(DataType::Int32),
-        zarr_dtype::Int64 => Ok(DataType::Int64),
-        zarr_dtype::Float32 => Ok(DataType::Float32),
-        zarr_dtype::Float64 => Ok(DataType::Float64),
-        zarr_dtype::String => Ok(DataType::Utf8),
-        // datetime64 -> Timestamp (no timezone; zarr datetime64 carries none),
-        // timedelta64 -> Duration. these must agree with the arrays produced by the
-        // reader's decode_data, or the produced batch won't match the declared schema.
-        zarr_dtype::NumpyDateTime64 { unit, scale_factor } => Ok(DataType::Timestamp(
-            map_time_unit(unit, scale_factor.get())?,
+    if data_type.is::<BoolDataType>() {
+        Ok(DataType::Boolean)
+    } else if data_type.is::<UInt8DataType>() {
+        Ok(DataType::UInt8)
+    } else if data_type.is::<UInt16DataType>() {
+        Ok(DataType::UInt16)
+    } else if data_type.is::<UInt32DataType>() {
+        Ok(DataType::UInt32)
+    } else if data_type.is::<UInt64DataType>() {
+        Ok(DataType::UInt64)
+    } else if data_type.is::<Int8DataType>() {
+        Ok(DataType::Int8)
+    } else if data_type.is::<Int16DataType>() {
+        Ok(DataType::Int16)
+    } else if data_type.is::<Int32DataType>() {
+        Ok(DataType::Int32)
+    } else if data_type.is::<Int64DataType>() {
+        Ok(DataType::Int64)
+    } else if data_type.is::<Float32DataType>() {
+        Ok(DataType::Float32)
+    } else if data_type.is::<Float64DataType>() {
+        Ok(DataType::Float64)
+    } else if data_type.is::<StringDataType>() {
+        Ok(DataType::Utf8)
+    } else if let Some(dt) = data_type.downcast_ref::<NumpyDateTime64DataType>() {
+        Ok(DataType::Timestamp(
+            map_time_unit(dt.unit, dt.scale_factor.get())?,
             None,
-        )),
-        zarr_dtype::NumpyTimeDelta64 { unit, scale_factor } => {
-            Ok(DataType::Duration(map_time_unit(unit, scale_factor.get())?))
-        }
-        _ => Err(DataFusionError::Execution(format!(
+        ))
+    } else if let Some(dt) = data_type.downcast_ref::<NumpyTimeDelta64DataType>() {
+        Ok(DataType::Duration(map_time_unit(
+            dt.unit,
+            dt.scale_factor.get(),
+        )?))
+    } else {
+        Err(DataFusionError::Execution(format!(
             "Unsupported type {value} from zarr metadata"
-        ))),
+        )))
     }
 }
 

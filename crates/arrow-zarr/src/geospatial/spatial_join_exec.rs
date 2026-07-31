@@ -31,7 +31,7 @@ pub struct SpatialJoinExec {
     join_schema: SchemaRef,
     column_indices: Vec<ColumnIndex>,
     projection: Option<Vec<usize>>,
-    props: PlanProperties,
+    props: Arc<PlanProperties>,
 
     // Lazily initialized on the first `execute()` call, then shared
     // across all probe partitions, and of of the partitions will
@@ -85,7 +85,7 @@ impl SpatialJoinExec {
             join_schema,
             column_indices,
             projection,
-            props,
+            props: Arc::new(props),
             build_side_shared: Arc::new(Mutex::new(None)),
         })
     }
@@ -246,11 +246,7 @@ impl ExecutionPlan for SpatialJoinExec {
         "BulkSpatialJoinExec"
     }
 
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
-    fn properties(&self) -> &PlanProperties {
+    fn properties(&self) -> &Arc<PlanProperties> {
         &self.props
     }
 

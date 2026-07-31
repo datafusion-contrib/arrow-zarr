@@ -48,12 +48,13 @@ impl CloudStorageBenchBackend for GCSBenchBackend {
                 Some(listing_url.prefix().as_ref().to_string()),
                 Some(credentials),
                 None,
+                Vec::new(),
+                Vec::new(),
             )
-            .await
             .unwrap(),
         );
 
-        let repo = Repository::create(None, store, HashMap::new())
+        let repo = Repository::create(None, store, HashMap::new(), None, true)
             .await
             .unwrap();
         let session = repo.writable_session("main").await.unwrap();

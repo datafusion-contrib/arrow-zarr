@@ -15,7 +15,6 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use std::borrow::Cow;
 use std::cmp::min;
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
@@ -34,9 +33,15 @@ use futures::stream::{BoxStream, Stream};
 use itertools::Itertools;
 use tokio::sync::mpsc::Receiver;
 use tokio::task::JoinSet;
-use zarrs::array::codec::{ArrayToBytesCodecTraits, CodecOptions};
-use zarrs::array::{Array, ArrayBytes, ArraySize, DataType as zDataType, ElementOwned};
-use zarrs::array_subset::ArraySubset;
+use zarrs::array::codec::api::{ArrayToBytesCodecTraits, CodecOptions};
+use zarrs::array::data_type::{
+    BoolDataType, Float32DataType, Float64DataType, Int16DataType, Int32DataType, Int64DataType,
+    Int8DataType, NumpyDateTime64DataType, NumpyTimeDelta64DataType, StringDataType,
+    UInt16DataType, UInt32DataType, UInt64DataType, UInt8DataType,
+};
+use zarrs::array::{
+    Array, ArrayBytes, ArraySubset, ChunkShapeTraits, DataType as zDataType, ElementOwned,
+};
 use zarrs::metadata_ext::data_type::NumpyTimeUnit;
 use zarrs_storage::AsyncReadableListableStorageTraits;
 
@@ -347,7 +352,7 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ArrayInterface<T>
             let array_subset = ArraySubset::new_with_ranges(&ranges);
             let data = self
                 .arr
-                .async_retrieve_chunk_subset(&self.chk_index, &array_subset)
+                .async_retrieve_chunk_subset::<ArrayBytes>(&self.chk_index, &array_subset)
                 .await?;
             Ok(BytesFromArray::Decoded(data.into_owned()))
         // this will be the more common case, everything except edge chunks.
@@ -369,9 +374,15 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ArrayInterface<T>
         let decoded_bytes = match bytes {
             BytesFromArray::Encoded(bytes) => {
                 if let Some(bytes) = bytes {
+                    let chunk_shape = self.arr.chunk_shape(&self.chk_index)?;
                     self.arr.codecs().decode(
-                        Cow::Owned(bytes.into()),
-                        &self.arr.chunk_array_representation(&self.chk_index)?,
+                        // move the raw bytes into the Vec (reusing the allocation)
+                        // rather than copying them; the chain decode wants raw bytes
+                        // (ArrayBytesRaw = Cow<[u8]>), which a Vec coerces into.
+                        Vec::from(bytes).into(),
+                        &chunk_shape,
+                        self.arr.data_type(),
+                        self.arr.fill_value(),
                         &CodecOptions::default(),
                     )?
                 } else {
@@ -382,8 +393,12 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ArrayInterface<T>
                         acc *= x;
                         acc
                     });
-                    let array_size = ArraySize::new(self.arr.data_type().size(), num_elems);
-                    ArrayBytes::new_fill_value(array_size, self.arr.fill_value())
+                    ArrayBytes::new_fill_value(
+                        self.arr.data_type(),
+                        num_elems,
+                        self.arr.fill_value(),
+                    )
+                    .map_err(|e| ZarrQueryError::External(Box::new(e)))?
                 }
             }
             BytesFromArray::Decoded(bytes) => bytes,
@@ -404,54 +419,58 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ArrayInterface<T>
             }};
         }
 
-        match t {
-            zDataType::Bool => return_array_ref!(BooleanArray, bool),
-            zDataType::UInt8 => return_array_ref!(PrimitiveArray<UInt8Type>, u8),
-            zDataType::UInt16 => return_array_ref!(PrimitiveArray<UInt16Type>, u16),
-            zDataType::UInt32 => return_array_ref!(PrimitiveArray<UInt32Type>, u32),
-            zDataType::UInt64 => return_array_ref!(PrimitiveArray<UInt64Type>, u64),
-            zDataType::Int8 => return_array_ref!(PrimitiveArray<Int8Type>, i8),
-            zDataType::Int16 => return_array_ref!(PrimitiveArray<Int16Type>, i16),
-            zDataType::Int32 => return_array_ref!(PrimitiveArray<Int32Type>, i32),
-            zDataType::Int64 => return_array_ref!(PrimitiveArray<Int64Type>, i64),
-            zDataType::Float32 => return_array_ref!(PrimitiveArray<Float32Type>, f32),
-            zDataType::Float64 => return_array_ref!(PrimitiveArray<Float64Type>, f64),
-            zDataType::String => return_array_ref!(StringArray, String),
-
-            // numpy.datetime64 and numpy.timedelta64 both decode as i64 (the same
-            // ElementOwned path as Int64); only the arrow array type differs, based on
-            // the temporal unit.
-            zDataType::NumpyDateTime64 { unit, scale_factor } => {
-                ensure_unit_scale(t, scale_factor.get())?;
-                match unit {
-                    NumpyTimeUnit::Second => return_array_ref!(TimestampSecondArray, i64),
-                    NumpyTimeUnit::Millisecond => {
-                        return_array_ref!(TimestampMillisecondArray, i64)
-                    }
-                    NumpyTimeUnit::Microsecond => {
-                        return_array_ref!(TimestampMicrosecondArray, i64)
-                    }
-                    NumpyTimeUnit::Nanosecond => return_array_ref!(TimestampNanosecondArray, i64),
-                    _ => Err(ZarrQueryError::InvalidType(format!(
-                        "Unsupported datetime64 unit {unit} from zarr metadata"
-                    ))),
-                }
+        if t.is::<BoolDataType>() {
+            return_array_ref!(BooleanArray, bool)
+        } else if t.is::<UInt8DataType>() {
+            return_array_ref!(PrimitiveArray<UInt8Type>, u8)
+        } else if t.is::<UInt16DataType>() {
+            return_array_ref!(PrimitiveArray<UInt16Type>, u16)
+        } else if t.is::<UInt32DataType>() {
+            return_array_ref!(PrimitiveArray<UInt32Type>, u32)
+        } else if t.is::<UInt64DataType>() {
+            return_array_ref!(PrimitiveArray<UInt64Type>, u64)
+        } else if t.is::<Int8DataType>() {
+            return_array_ref!(PrimitiveArray<Int8Type>, i8)
+        } else if t.is::<Int16DataType>() {
+            return_array_ref!(PrimitiveArray<Int16Type>, i16)
+        } else if t.is::<Int32DataType>() {
+            return_array_ref!(PrimitiveArray<Int32Type>, i32)
+        } else if t.is::<Int64DataType>() {
+            return_array_ref!(PrimitiveArray<Int64Type>, i64)
+        } else if t.is::<Float32DataType>() {
+            return_array_ref!(PrimitiveArray<Float32Type>, f32)
+        } else if t.is::<Float64DataType>() {
+            return_array_ref!(PrimitiveArray<Float64Type>, f64)
+        } else if t.is::<StringDataType>() {
+            return_array_ref!(StringArray, String)
+        } else if let Some(dt) = t.downcast_ref::<NumpyDateTime64DataType>() {
+            ensure_unit_scale(t, dt.scale_factor.get())?;
+            match dt.unit {
+                NumpyTimeUnit::Second => return_array_ref!(TimestampSecondArray, i64),
+                NumpyTimeUnit::Millisecond => return_array_ref!(TimestampMillisecondArray, i64),
+                NumpyTimeUnit::Microsecond => return_array_ref!(TimestampMicrosecondArray, i64),
+                NumpyTimeUnit::Nanosecond => return_array_ref!(TimestampNanosecondArray, i64),
+                _ => Err(ZarrQueryError::InvalidType(format!(
+                    "Unsupported datetime64 unit {} from zarr metadata",
+                    dt.unit
+                ))),
             }
-            zDataType::NumpyTimeDelta64 { unit, scale_factor } => {
-                ensure_unit_scale(t, scale_factor.get())?;
-                match unit {
-                    NumpyTimeUnit::Second => return_array_ref!(DurationSecondArray, i64),
-                    NumpyTimeUnit::Millisecond => return_array_ref!(DurationMillisecondArray, i64),
-                    NumpyTimeUnit::Microsecond => return_array_ref!(DurationMicrosecondArray, i64),
-                    NumpyTimeUnit::Nanosecond => return_array_ref!(DurationNanosecondArray, i64),
-                    _ => Err(ZarrQueryError::InvalidType(format!(
-                        "Unsupported timedelta64 unit {unit} from zarr metadata"
-                    ))),
-                }
+        } else if let Some(dt) = t.downcast_ref::<NumpyTimeDelta64DataType>() {
+            ensure_unit_scale(t, dt.scale_factor.get())?;
+            match dt.unit {
+                NumpyTimeUnit::Second => return_array_ref!(DurationSecondArray, i64),
+                NumpyTimeUnit::Millisecond => return_array_ref!(DurationMillisecondArray, i64),
+                NumpyTimeUnit::Microsecond => return_array_ref!(DurationMicrosecondArray, i64),
+                NumpyTimeUnit::Nanosecond => return_array_ref!(DurationNanosecondArray, i64),
+                _ => Err(ZarrQueryError::InvalidType(format!(
+                    "Unsupported timedelta64 unit {} from zarr metadata",
+                    dt.unit
+                ))),
             }
-            _ => Err(ZarrQueryError::InvalidType(format!(
+        } else {
+            Err(ZarrQueryError::InvalidType(format!(
                 "Unsupported type {t} from zarr metadata"
-            ))),
+            )))
         }
     }
 }
@@ -579,7 +598,7 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrStore<T> {
         for (k, arr) in arrays.iter() {
             let chk_idx = vec![0; arr.shape().len()];
             chk_shapes.insert(k.to_owned(), arr.chunk_shape(&chk_idx)?.to_array_shape());
-            chk_grid_shapes.insert(k.to_owned(), arr.chunk_grid_shape().clone());
+            chk_grid_shapes.insert(k.to_owned(), arr.chunk_grid_shape().to_vec());
             arr_shapes.insert(k.to_owned(), arr.shape().to_vec());
         }
         let chunk_shape = resolve_vector(&coordinates, chk_shapes)?;

@@ -7,8 +7,8 @@ use criterion::Criterion;
 use datafusion::execution::SessionStateBuilder;
 use datafusion::prelude::SessionContext;
 use ndarray::{Array, Array2};
-use zarrs::array::{codec, ArrayBuilder, DataType, FillValue};
-use zarrs::array_subset::ArraySubset;
+use zarrs::array::data_type::int64;
+use zarrs::array::{codec, ArrayBuilder, ArraySubset, FillValue};
 use zarrs_icechunk::AsyncIcechunkStore;
 use zarrs_storage::AsyncReadableWritableListableStorageTraits;
 
@@ -30,12 +30,8 @@ pub async fn write_data_to_store(
 ) {
     let n = 512;
     let fill_value: i64 = 0;
-    let mut array_builder = ArrayBuilder::new(
-        vec![n, n],
-        [8, 8],
-        DataType::Int64,
-        FillValue::from(fill_value),
-    );
+    let mut array_builder =
+        ArrayBuilder::new(vec![n, n], [8, 8], int64(), FillValue::from(fill_value));
 
     let mut builder_ref = &mut array_builder;
     let codec = get_lz4_compressor();
@@ -56,12 +52,9 @@ pub async fn write_data_to_store(
         let arr_data: Array2<i64> = Array::from_vec((0..(n * n) as i64).step_by(1).collect())
             .into_shape_with_order((n as usize, n as usize))
             .unwrap();
-        arr.async_store_array_subset_ndarray(
-            ArraySubset::new_with_ranges(&[0..n, 0..n]).start(),
-            arr_data,
-        )
-        .await
-        .unwrap();
+        arr.async_store_array_subset(&ArraySubset::new_with_ranges(&[0..n, 0..n]), arr_data)
+            .await
+            .unwrap();
     }
 }
 
@@ -125,10 +118,12 @@ impl<B: CloudStorageBenchBackend> TestFixture<B> {
     pub async fn new(backend: B, url: &str) -> Self {
         let store: Arc<AsyncIcechunkStore> = B::create_icechunk_store(url).await;
         write_data_to_store(store.clone(), 1, "").await;
-        let session = store.session();
-        let mut writer = session.write().await;
-        writer
-            .commit("Test data for benchmarking", None)
+        store
+            .session()
+            .write()
+            .await
+            .commit("Test data for benchmarking")
+            .execute()
             .await
             .unwrap();
 

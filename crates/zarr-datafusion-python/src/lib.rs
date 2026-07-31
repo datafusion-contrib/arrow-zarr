@@ -2,7 +2,9 @@ use std::ffi::CString;
 use std::sync::Arc;
 
 use arrow_zarr::table::ZarrTable;
+use datafusion::execution::TaskContextProvider;
 use datafusion::prelude::SessionContext;
+use datafusion_ffi::execution::FFI_TaskContextProvider;
 use datafusion_ffi::table_provider::FFI_TableProvider;
 use pyo3::prelude::*;
 use pyo3::types::PyCapsule;
@@ -16,6 +18,7 @@ fn get_tokio_runtime() -> &'static tokio::runtime::Runtime {
 #[pyclass(name = "ZarrTableProvider", module = "zarr_datafusion._internal")]
 pub struct PyZarrTableProvider {
     table: Arc<ZarrTable>,
+    ctx: Arc<SessionContext>,
 }
 
 #[pymethods]
@@ -28,6 +31,7 @@ impl PyZarrTableProvider {
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
         Ok(Self {
             table: Arc::new(table),
+            ctx: Arc::new(SessionContext::new()),
         })
     }
 
@@ -37,7 +41,14 @@ impl PyZarrTableProvider {
     ) -> PyResult<Bound<'py, PyCapsule>> {
         let name = CString::new("datafusion_table_provider").unwrap();
         let runtime_handle = get_tokio_runtime().handle().clone();
-        let provider = FFI_TableProvider::new(self.table.clone(), true, Some(runtime_handle));
+        let task_ctx_provider: Arc<dyn TaskContextProvider> = self.ctx.clone();
+        let provider = FFI_TableProvider::new(
+            self.table.clone(),
+            true,
+            Some(runtime_handle),
+            FFI_TaskContextProvider::from(&task_ctx_provider),
+            None,
+        );
         PyCapsule::new(py, provider, Some(name))
     }
 }
@@ -45,6 +56,7 @@ impl PyZarrTableProvider {
 #[pyclass(name = "IcechunkTableProvider", module = "zarr_datafusion._internal")]
 pub struct PyIcechunkTableProvider {
     table: Arc<ZarrTable>,
+    ctx: Arc<SessionContext>,
 }
 
 #[pymethods]
@@ -57,6 +69,7 @@ impl PyIcechunkTableProvider {
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
         Ok(Self {
             table: Arc::new(table),
+            ctx: Arc::new(SessionContext::new()),
         })
     }
 
@@ -66,7 +79,14 @@ impl PyIcechunkTableProvider {
     ) -> PyResult<Bound<'py, PyCapsule>> {
         let name = CString::new("datafusion_table_provider").unwrap();
         let runtime_handle = get_tokio_runtime().handle().clone();
-        let provider = FFI_TableProvider::new(self.table.clone(), true, Some(runtime_handle));
+        let task_ctx_provider: Arc<dyn TaskContextProvider> = self.ctx.clone();
+        let provider = FFI_TableProvider::new(
+            self.table.clone(),
+            true,
+            Some(runtime_handle),
+            FFI_TaskContextProvider::from(&task_ctx_provider),
+            None,
+        );
         PyCapsule::new(py, provider, Some(name))
     }
 }

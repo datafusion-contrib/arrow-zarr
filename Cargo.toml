@@ -14,8 +14,8 @@ homepage = "https://github.com/datafusion-contrib/arrow-zarr"
 arrow-zarr = { path = "crates/arrow-zarr" }
 
 # Arrow deps
-arrow = { version = "55.2.0" }
-arrow-array = { version = "55.2.0" }
-arrow-schema = { version = "55.2.0" }
-datafusion = { version = "49.0.0" }
+arrow = { version = "58.3.0" }
+arrow-array = { version = "58.3.0" }
+arrow-schema = { version = "58.3.0" }
+datafusion = { version = "54.1.0" }
 tokio = { version = "1.46.1", features = ["rt", "macros", "net", "rt-multi-thread"] }
