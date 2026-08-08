@@ -652,6 +652,7 @@ impl ZarrUrlBuilder {
     }
 
     // Route one namespaced option (`<namespace>.<option>`) to the matching setter.
+    #[cfg_attr(not(any(feature = "s3", feature = "gcs")), allow(unused_variables))]
     fn apply_option(self, key: &str, value: &str) -> DfResult<Self> {
         let (namespace, option) = key.split_once('.').ok_or_else(|| {
             DataFusionError::Execution(format!(
