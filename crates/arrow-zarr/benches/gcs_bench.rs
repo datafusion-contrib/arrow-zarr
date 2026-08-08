@@ -6,13 +6,13 @@ use std::sync::Arc;
 use criterion::{criterion_group, criterion_main, Criterion};
 use datafusion::datasource::listing::ListingTableUrl;
 use futures::{StreamExt, TryStreamExt};
-use icechunk::config::GcsCredentials;
-use icechunk::{ObjectStorage, Repository};
-use object_store::gcp::{GoogleCloudStorage, GoogleCloudStorageBuilder};
-use object_store::path::Path;
-use object_store::ObjectStore;
 use shared::{run_benchmark_group, CloudStorageBenchBackend, TestFixture};
+use zarrs_icechunk::icechunk::config::GcsCredentials;
+use zarrs_icechunk::icechunk::{ObjectStorage, Repository};
 use zarrs_icechunk::AsyncIcechunkStore;
+use zarrs_object_store::object_store::gcp::{GoogleCloudStorage, GoogleCloudStorageBuilder};
+use zarrs_object_store::object_store::path::Path;
+use zarrs_object_store::object_store::ObjectStore;
 
 struct GCSBenchBackend {
     prefix: String,

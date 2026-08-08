@@ -39,17 +39,17 @@ mod test_utils {
     use arrow_array::RecordBatch;
     use arrow_schema::{DataType as ArrowDataType, Field, Schema, SchemaRef};
     use futures::executor::block_on;
-    #[cfg(all(feature = "icechunk", feature = "datafusion"))]
-    use icechunk::{ObjectStorage, Repository};
     use itertools::enumerate;
     use ndarray::{Array, Array1, Array2, Array3, Array4};
-    use object_store::local::LocalFileSystem;
     use walkdir::WalkDir;
     use zarrs::array::data_type::{float64, numpy_datetime64};
     use zarrs::array::{codec, ArrayBuilder, ArraySubset, DataType, Element, FillValue};
     use zarrs::metadata_ext::data_type::NumpyTimeUnit;
     #[cfg(all(feature = "icechunk", feature = "datafusion"))]
+    use zarrs_icechunk::icechunk::{ObjectStorage, Repository};
+    #[cfg(all(feature = "icechunk", feature = "datafusion"))]
     use zarrs_icechunk::AsyncIcechunkStore;
+    use zarrs_object_store::object_store::local::LocalFileSystem;
     use zarrs_object_store::AsyncObjectStore;
     use zarrs_storage::{
         AsyncReadableWritableListableStorageTraits, AsyncWritableStorageTraits, StorePrefix,

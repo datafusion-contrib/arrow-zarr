@@ -22,6 +22,8 @@ pub mod register;
 pub(crate) mod scanner;
 pub(crate) mod table_provider;
 
-pub use config::ZarrTableConfig;
+pub use config::{
+    IcechunkUrlBuilder, IcechunkVersion, ZarrTableConfig, ZarrTableUrl, ZarrUrlBuilder,
+};
 pub use register::RegisterZarr;
 pub use table_provider::{ZarrTable, ZarrTableFactory};

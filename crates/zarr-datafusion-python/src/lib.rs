@@ -1,95 +1,5 @@
-use std::ffi::CString;
-use std::sync::Arc;
-
-use arrow_zarr::table::ZarrTable;
-use datafusion::execution::TaskContextProvider;
 use datafusion::prelude::SessionContext;
-use datafusion_ffi::execution::FFI_TaskContextProvider;
-use datafusion_ffi::table_provider::FFI_TableProvider;
 use pyo3::prelude::*;
-use pyo3::types::PyCapsule;
-
-fn get_tokio_runtime() -> &'static tokio::runtime::Runtime {
-    use std::sync::OnceLock;
-    static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
-    RUNTIME.get_or_init(|| tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime"))
-}
-
-#[pyclass(name = "ZarrTableProvider", module = "zarr_datafusion._internal")]
-pub struct PyZarrTableProvider {
-    table: Arc<ZarrTable>,
-    ctx: Arc<SessionContext>,
-}
-
-#[pymethods]
-impl PyZarrTableProvider {
-    #[new]
-    pub fn new(path: &str) -> PyResult<Self> {
-        let path = path.to_string();
-        let table = get_tokio_runtime()
-            .block_on(async { ZarrTable::from_path(path).await })
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-        Ok(Self {
-            table: Arc::new(table),
-            ctx: Arc::new(SessionContext::new()),
-        })
-    }
-
-    fn __datafusion_table_provider__<'py>(
-        &self,
-        py: Python<'py>,
-    ) -> PyResult<Bound<'py, PyCapsule>> {
-        let name = CString::new("datafusion_table_provider").unwrap();
-        let runtime_handle = get_tokio_runtime().handle().clone();
-        let task_ctx_provider: Arc<dyn TaskContextProvider> = self.ctx.clone();
-        let provider = FFI_TableProvider::new(
-            self.table.clone(),
-            true,
-            Some(runtime_handle),
-            FFI_TaskContextProvider::from(&task_ctx_provider),
-            None,
-        );
-        PyCapsule::new(py, provider, Some(name))
-    }
-}
-
-#[pyclass(name = "IcechunkTableProvider", module = "zarr_datafusion._internal")]
-pub struct PyIcechunkTableProvider {
-    table: Arc<ZarrTable>,
-    ctx: Arc<SessionContext>,
-}
-
-#[pymethods]
-impl PyIcechunkTableProvider {
-    #[new]
-    pub fn new(path: &str) -> PyResult<Self> {
-        let path = path.to_string();
-        let table = get_tokio_runtime()
-            .block_on(async { ZarrTable::from_path_to_icechunk(path).await })
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-        Ok(Self {
-            table: Arc::new(table),
-            ctx: Arc::new(SessionContext::new()),
-        })
-    }
-
-    fn __datafusion_table_provider__<'py>(
-        &self,
-        py: Python<'py>,
-    ) -> PyResult<Bound<'py, PyCapsule>> {
-        let name = CString::new("datafusion_table_provider").unwrap();
-        let runtime_handle = get_tokio_runtime().handle().clone();
-        let task_ctx_provider: Arc<dyn TaskContextProvider> = self.ctx.clone();
-        let provider = FFI_TableProvider::new(
-            self.table.clone(),
-            true,
-            Some(runtime_handle),
-            FFI_TaskContextProvider::from(&task_ctx_provider),
-            None,
-        );
-        PyCapsule::new(py, provider, Some(name))
-    }
-}
 
 #[pyclass(
     name = "GeospatialSessionContext",
@@ -142,9 +52,7 @@ pub struct PyGeospatialSessionContext {
 // }
 
 #[pymodule]
-fn _internal(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<PyZarrTableProvider>()?;
-    m.add_class::<PyIcechunkTableProvider>()?;
+fn _internal(_m: &Bound<'_, PyModule>) -> PyResult<()> {
     //m.add_class::<PyGeospatialSessionContext>()?;
     Ok(())
 }

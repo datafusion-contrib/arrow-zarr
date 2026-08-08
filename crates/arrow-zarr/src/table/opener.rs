@@ -198,7 +198,7 @@ mod file_opener_tests {
     use object_store::local::LocalFileSystem;
 
     use super::*;
-    use crate::table::config::ZarrTableUrl;
+    use crate::table::config::ZarrUrlBuilder;
     use crate::test_utils::{
         get_local_zarr_store, validate_names_and_types, validate_primitive_column,
     };
@@ -207,7 +207,10 @@ mod file_opener_tests {
     async fn filestream_tests() {
         let (wrapper, schema) = get_local_zarr_store(true, 0.0, "data_for_file_opener").await;
         let path = wrapper.get_store_path();
-        let table_url = ZarrTableUrl::ZarrStore(ListingTableUrl::parse(path).unwrap());
+        let table_url = ZarrUrlBuilder::try_new(ListingTableUrl::parse(path).unwrap(), None)
+            .unwrap()
+            .build()
+            .unwrap();
 
         let zarr_config = ZarrTableConfig::new(table_url, schema.clone());
         let zarr_souce = ZarrSource::new(zarr_config, 1, None, ExecutionPlanMetricsSet::default());
