@@ -189,7 +189,7 @@ mod scanner_tests {
     use futures_util::TryStreamExt;
 
     use super::*;
-    use crate::table::config::ZarrTableUrl;
+    use crate::table::config::ZarrUrlBuilder;
     use crate::test_utils::{
         get_local_zarr_store, validate_names_and_types, validate_primitive_column,
     };
@@ -198,7 +198,10 @@ mod scanner_tests {
     async fn read_data_test() {
         let (wrapper, schema) = get_local_zarr_store(true, 0.0, "lat_lon_data_for_scan").await;
         let path = wrapper.get_store_path();
-        let table_url = ZarrTableUrl::ZarrStore(ListingTableUrl::parse(path).unwrap());
+        let table_url = ZarrUrlBuilder::try_new(ListingTableUrl::parse(path).unwrap(), None)
+            .unwrap()
+            .build()
+            .unwrap();
         let config = ZarrTableConfig::new(table_url, schema);
 
         let session = SessionContext::new();
@@ -243,7 +246,10 @@ mod scanner_tests {
         let (wrapper, schema) =
             get_local_zarr_store(true, 0.0, "lat_lon_data_for_scan_with_partition").await;
         let path = wrapper.get_store_path();
-        let table_url = ZarrTableUrl::ZarrStore(ListingTableUrl::parse(path).unwrap());
+        let table_url = ZarrUrlBuilder::try_new(ListingTableUrl::parse(path).unwrap(), None)
+            .unwrap()
+            .build()
+            .unwrap();
         let config = ZarrTableConfig::new(table_url, schema);
 
         let session = SessionContext::new();
@@ -280,16 +286,16 @@ mod scanner_tests {
         use arrow_schema::{Field, Schema};
         use datafusion::common::stats::Precision;
 
-        use crate::table::config::IcechunkVersion;
+        use crate::table::config::IcechunkUrlBuilder;
         use crate::test_utils::get_local_icechunk_repo;
 
         let (wrapper, _schema) =
             get_local_icechunk_repo(true, 0.0, "lat_lon_data_for_scan_stats").await;
         let path = wrapper.get_store_path();
-        let table_url = ZarrTableUrl::IcechunkRepo(
-            ListingTableUrl::parse(path).unwrap(),
-            IcechunkVersion::default(),
-        );
+        let table_url = IcechunkUrlBuilder::try_new(ListingTableUrl::parse(path).unwrap(), None)
+            .unwrap()
+            .build()
+            .unwrap();
         let (inferred_schema, stats_base) = table_url.infer_schema().await.unwrap();
 
         let num_rows = |names: &[&str]| {
@@ -316,16 +322,16 @@ mod scanner_tests {
     #[cfg(feature = "icechunk")]
     #[tokio::test]
     async fn metrics_test() {
-        use crate::table::config::IcechunkVersion;
+        use crate::table::config::IcechunkUrlBuilder;
         use crate::test_utils::get_local_icechunk_repo;
 
         let (wrapper, schema) =
             get_local_icechunk_repo(true, 0.0, "lat_lon_data_for_scan_metrics").await;
         let path = wrapper.get_store_path();
-        let table_url = ZarrTableUrl::IcechunkRepo(
-            ListingTableUrl::parse(path).unwrap(),
-            IcechunkVersion::default(),
-        );
+        let table_url = IcechunkUrlBuilder::try_new(ListingTableUrl::parse(path).unwrap(), None)
+            .unwrap()
+            .build()
+            .unwrap();
         let config = ZarrTableConfig::new(table_url, schema);
 
         let session = SessionContext::new();

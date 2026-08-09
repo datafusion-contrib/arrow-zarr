@@ -11,10 +11,10 @@ rust-version = "1.94"
 
 [features]
 default = []
-icechunk = ["dep:icechunk", "dep:zarrs_icechunk"]
+icechunk = ["dep:zarrs_icechunk"]
 datafusion = ["dep:datafusion"]
-s3 = ["object_store/aws"]
-gcs = ["object_store/gcp"]
+s3 = ["zarrs_object_store/aws"]
+gcs = ["zarrs_object_store/gcp"]
 
 [dependencies]
 arrow = { workspace = true }
@@ -30,7 +30,6 @@ futures-util = { version = "0.3.31" }
 geo-index = "0.3"
 geo-traits = {version = "0.3.0" }
 geo-types = { version = "0.7.18" }
-icechunk = { version = "2.1.1", optional = true }
 itertools = { version = "0.14.0" }
 ndarray = { version = "0.17.1" }
 object_store = { version = "0.13.2" }
