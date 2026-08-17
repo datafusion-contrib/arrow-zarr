@@ -60,12 +60,9 @@ use zarrs_object_store::object_store::local::LocalFileSystem;
 use zarrs_object_store::AsyncObjectStore;
 use zarrs_storage::{AsyncReadableListableStorageTraits, StorePrefix};
 
+use crate::zarr_store_opener::zarr_data_stream::{resolve_vector, ZarrBroadcastableCoordinates};
+
 // Cached, projection-independent ingredients for computing scan statistics.
-//
-// The two maps mirror the reader's two regimes (see `ZarrCoordinates::new`
-// / `resolve_vector` in `zarr_data_stream.rs`): dimension names only trigger
-// when every relevant array is named; with partial or absent names the reader
-// does no broadcasting and simply requires the shapes to match.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ZarrStatsBase {
     column_dim_names: HashMap<String, Vec<String>>,
@@ -100,51 +97,31 @@ impl ZarrStatsBase {
             return Ok(stats);
         }
 
-        let num_rows = if columns
-            .iter()
-            .all(|c| self.column_dim_names.contains_key(*c))
-        {
-            // first case, union the named dimensions and multiply their lengths.
-            // a dim's length is read from the shape of any column that spans it
-            // (the shape entry at the dim's position).
-            let mut dim_lengths: HashMap<&str, u64> = HashMap::new();
-            for c in &columns {
-                for (name, len) in self.column_dim_names[*c]
-                    .iter()
-                    .zip(self.column_dims[*c].iter())
-                {
-                    dim_lengths.insert(name.as_str(), *len);
-                }
-            }
-            dim_lengths.values().product::<u64>()
-        } else {
-            // second case, no broadcasting, so every projected column must share
-            // one shape.
-            let mut shape: Option<&Vec<u64>> = None;
-            for c in &columns {
-                let Some(col_shape) = self.column_dims.get(*c) else {
-                    // every array is recorded in `column_dims` at schema inference,
-                    // and the projection is always a subset of the inferred schema,
-                    // so a missing entry means the stats base and schema are out of sync.
-                    return Err(DataFusionError::Internal(format!(
-                        "zarr stats base is missing shape info for projected column '{c}'"
-                    )));
-                };
-                match shape {
-                    Some(s) if s != col_shape => {
-                        return Err(DataFusionError::Execution(
-                            "Cannot compute zarr statistics: selected arrays without consistent \
-                             dimension names have mismatched shapes"
-                                .into(),
-                        ));
-                    }
-                    _ => shape = Some(col_shape),
-                }
-            }
-            shape
-                .map(|s| s.iter().product::<u64>())
-                .expect("non-empty projection always resolves a shape")
-        };
+        // reuse the reader's classification + resolution so the row count is
+        // broadcast-aware in exactly the same way the scan produces rows.
+        let mut array_dims: HashMap<String, (Option<Vec<String>>, usize)> = HashMap::new();
+        let mut shapes: HashMap<String, Vec<u64>> = HashMap::new();
+        for c in columns {
+            let Some(shape) = self.column_dims.get(c) else {
+                // every array is recorded in `column_dims` at schema inference,
+                // and the projection is always a subset of the inferred schema,
+                // so a missing entry means the stats base and schema are out of sync.
+                return Err(DataFusionError::Internal(format!(
+                    "zarr stats base is missing shape info for projected column '{c}'"
+                )));
+            };
+            array_dims.insert(
+                c.to_string(),
+                (self.column_dim_names.get(c).cloned(), shape.len()),
+            );
+            shapes.insert(c.to_string(), shape.clone());
+        }
+
+        let coords = ZarrBroadcastableCoordinates::new(&array_dims, projected_schema.clone())
+            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+        let resolved =
+            resolve_vector(&coords, shapes).map_err(|e| DataFusionError::External(Box::new(e)))?;
+        let num_rows = resolved.iter().product::<u64>();
 
         Ok(stats.with_num_rows(Precision::Exact(num_rows as usize)))
     }

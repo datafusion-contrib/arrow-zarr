@@ -30,7 +30,7 @@ use arrow_schema::ArrowError;
 use async_stream::try_stream;
 use bytes::Bytes;
 use futures::stream::{BoxStream, Stream};
-use itertools::Itertools;
+use itertools::{izip, Itertools};
 use tokio::sync::mpsc::Receiver;
 use tokio::task::JoinSet;
 use zarrs::array::codec::api::{ArrayToBytesCodecTraits, CodecOptions};
@@ -50,174 +50,82 @@ use super::io_runtime::IoRuntime;
 use super::metrics::ZarrMetrics;
 use super::zarr_errors::{ZarrQueryError, ZarrQueryResult};
 
-/// this function handles having multiple values for a given vector,
-/// one per array, including some arrays that might be lower dimension
-/// coordinates.
-fn resolve_vector(
-    coords: &ZarrCoordinates,
-    vecs: HashMap<String, Vec<u64>>,
-) -> ZarrQueryResult<Vec<u64>> {
-    let mut final_vec: Option<Vec<u64>> = None;
-    for (k, vec) in vecs.iter() {
-        if let Some(final_vec) = &final_vec {
-            if let Some(pos) = coords.get_coord_position(k) {
-                // if we have a vector (from a previous non coordinate array),
-                // and this current array is a coordinate array, its one vector
-                // element must match the array element in the previous vector at
-                // the position of the cooridnate.
-                //
-                // for example, if the vector from the non coordinate array is [l, m, n],
-                // and this current array is the coordinate for the second dimension, it
-                // must be a 1D array of length m.
-                if final_vec[pos] != vec[0] {
-                    return Err(ZarrQueryError::InvalidMetadata(
-                        "Mismatch between vectors for different arrays".into(),
-                    ));
-                }
-
-            // if the current array is not a coordinate, it must match the
-            // final vector we have extracted from a previous array.
-            } else if final_vec != vec {
-                return Err(ZarrQueryError::InvalidMetadata(
-                    "Mismatch between vectors for different arrays".into(),
-                ));
-            }
-
-        // if this is the first array we see, we simply record that.
-        } else if !coords.is_coordinate(k) {
-            final_vec = Some(vec.clone());
-        }
-    }
-
-    if let Some(final_vec) = final_vec {
-        Ok(final_vec)
-    // the else branch here would happen if all the arrays are coordinates.
-    } else {
-        let mut final_vec: Vec<u64> = vec![0; coords.coord_positions.len()];
-        for (k, p) in coords.coord_positions.iter() {
-            final_vec[*p] = vecs.get(k).ok_or(ZarrQueryError::InvalidColumnRequest(
-                "Array is missing from array map".into(),
-            ))?[0];
-        }
-        Ok(final_vec)
-    }
-}
-
-/// A struct to handle coordinate variables, and "broadcasting" them when reading
-/// multidimensional data.
+/// A struct to handle 1-D coordinate arrays stored in reduced form, and
+/// "broadcasting" them up to the full chunk shape when reading multidimensional
+/// data. An already-broadcast N-D coordinate (e.g. a 2-D `lat` with dimensions
+/// `[lat, lon]`) is not tracked here.
 #[derive(Debug)]
-struct ZarrCoordinates {
-    // the position of each coordinate in the overall chunk shape.
-    // the coordinates are arrays that contain data that characterizes
-    // a dimension, such as time, or a longitude or latitude.
+pub(crate) struct ZarrBroadcastableCoordinates {
+    // the position of each broadcastable coordinate in the overall chunk shape.
+    // the coordinates are arrays that contain data that characterizes a
+    // dimension, such as time, or a longitude or latitude.
     coord_positions: HashMap<String, usize>,
 }
 
-impl ZarrCoordinates {
-    fn new<T: ?Sized>(
-        arrays: &HashMap<String, Array<T>>,
+impl ZarrBroadcastableCoordinates {
+    /// Build the coordinate map from each array's dimensionality and (optional)
+    /// dimension names. Taking cached `(dim_names, ndim)` metadata rather than the
+    /// live arrays lets the planning-time statistics reuse this classification.
+    pub(crate) fn new(
+        array_dims: &HashMap<String, (Option<Vec<String>>, usize)>,
         schema_ref: SchemaRef,
     ) -> ZarrQueryResult<Self> {
-        // the goal of these "coordinates" is to determine what needs
-        // to be broadcasted from 1D to ND depending on what columns
-        // were selected. based on what is a broadcastable coordinate
-        // and its position in the overall chunk dimensionality, we
-        // can combine a 1D array with ND arrays later on.
-        let mut coord_positions: HashMap<String, usize> = HashMap::new();
+        // classify each array. a "broadcastable coordinate" is a 1-D array that
+        // names its own single dimension; it is stored reduced and must be
+        // broadcast up to the full chunk shape. every other array (data, or an
+        // already-broadcast N-D coordinate) is a "full" array that already spans
+        // the chunk. the full arrays that carry dimension names must all agree,
+        // and that shared order is what we position the coordinates within.
+        let mut coords: Vec<String> = Vec::new();
+        let mut dim_order: Option<Vec<String>> = None;
+        let mut unnamed_multidim = false;
 
-        // this is pretty messy, but essentially for each array we extract its
-        // dimentionality and its dimension. we allow for an array to not have
-        // dimensions, but not to have dimensions without a name.
-        let arr_dims = arrays
-            .iter()
-            .map(|(k, v)| {
-                (
-                    k,
-                    v.dimensionality(),
-                    v.dimension_names()
-                        .clone()
-                        .map(|vec| {
-                            vec.into_iter().collect::<Option<Vec<_>>>().ok_or(
-                                ZarrQueryError::InvalidMetadata(
-                                    "Null dimension names not supported".into(),
-                                ),
-                            )
-                        })
-                        .transpose(),
-                )
-            })
-            .map(|(k, d, res)| res.map(|names| (k, d, names)))
-            .collect::<ZarrQueryResult<Vec<(&String, usize, Option<Vec<String>>)>>>()?;
-
-        // first case to check, do all the arrays have the same
-        // dimensionality?
-        let mut ordered_dim_names: Option<Vec<String>> = None;
-        if arr_dims.windows(2).all(|w| w[0].1 == w[1].1) {
-            // this is the case where all the arrays are coordinates,
-            // so we determine the broadcasting order from the schema.
-            if arr_dims.iter().all(|d| Some(vec![d.0.clone()]) == d.2) {
-                ordered_dim_names = Some(
-                    schema_ref
-                        .fields
-                        .into_iter()
-                        .map(|f| f.name().to_string())
-                        .collect(),
-                );
-            // this is the case where there is a mix of data and
-            // coordinates (including no coordinates), but all the
-            // coordinates are already stored as broadcasted arrays,
-            // so there is no need to do anything later on.
-            } else {
-                return Ok(Self { coord_positions });
-            }
-        }
-
-        // if we didn't hit the above conditions, then the arrays
-        // have mixed dimensionality. we extract the chunk dimension
-        // names, which must be consistent across all arrays (that
-        // are not broadcastable coordinates).
-        if ordered_dim_names.is_none() {
-            for d in &arr_dims {
-                if d.1 != 1 {
-                    let d = d.2.clone();
-                    let arr_dim_names: Vec<_> = d.ok_or(ZarrQueryError::InvalidMetadata(
-                        "With mixed array dimensionality, dimension names are required".into(),
-                    ))?;
-
-                    if let Some(ordered_dim_names) = &ordered_dim_names {
-                        if *ordered_dim_names != arr_dim_names {
-                            return Err(ZarrQueryError::InvalidMetadata(
-                                "Dimension names must be consistent across arrays".into(),
-                            ));
-                        }
-                    } else {
-                        ordered_dim_names = Some(arr_dim_names);
+        for (name, (names, ndim)) in array_dims {
+            if *ndim == 1 && names.as_deref() == Some(std::slice::from_ref(name)) {
+                coords.push(name.clone());
+            } else if let Some(names) = names {
+                match &dim_order {
+                    Some(existing) if existing != names => {
+                        return Err(ZarrQueryError::InvalidMetadata(
+                            "Dimension names must be consistent across arrays".into(),
+                        ));
                     }
+                    _ => dim_order = Some(names.clone()),
                 }
+            } else if *ndim > 1 {
+                // a multi-dim array without dimension names leaves us no way to
+                // place coordinates onto its axes.
+                unnamed_multidim = true;
             }
         }
 
-        // for each 1D array, we check that it is a coordinate, it has
-        // to be at this point in the function, and find its position
-        // in the chunk dimension names.
-        let ordered_dim_names = ordered_dim_names.ok_or(ZarrQueryError::InvalidMetadata(
-            "With mixed array dimensionality, dimension names are required".into(),
-        ))?;
-        for d in arr_dims {
-            if d.1 == 1 {
-                if Some(vec![d.0.clone()]) != d.2 {
-                    return Err(ZarrQueryError::InvalidMetadata(
-                        "With mixed array dimensionality, 1D arrays must be coordinates".into(),
-                    ));
-                }
-                let pos = ordered_dim_names.iter().position(|dim| dim == d.0).ok_or(
+        let mut coord_positions: HashMap<String, usize> = HashMap::new();
+        if coords.is_empty() {
+            // nothing to broadcast.
+        } else if unnamed_multidim {
+            return Err(ZarrQueryError::InvalidMetadata(
+                "With mixed array dimensionality, dimension names are required".into(),
+            ));
+        } else if coords.len() == array_dims.len() {
+            // every array is a coordinate: the chunk dimensionality equals the
+            // number of coordinates, so we take their order from the schema.
+            for (pos, field) in schema_ref.fields().iter().enumerate() {
+                coord_positions.insert(field.name().to_string(), pos);
+            }
+        } else if let Some(dim_order) = dim_order {
+            // a named full array is present, so the shared dimension order is
+            // known. place each coordinate within it.
+            for coord in coords {
+                let pos = dim_order.iter().position(|d| d == &coord).ok_or(
                     ZarrQueryError::InvalidMetadata(
                         "Could not find coordinate in dimension names".into(),
                     ),
                 )?;
-                coord_positions.insert(d.0.clone(), pos);
+                coord_positions.insert(coord, pos);
             }
         }
+        // otherwise the only non-coordinate arrays are 1-D and unnamed, so the
+        // output is 1-D and nothing needs broadcasting.
 
         Ok(Self { coord_positions })
     }
@@ -287,7 +195,7 @@ impl ZarrCoordinates {
 struct ArrayInterface<T: AsyncReadableListableStorageTraits + ?Sized> {
     name: String,
     arr: Arc<Array<T>>,
-    coords: Arc<ZarrCoordinates>,
+    coords: Arc<ZarrBroadcastableCoordinates>,
     full_chunk_shape: Vec<u64>,
     chk_index: Vec<u64>,
 }
@@ -307,11 +215,22 @@ enum BytesFromArray {
     Encoded(Option<Bytes>),
 }
 
+// arrow's timestamp/duration types can't represent a scale factor other than 1,
+// so we reject anything else rather than silently reading wrong values.
+fn ensure_unit_scale(t: &zDataType, scale_factor: u32) -> ZarrQueryResult<()> {
+    if scale_factor != 1 {
+        return Err(ZarrQueryError::InvalidType(format!(
+            "Unsupported scale factor {scale_factor} for type {t} from zarr metadata"
+        )));
+    }
+    Ok(())
+}
+
 impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ArrayInterface<T> {
     fn new(
         name: String,
         arr: Arc<Array<T>>,
-        coords: Arc<ZarrCoordinates>,
+        coords: Arc<ZarrBroadcastableCoordinates>,
         full_chunk_shape: Vec<u64>,
         mut chk_index: Vec<u64>,
     ) -> Self {
@@ -341,12 +260,8 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ArrayInterface<T>
 
             // determine the real size for each of the dimensions (at least
             // one of which will be at the edge of the array.)
-            let ranges: Vec<_> = self
-                .chk_index
-                .iter()
-                .zip(arr_shape.iter())
-                .zip(chunk_shape.iter())
-                .map(|((i, a), c)| 0..(std::cmp::min(a - i * c, *c)))
+            let ranges: Vec<_> = izip!(&self.chk_index, arr_shape.iter(), chunk_shape.iter())
+                .map(|(i, a, c)| 0..min(a - i * c, *c))
                 .collect();
 
             let array_subset = ArraySubset::new_with_ranges(&ranges);
@@ -389,10 +304,7 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ArrayInterface<T>
                     let chk_shp = self
                         .coords
                         .reduce_if_coord(self.full_chunk_shape.clone(), &self.name);
-                    let num_elems = chk_shp.iter().fold(1, |mut acc, x| {
-                        acc *= x;
-                        acc
-                    });
+                    let num_elems = chk_shp.iter().product::<u64>();
                     ArrayBytes::new_fill_value(
                         self.arr.data_type(),
                         num_elems,
@@ -475,17 +387,6 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ArrayInterface<T>
     }
 }
 
-// arrow's timestamp/duration types can't represent a scale factor other than 1,
-// so we reject anything else rather than silently reading wrong values.
-fn ensure_unit_scale(t: &zDataType, scale_factor: u32) -> ZarrQueryResult<()> {
-    if scale_factor != 1 {
-        return Err(ZarrQueryError::InvalidType(format!(
-            "Unsupported scale factor {scale_factor} for type {t} from zarr metadata"
-        )));
-    }
-    Ok(())
-}
-
 /// A structure to accumulate zarr array data until we can output
 /// the whole chunk as a record batch.
 struct ZarrInMemoryChunk {
@@ -507,43 +408,33 @@ impl ZarrInMemoryChunk {
         self.data.extend(other.data);
     }
 
+    /// gather the chunk's arrays in schema-field order, each paired with its
+    /// name, erroring if any field's array is missing from the chunk.
+    fn columns_in_schema_order(&self, schema: &Schema) -> ZarrQueryResult<Vec<(String, ArrayRef)>> {
+        schema
+            .fields()
+            .iter()
+            .map(|f| {
+                let ar = self.data.get(f.name()).cloned().ok_or(
+                    ZarrQueryError::InvalidColumnRequest("Array missing from array map".into()),
+                )?;
+                Ok((f.name().to_string(), ar))
+            })
+            .collect()
+    }
+
     /// this checks if any "row" in the chunk passes the filter
     /// condition. this function does not consume the chunk.
     fn check_filter(&self, filter: &ZarrChunkFilter) -> Result<bool, ArrowError> {
-        let array_refs: Vec<(String, ArrayRef)> = filter
-            .schema_ref()
-            .fields()
-            .iter()
-            .map(|f| self.data.get(f.name()).cloned())
-            .collect::<Option<Vec<ArrayRef>>>()
-            .ok_or(ZarrQueryError::InvalidColumnRequest(
-                "Array missing from array map".into(),
-            ))?
-            .into_iter()
-            .zip(filter.schema_ref().fields.iter())
-            .map(|(ar, f)| (f.name().to_string(), ar))
-            .collect();
-
+        let array_refs = self.columns_in_schema_order(filter.schema_ref())?;
         let rec_batch = RecordBatch::try_from_iter(array_refs)?;
         filter.evaluate(&rec_batch)
     }
 
     /// the columns in the record batch will be ordered following
     /// the field names in the schema.
-    fn into_record_batch(mut self, schema: &SchemaRef) -> ZarrQueryResult<RecordBatch> {
-        let array_refs: Vec<(String, ArrayRef)> = schema
-            .fields()
-            .iter()
-            .map(|f| self.data.remove(f.name()))
-            .collect::<Option<Vec<ArrayRef>>>()
-            .ok_or(ZarrQueryError::InvalidColumnRequest(
-                "Array missing from array map".into(),
-            ))?
-            .into_iter()
-            .zip(schema.fields.iter())
-            .map(|(ar, f)| (f.name().to_string(), ar))
-            .collect();
-
+    fn into_record_batch(self, schema: &SchemaRef) -> ZarrQueryResult<RecordBatch> {
+        let array_refs = self.columns_in_schema_order(schema)?;
         RecordBatch::try_from_iter(array_refs).map_err(|e| ZarrQueryError::External(Box::new(e)))
     }
 }
@@ -551,15 +442,79 @@ impl ZarrInMemoryChunk {
 /// A wrapper for a map of arrays, which will handle interleaving
 /// reading and decoding data from zarr storage.
 type ZarrReceiver<T> = Receiver<(ZarrQueryResult<BytesFromArray>, ArrayInterface<T>)>;
+
 struct ZarrStore<T: AsyncReadableListableStorageTraits + ?Sized> {
     arrays: HashMap<String, Arc<Array<T>>>,
-    coordinates: Arc<ZarrCoordinates>,
+    coordinates: Arc<ZarrBroadcastableCoordinates>,
     chunk_shape: Vec<u64>,
     chunk_grid_shape: Vec<u64>,
     array_shape: Vec<u64>,
     io_runtime: IoRuntime,
     join_set: JoinSet<()>,
     state: Option<(ZarrReceiver<T>, Vec<u64>, Vec<String>)>,
+}
+
+/// this function handles vectors that have 1 value for each dimension
+/// of the array. some of those vectors can correspond to coordinates,
+/// which are 1D arrays and therefore will only have 1 element in this
+/// vector.
+pub(crate) fn resolve_vector(
+    coords: &ZarrBroadcastableCoordinates,
+    vecs: HashMap<String, Vec<u64>>,
+) -> ZarrQueryResult<Vec<u64>> {
+    let mismatch =
+        || ZarrQueryError::InvalidMetadata("Mismatch between vectors for different arrays".into());
+
+    // the full vector comes from the non-coordinate arrays; they must all agree.
+    let mut final_vec: Option<&Vec<u64>> = None;
+    for (k, vec) in &vecs {
+        if !coords.is_coordinate(k) {
+            match final_vec {
+                Some(fv) if fv != vec => return Err(mismatch()),
+                _ => final_vec = Some(vec),
+            }
+        }
+    }
+
+    if let Some(final_vec) = final_vec {
+        // each coordinate is 1D; its single element must match the full vector
+        // at the coordinate's position in the chunk dimensionality. for example,
+        // if the full vector is [l, m, n] and this array is the coordinate for the
+        // second dimension, it must be a 1D array whose one element equals m.
+        for (k, vec) in &vecs {
+            if let Some(pos) = coords.get_coord_position(k) {
+                if final_vec[pos] != vec[0] {
+                    return Err(mismatch());
+                }
+            }
+        }
+        Ok(final_vec.clone())
+    // the else branch here happens if all the arrays are coordinates.
+    } else {
+        let mut final_vec: Vec<u64> = vec![0; coords.coord_positions.len()];
+        for (k, p) in coords.coord_positions.iter() {
+            final_vec[*p] = vecs.get(k).ok_or(ZarrQueryError::InvalidColumnRequest(
+                "Array is missing from array map".into(),
+            ))?[0];
+        }
+        Ok(final_vec)
+    }
+}
+
+/// collect an array's dimension names, returning `None` when the array carries
+/// no dimension-name metadata and erroring if any individual name is null.
+fn dim_names<T: ?Sized>(arr: &Array<T>) -> ZarrQueryResult<Option<Vec<String>>> {
+    arr.dimension_names()
+        .clone()
+        .map(|names| {
+            names
+                .into_iter()
+                .collect::<Option<Vec<_>>>()
+                .ok_or(ZarrQueryError::InvalidMetadata(
+                    "Null dimension names not supported".into(),
+                ))
+        })
+        .transpose()
 }
 
 impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrStore<T> {
@@ -583,8 +538,14 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrStore<T> {
             arrays.insert(col.to_string(), arr);
         }
 
-        // determine which column, if any, represents a coordinate.
-        let coordinates = ZarrCoordinates::new(&arrays, schema_ref)?;
+        // determine which column, if any, represents a coordinate. the
+        // classification only needs each array's dimension names and its
+        // dimensionality, so we hand it that cached metadata.
+        let arr_dims: HashMap<String, (Option<Vec<String>>, usize)> = arrays
+            .iter()
+            .map(|(k, arr)| Ok((k.clone(), (dim_names(arr)?, arr.dimensionality()))))
+            .collect::<ZarrQueryResult<_>>()?;
+        let coordinates = ZarrBroadcastableCoordinates::new(&arr_dims, schema_ref)?;
 
         // technically getting the chunk shape requires a chunk
         // index, but it seems the zarrs library doesn't actually
@@ -656,13 +617,14 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrStore<T> {
         chk_idx: Vec<u64>,
     ) -> ZarrQueryResult<Vec<ArrayInterface<T>>> {
         let full_chunk_shape = self.get_chunk_shape(&chk_idx)?;
-        let arr_interfaces = cols
-            .iter()
+        cols.iter()
             .map(|col| {
                 let arr = self
                     .arrays
                     .get(col)
-                    .ok_or_else(|| ZarrQueryError::InvalidCompute("".into()))?
+                    .ok_or_else(|| {
+                        ZarrQueryError::InvalidCompute(format!("Array '{col}' not found in store"))
+                    })?
                     .clone();
                 Ok(ArrayInterface::new(
                     col.to_string(),
@@ -672,9 +634,49 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrStore<T> {
                     chk_idx.clone(),
                 ))
             })
-            .collect::<ZarrQueryResult<Vec<_>>>()
-            .unwrap();
-        Ok(arr_interfaces)
+            .collect()
+    }
+
+    /// spawn a read task per array interface on the I/O runtime, returning the
+    /// receiver that yields each (read result, interface) pair as it completes.
+    /// the reads run in parallel with each other and with the decoding the
+    /// caller does while draining the receiver.
+    fn spawn_reads(
+        &mut self,
+        interfaces: Vec<ArrayInterface<T>>,
+        metrics: &ZarrMetrics,
+    ) -> ZarrReceiver<T> {
+        let (tx, rx) = tokio::sync::mpsc::channel(interfaces.len());
+        for arr_interface in interfaces {
+            let tx = tx.clone();
+            let metrics = metrics.clone();
+            let io_task = async move {
+                let read_start = Instant::now();
+                let b = arr_interface.read_bytes().await;
+                metrics.add_io_time(read_start.elapsed());
+                let _ = tx.send((b, arr_interface)).await;
+            };
+            self.join_set.spawn_on(io_task, self.io_runtime.handle());
+        }
+        rx
+    }
+
+    /// drain a receiver of read results, decoding each array on the compute side
+    /// as it arrives and accumulating it into the chunk. decoding one array
+    /// overlaps with the still-in-flight reads of the others.
+    async fn drain_decode(
+        mut rx: ZarrReceiver<T>,
+        metrics: &ZarrMetrics,
+        chk_data: &mut ZarrInMemoryChunk,
+    ) -> ZarrQueryResult<()> {
+        while let Some((bytes, arr_interface)) = rx.recv().await {
+            let bytes = bytes?;
+            let decode_start = Instant::now();
+            let data = arr_interface.decode_data(bytes)?;
+            metrics.add_decode_time(decode_start.elapsed());
+            chk_data.add_data(arr_interface.name, data);
+        }
+        Ok(())
     }
 
     /// this is the main function that does the heavy lifting, getting
@@ -694,83 +696,41 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrStore<T> {
         }
         let mut chk_data = ZarrInMemoryChunk::new();
 
-        // if there is a cached zarr chunk that was triggered from the
-        // previous call, we use that.
-        if use_cached_value & self.state.is_some() {
-            let (mut rx, cached_idx, cached_cols) = self
+        // obtain the receiver for this chunk's reads: either the one prefetched
+        // by the previous call (if it matches what we're asked for), or a fresh
+        // batch of reads spawned now. spawning all the reads up front lets the
+        // decoding below overlap with the still-in-flight reads.
+        let cache_hit = use_cached_value && self.state.is_some();
+        let rx = if cache_hit {
+            let (rx, cached_idx, cached_cols) = self
                 .state
                 .take()
-                .expect("Cached zarr received unexpectedly available");
-            if chk_idx != cached_idx {
+                .expect("cache hit implies state is present");
+            if cached_idx != chk_idx {
                 return Err(ZarrQueryError::InvalidCompute(
                     "Cached zarr chunk index doesn't match requested chunk index".into(),
                 ));
             }
-
-            if cols != cached_cols {
+            if cached_cols != cols {
                 return Err(ZarrQueryError::InvalidCompute(
                     "Cached zarr chunk columns don't match requested columns".into(),
                 ));
             }
-
-            while let Some((data, arr_interface)) = rx.recv().await {
-                let data = data?;
-                let decode_start = Instant::now();
-                let data = arr_interface.decode_data(data)?;
-                metrics.add_decode_time(decode_start.elapsed());
-                chk_data.add_data(arr_interface.name, data);
-            }
-        }
-        // if we are either not pre reading data, or we are but
-        // this is the first call and there is no cached data yet,
-        // we read the data now and wait for it to be ready.
-        else {
-            let arr_interfaces = self.get_array_interfaces(cols.clone(), chk_idx)?;
-            let (tx, mut rx) = tokio::sync::mpsc::channel(arr_interfaces.len());
-            for arr_interface in arr_interfaces {
-                let tx_copy = tx.clone();
-                let io_metrics = metrics.clone();
-                let io_task = async move {
-                    let read_start = Instant::now();
-                    let b = arr_interface.read_bytes().await;
-                    io_metrics.add_io_time(read_start.elapsed());
-                    let _ = tx_copy.send((b, arr_interface)).await;
-                };
-                self.join_set.spawn_on(io_task, self.io_runtime.handle());
-
-                if let Some((Ok(d), arr_int)) = rx.recv().await {
-                    let decode_start = Instant::now();
-                    let data = arr_int.decode_data(d)?;
-                    metrics.add_decode_time(decode_start.elapsed());
-                    chk_data.add_data(arr_int.name, data);
-                } else {
-                    return Err(ZarrQueryError::InvalidCompute(
-                        "Unable to retrieve decoded chunk".into(),
-                    ));
-                }
-            }
+            rx
+        } else {
+            let interfaces = self.get_array_interfaces(cols.clone(), chk_idx.clone())?;
+            self.spawn_reads(interfaces, metrics)
         };
+        Self::drain_decode(rx, metrics, &mut chk_data).await?;
 
-        // if the call was made with an index for the next chunk, we
-        // submit a job to read that next chunk before returning,
-        // so that we can fetch the data while other operations run
-        // between now and the next call to this function.
+        // if the call was made with an index for the next chunk, we submit a job
+        // to read that next chunk before returning, so that we can fetch the data
+        // while other operations run between now and the next call.
         if let Some(next_chunk_idx) = next_chunk_idx {
-            let arr_interfaces = self.get_array_interfaces(cols.clone(), next_chunk_idx.clone())?;
-            let (tx, rx) = tokio::sync::mpsc::channel(arr_interfaces.len());
-            for arr_interface in arr_interfaces {
-                let tx_copy = tx.clone();
-                let io_metrics = metrics.clone();
-                let io_task = async move {
-                    let read_start = Instant::now();
-                    let b = arr_interface.read_bytes().await;
-                    io_metrics.add_io_time(read_start.elapsed());
-                    let _ = tx_copy.send((b, arr_interface)).await;
-                };
-                self.join_set.spawn_on(io_task, self.io_runtime.handle());
-            }
+            let interfaces = self.get_array_interfaces(cols.clone(), next_chunk_idx.clone())?;
+            let rx = self.spawn_reads(interfaces, metrics);
             self.state = Some((rx, next_chunk_idx, cols));
-        };
+        }
 
         Ok(chk_data)
     }
@@ -778,16 +738,28 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrStore<T> {
 
 /// A stream of RecordBatches read from a Zarr store.
 ///
-/// This struct is separate from `ZarrRecordBatchStream`, so that we can avoid manually
-/// implementing [`Stream`]. Instead, we use the `async-stream` crate to convert an async iterable
-/// into a stream.
+/// This struct is separate from `ZarrRecordBatchStream`, so that we
+/// can avoid manually implementing [`Stream`]. Instead, we use the
+/// `async-stream` crate to convert an async iterable into a stream.
 struct ZarrRecordBatchStreamInner<T: AsyncReadableListableStorageTraits + ?Sized> {
-    zarr_store: Arc<ZarrStore<T>>,
+    zarr_store: ZarrStore<T>,
     projected_schema_ref: SchemaRef,
-    schema_without_filter_cols: Option<SchemaRef>,
-    filter: Option<ZarrChunkFilter>,
+    // when a filter is set it is bundled with the schema of the
+    // projected columns that are *not* in the filter predicate (i.e.
+    // the columns still to read once a chunk passes). either both
+    // are present or neither is.
+    filter: Option<(ZarrChunkFilter, SchemaRef)>,
     chunk_indices: VecDeque<Vec<u64>>,
     metrics: ZarrMetrics,
+}
+
+/// collect the column (array) names from a schema's fields.
+fn column_names(schema: &Schema) -> Vec<String> {
+    schema
+        .fields()
+        .iter()
+        .map(|f| f.name().to_owned())
+        .collect()
 }
 
 impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrRecordBatchStreamInner<T> {
@@ -839,9 +811,8 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrRecordBatchSt
 
         // create the zarr store object that will have access to all
         // the data stored in it.
-        let zarr_store = Arc::new(
-            ZarrStore::new(&cols, &prefix, store.clone(), projected_schema_ref.clone()).await?,
-        );
+        let zarr_store =
+            ZarrStore::new(&cols, &prefix, store.clone(), projected_schema_ref.clone()).await?;
 
         // this creates all the chunk indices we will be reading from.
         let chk_grid_shape = &zarr_store.chunk_grid_shape;
@@ -871,7 +842,6 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrRecordBatchSt
             projected_schema_ref,
             filter: None,
             chunk_indices,
-            schema_without_filter_cols: None,
             metrics,
         })
     }
@@ -897,27 +867,21 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrRecordBatchSt
         // wall-clock timer for the whole batch-producing body.
         let total_start = Instant::now();
 
-        let mut chunk_index: Option<Vec<u64>> = None;
+        let mut chunk_index = self.pop_chunk_idx();
         let mut filter_zarr_chunk: Option<ZarrInMemoryChunk> = None;
 
         let filter = self.filter.take();
-        if let Some(filter) = filter {
+        if let Some((filter, schema_without_filter_cols)) = filter {
             let mut filter_passed = false;
             while !filter_passed {
-                chunk_index = self.pop_chunk_idx();
-                if let Some(chunk_index) = &chunk_index {
+                if let Some(idx) = &chunk_index {
                     let next_chnk_idx = self.see_chunk_idx();
-                    let column_names: Vec<_> = filter
-                        .schema_ref()
-                        .fields()
-                        .iter()
-                        .map(|f| f.name().to_owned())
-                        .collect();
-                    let zarr_chunk = Arc::get_mut(&mut self.zarr_store)
-                        .expect("Zarr store pointer unexpectedly not unique")
+                    let column_names = column_names(filter.schema_ref());
+                    let zarr_chunk = self
+                        .zarr_store
                         .get_chunk(
                             column_names,
-                            chunk_index.clone(),
+                            idx.clone(),
                             true,
                             next_chnk_idx,
                             &self.metrics,
@@ -925,45 +889,34 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrRecordBatchSt
                         .await?;
                     filter_passed = zarr_chunk.check_filter(&filter)?;
                     filter_zarr_chunk = Some(zarr_chunk);
+                    // advance to the next candidate only if this one didn't pass;
+                    // on a pass we keep chunk_index pointing at the passing chunk.
+                    if !filter_passed {
+                        chunk_index = self.pop_chunk_idx();
+                    }
                 } else {
                     filter_passed = true;
                 }
             }
-            self.filter = Some(filter);
-        } else {
-            chunk_index = self.pop_chunk_idx();
+            self.filter = Some((filter, schema_without_filter_cols));
         }
 
         if let Some(chunk_index) = chunk_index {
             let mut zarr_chunk;
-            if self.filter.is_some() {
+            if let Some((_, schema_without_filter_cols)) = &self.filter {
                 let filter_zarr_chunk = filter_zarr_chunk.expect("Filter zarr chunk missing.");
-                let schema = self
-                    .schema_without_filter_cols
-                    .as_ref()
-                    .expect("Schema without filter columns is missing.");
-
-                let column_names: Vec<_> = schema
-                    .fields()
-                    .iter()
-                    .map(|f| f.name().to_owned())
-                    .collect();
-                zarr_chunk = Arc::get_mut(&mut self.zarr_store)
-                    .expect("Zarr store pointer unexpectedly not unique")
+                let column_names = column_names(schema_without_filter_cols);
+                zarr_chunk = self
+                    .zarr_store
                     .get_chunk(column_names, chunk_index, false, None, &self.metrics)
                     .await?;
                 zarr_chunk.combine(filter_zarr_chunk);
             } else {
                 let next_chnk_idx = self.see_chunk_idx();
-                let column_names: Vec<_> = self
-                    .projected_schema_ref
-                    .fields()
-                    .iter()
-                    .map(|f| f.name().to_owned())
-                    .collect();
+                let column_names = column_names(&self.projected_schema_ref);
 
-                zarr_chunk = Arc::get_mut(&mut self.zarr_store)
-                    .expect("Zarr store pointer unexpectedly not unique")
+                zarr_chunk = self
+                    .zarr_store
                     .get_chunk(
                         column_names,
                         chunk_index,
@@ -1027,11 +980,10 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrRecordBatchSt
             .filter(|f| filter.schema_ref().index_of(f.name()).is_err())
             .cloned()
             .collect();
-        let schema = Schema::new(fields);
-        self.schema_without_filter_cols = Some(Arc::new(schema));
+        let schema_without_filter_cols = Arc::new(Schema::new(fields));
 
-        // set the filter on the inner stream.
-        self.filter = Some(filter);
+        // set the filter (bundled with that schema) on the inner stream.
+        self.filter = Some((filter, schema_without_filter_cols));
 
         Ok(self)
     }
