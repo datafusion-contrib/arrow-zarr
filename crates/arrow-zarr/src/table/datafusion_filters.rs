@@ -138,11 +138,9 @@ pub fn create_zarr_chunk_filter(
         Vec::with_capacity(predicate_exprs.len());
     let mut schema_indices: Vec<usize> = Vec::new();
 
-    // we don't bother reorganizing filters to start with the cheaper ones
-    // before we do the more expensive ones. in terms of the amount of data
-    // read, it's the same for all the chunks. some operations might be
-    // cheaper to check (computationally), not sure how e.g. the parquet
-    // case handles this, I might revisit later to optimize things a bit.
+    // the order of the predicates doesn't matter, the reader reads
+    // all filter columns for a chunk in one go, so there's nothing
+    // to gain from putting cheaper/more-selective ones first.
     for pred_expr in predicate_exprs {
         let filter_expr = ZarrFilterExpression::new(pred_expr.clone(), table_schema.clone())?;
         schema_indices.extend(filter_expr.required_columns.clone());
@@ -214,6 +212,48 @@ mod filter_tests {
         let mask = filter.evaluate(&batch).unwrap();
 
         assert_eq!(mask, vec![false, false, false, false, true, true].into());
+    }
+
+    #[test]
+    fn test_filter_with_nulls() {
+        // nullable columns, with rows where a is null, b is null, both are
+        // null, and three fully-populated rows.
+        let schema = Schema::new(vec![
+            Field::new("a", DataType::Int32, true),
+            Field::new("b", DataType::Int32, true),
+        ]);
+        let a = Int32Array::from(vec![None, Some(5), None, Some(10), Some(20), Some(1)]);
+        let b = Int32Array::from(vec![Some(3), None, None, Some(5), Some(1), Some(100)]);
+        let batch =
+            RecordBatch::try_new(Arc::new(schema.clone()), vec![Arc::new(a), Arc::new(b)]).unwrap();
+
+        // two comparisons so that `split_conjunction` yields two predicates and
+        // the chunk filter's AND-combine path (where the null handling lives) is
+        // actually exercised;
+        // expression: "a > b AND a >= b"
+        let gt = binary(
+            col("a", &schema).unwrap(),
+            Operator::Gt,
+            col("b", &schema).unwrap(),
+            &schema,
+        )
+        .unwrap();
+        let ge = binary(
+            col("a", &schema).unwrap(),
+            Operator::GtEq,
+            col("b", &schema).unwrap(),
+            &schema,
+        )
+        .unwrap();
+        let expr = binary(gt, Operator::And, ge, &schema).unwrap();
+
+        let chunk_filter =
+            create_zarr_chunk_filter(&Arc::new(expr), Arc::new(schema.clone())).unwrap();
+
+        // rows 3 and 4 satisfy both comparisons, so the chunk passes. the rows
+        // with nulls must be treated as "does not pass" rather than panicking.
+        let filter_passed = chunk_filter.evaluate(&batch).unwrap();
+        assert!(filter_passed);
     }
 
     #[test]

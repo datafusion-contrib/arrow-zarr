@@ -15,9 +15,9 @@
 // specific language governing permissions and limitations
 // under the License.
 
+use arrow::compute::and_kleene;
 use arrow_array::{BooleanArray, RecordBatch};
 use arrow_schema::{ArrowError, SchemaRef};
-use itertools::Itertools;
 
 /// A predicate operating on [`RecordBatch`].
 pub trait ZarrArrowPredicate: Send + 'static {
@@ -62,23 +62,20 @@ impl ZarrChunkFilter {
         let mut bool_arr: Option<BooleanArray> = None;
         for predicate in self.predicates.iter() {
             let mask = predicate.evaluate(rec_batch)?;
-            if let Some(old_bool_arr) = bool_arr {
-                bool_arr = Some(BooleanArray::from(
-                    old_bool_arr
-                        .iter()
-                        .zip(mask.iter())
-                        .map(|(x, y)| x.unwrap() && y.unwrap())
-                        .collect_vec(),
-                ));
-            } else {
-                bool_arr = Some(mask);
-            }
+            bool_arr = Some(match bool_arr {
+                // a row that is null in any predicate stays null/false
+                // rather than passing.
+                Some(acc) => and_kleene(&acc, &mask)?,
+                None => mask,
+            });
         }
 
-        if let Some(bool_arr) = bool_arr {
-            Ok(bool_arr.true_count() > 0)
-        } else {
-            Ok(true)
+        // a row passes only where the combined predicate is true, true_count
+        // ignores nulls (and falses), matching SQL's WHERE semantics, so a chunk
+        // with no passing row is correctly skipped.
+        match bool_arr {
+            Some(bool_arr) => Ok(bool_arr.true_count() > 0),
+            None => Ok(true),
         }
     }
 }

@@ -17,7 +17,6 @@
 
 pub(crate) mod config;
 pub(crate) mod datafusion_filters;
-pub(crate) mod opener;
 pub mod register;
 pub(crate) mod scanner;
 pub(crate) mod table_provider;
