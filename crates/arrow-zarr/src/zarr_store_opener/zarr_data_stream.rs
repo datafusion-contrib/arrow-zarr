@@ -750,6 +750,10 @@ struct ZarrRecordBatchStreamInner<T: AsyncReadableListableStorageTraits + ?Sized
     // are present or neither is.
     filter: Option<(ZarrChunkFilter, SchemaRef)>,
     chunk_indices: VecDeque<Vec<u64>>,
+    // the number of rows this partition may still produce, if a limit
+    // is set. the last chunk can push the running total slightly over
+    // the original limit.
+    limit: Option<usize>,
     metrics: ZarrMetrics,
 }
 
@@ -767,6 +771,7 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrRecordBatchSt
     ///
     /// This function is intentionally private, as all users should call
     /// [`ZarrRecordBatchStream::new`] instead.
+    #[allow(clippy::too_many_arguments)]
     async fn new(
         store: Arc<T>,
         schema_ref: SchemaRef,
@@ -775,6 +780,7 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrRecordBatchSt
         n_partitions: usize,
         partition: usize,
         metrics: ZarrMetrics,
+        limit: Option<usize>,
     ) -> ZarrQueryResult<Self> {
         // quick check to make sure the partition we're reading from does
         // not exceed the number of partitions.
@@ -842,6 +848,7 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrRecordBatchSt
             projected_schema_ref,
             filter: None,
             chunk_indices,
+            limit,
             metrics,
         })
     }
@@ -863,6 +870,11 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrRecordBatchSt
         // we can't pre fetch the data when reading the data for the main
         // query, because the next time we read some data it would be for the
         // fitler, not for the main query.
+
+        // stop early once this partition has produced its row limit (if any).
+        if self.limit == Some(0) {
+            return Ok(None);
+        }
 
         // wall-clock timer for the whole batch-producing body.
         let total_start = Instant::now();
@@ -931,6 +943,10 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrRecordBatchSt
             self.metrics.inc_chunks_read();
             self.metrics.add_rows(record_batch.num_rows());
             self.metrics.add_total_time(total_start.elapsed());
+
+            if let Some(remaining) = self.limit.as_mut() {
+                *remaining = remaining.saturating_sub(record_batch.num_rows());
+            }
             Ok(Some(record_batch))
         } else {
             self.metrics.add_total_time(total_start.elapsed());
@@ -1012,6 +1028,7 @@ impl ZarrRecordBatchStream {
         partition: usize,
         filter: Option<ZarrChunkFilter>,
         metrics: ZarrMetrics,
+        limit: Option<usize>,
     ) -> ZarrQueryResult<Self> {
         let mut inner = ZarrRecordBatchStreamInner::new(
             store,
@@ -1021,6 +1038,7 @@ impl ZarrRecordBatchStream {
             n_partitions,
             partition,
             metrics,
+            limit,
         )
         .await?;
 
@@ -1098,6 +1116,7 @@ mod zarr_stream_tests {
             0,
             None,
             ZarrMetrics::disconnected(),
+            None,
         )
         .await
         .unwrap();
@@ -1179,6 +1198,7 @@ mod zarr_stream_tests {
             0,
             None,
             ZarrMetrics::disconnected(),
+            None,
         )
         .await
         .unwrap();
@@ -1231,6 +1251,7 @@ mod zarr_stream_tests {
             0,
             filter,
             ZarrMetrics::disconnected(),
+            None,
         )
         .await
         .unwrap();
@@ -1259,6 +1280,59 @@ mod zarr_stream_tests {
         }
     }
 
+    // the store is an 8x8 grid split into 3x3 chunks, so a 3x3 = 9 chunk
+    // grid enumerated row-major with per-chunk row counts
+    // [9, 9, 6, 9, 9, 6, 6, 6, 4]. the chunk that reaches the limit is
+    // emitted whole and the total can overshoot.
+    #[tokio::test]
+    async fn limit_test() {
+        let (wrapper, schema) = get_local_zarr_store(true, 0.0, "lat_lon_data_with_limit").await;
+        let store = wrapper.get_store();
+
+        async fn count_rows<T: AsyncReadableListableStorageTraits + ?Sized + 'static>(
+            store: Arc<T>,
+            schema: SchemaRef,
+            n_partitions: usize,
+            partition: usize,
+            limit: usize,
+        ) -> usize {
+            let inner = ZarrRecordBatchStreamInner::new(
+                store,
+                schema,
+                None,
+                None,
+                n_partitions,
+                partition,
+                ZarrMetrics::disconnected(),
+                Some(limit),
+            )
+            .await
+            .unwrap();
+
+            let records: Vec<_> = inner.into_stream().try_collect().await.unwrap();
+            records.iter().map(|b| b.num_rows()).sum()
+        }
+
+        // single partition, limit 8: the first chunk (9 rows) already reaches
+        // the limit, so we stop after it -> 9 rows.
+        assert_eq!(count_rows(store.clone(), schema.clone(), 1, 0, 8).await, 9);
+
+        // single partition, limit 10: the first chunk (9) isn't enough, the
+        // second chunk (9) crosses the limit -> 18 rows.
+        assert_eq!(
+            count_rows(store.clone(), schema.clone(), 1, 0, 10).await,
+            18
+        );
+
+        // two partitions, limit 8 each (applied independently per partition):
+        // partition 0 reads chunk [9] and stops -> 9. partition 1's chunks are
+        // the edge chunks [6, 6, 6, 4], so [6] isn't enough and [6] crosses the
+        // limit -> 12. total = 21.
+        let p0 = count_rows(store.clone(), schema.clone(), 2, 0, 8).await;
+        let p1 = count_rows(store.clone(), schema.clone(), 2, 1, 8).await;
+        assert_eq!(p0 + p1, 21);
+    }
+
     #[tokio::test]
     async fn dimension_tests() {
         // this store will have 2d lat coordinates and 1d lon coordinates.
@@ -1275,6 +1349,7 @@ mod zarr_stream_tests {
             0,
             None,
             ZarrMetrics::disconnected(),
+            None,
         )
         .await
         .unwrap();
@@ -1325,6 +1400,7 @@ mod zarr_stream_tests {
             0,
             None,
             ZarrMetrics::disconnected(),
+            None,
         )
         .await
         .unwrap();
@@ -1396,6 +1472,7 @@ mod zarr_stream_tests {
             0,
             None,
             ZarrMetrics::disconnected(),
+            None,
         )
         .await
         .unwrap();
@@ -1550,6 +1627,7 @@ mod zarr_stream_tests {
             0,
             None,
             ZarrMetrics::disconnected(),
+            None,
         )
         .await
         .unwrap();
@@ -1600,6 +1678,7 @@ mod zarr_stream_tests {
             0,
             None,
             ZarrMetrics::disconnected(),
+            None,
         )
         .await
         .unwrap();
@@ -1616,6 +1695,7 @@ mod zarr_stream_tests {
             1,
             None,
             ZarrMetrics::disconnected(),
+            None,
         )
         .await
         .unwrap();
@@ -1662,6 +1742,7 @@ mod zarr_stream_tests {
             0,
             None,
             ZarrMetrics::disconnected(),
+            None,
         )
         .await
         .unwrap();
@@ -1677,6 +1758,7 @@ mod zarr_stream_tests {
             8,
             None,
             ZarrMetrics::disconnected(),
+            None,
         )
         .await
         .unwrap();
@@ -1692,6 +1774,7 @@ mod zarr_stream_tests {
             10,
             None,
             ZarrMetrics::disconnected(),
+            None,
         )
         .await
         .unwrap();
@@ -1707,6 +1790,7 @@ mod zarr_stream_tests {
             19,
             None,
             ZarrMetrics::disconnected(),
+            None,
         )
         .await
         .unwrap();
@@ -1735,7 +1819,7 @@ mod zarr_stream_tests {
         let metrics = ZarrMetrics::new(&metrics_set, 0);
 
         let stream =
-            ZarrRecordBatchStream::try_new(store, schema, None, None, 1, 0, filter, metrics)
+            ZarrRecordBatchStream::try_new(store, schema, None, None, 1, 0, filter, metrics, None)
                 .await
                 .unwrap();
         let records: Vec<_> = stream.try_collect().await.unwrap();

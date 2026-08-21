@@ -18,22 +18,21 @@
 use std::sync::Arc;
 
 use datafusion::common::Statistics;
-use datafusion::datasource::listing::PartitionedFile;
-use datafusion::datasource::physical_plan::{
-    FileGroup, FileScanConfigBuilder, FileSource, FileStreamBuilder,
-};
-use datafusion::execution::object_store::ObjectStoreUrl;
+use datafusion::error::DataFusionError;
 use datafusion::physical_expr::{EquivalenceProperties, Partitioning};
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricsSet};
+use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, PhysicalExpr, PlanProperties,
     SendableRecordBatchStream,
 };
-use object_store::local::LocalFileSystem;
+use futures::{StreamExt, TryFutureExt};
 
 use super::config::ZarrTableConfig;
-use super::opener::ZarrSource;
+use super::datafusion_filters::create_zarr_chunk_filter;
+use crate::zarr_store_opener::metrics::ZarrMetrics;
+use crate::ZarrRecordBatchStream;
 
 #[derive(Debug, Clone)]
 pub struct ZarrScan {
@@ -41,6 +40,11 @@ pub struct ZarrScan {
     filters: Option<Arc<dyn PhysicalExpr>>,
     plan_properties: Arc<PlanProperties>,
     metrics: ExecutionPlanMetricsSet,
+    // an optional per-partition row limit, taken from the advisory `limit`
+    // datafusion passes to TableProvider::scan. it's best-effort (a chunk
+    // is emitted whole, so the count can overshoot), which is fine because
+    // datafusion will enforce the actual limit later.
+    limit: Option<usize>,
 }
 
 impl ZarrScan {
@@ -60,7 +64,13 @@ impl ZarrScan {
             filters,
             plan_properties: Arc::new(plan_properties),
             metrics: ExecutionPlanMetricsSet::default(),
+            limit: None,
         }
+    }
+
+    pub(crate) fn with_limit(mut self, limit: usize) -> Self {
+        self.limit = Some(limit);
+        self
     }
 }
 
@@ -126,6 +136,13 @@ impl ExecutionPlan for ZarrScan {
         Ok(Some(Arc::new(new_plan)))
     }
 
+    // the only per-execution state we hold is the metrics set.
+    fn reset_state(self: Arc<Self>) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
+        let mut new_plan = self.as_ref().clone();
+        new_plan.metrics = ExecutionPlanMetricsSet::default();
+        Ok(Arc::new(new_plan))
+    }
+
     fn execute(
         &self,
         partition: usize,
@@ -134,46 +151,50 @@ impl ExecutionPlan for ZarrScan {
         let n_partitions = match self.plan_properties.partitioning {
             Partitioning::UnknownPartitioning(n) => n,
             _ => {
-                return Err(datafusion::error::DataFusionError::Execution(
+                return Err(DataFusionError::Execution(
                     "Only Unknown partitioning support for zarr scans".into(),
                 ));
             }
         };
 
-        let zarr_source = ZarrSource::new(
-            self.zarr_config.clone(),
-            n_partitions,
-            self.filters.clone(),
-            self.metrics.clone(),
-        );
-        // dummy file group, it's needed to re-use some of the datafusion code,
-        // but it doesn't really apply for a zarr store.
-        let file_groups = vec![FileGroup::new(vec![PartitionedFile::new("", 0)])];
-        let file_scan_config = FileScanConfigBuilder::new(
-            ObjectStoreUrl::parse("file://").unwrap(),
-            Arc::new(zarr_source.clone()),
-        )
-        .with_file_groups(file_groups)
-        .build();
+        // the zarr reader does all the real work (store access, projection,
+        // partitioning, chunk-level filtering), so there's no file layer to
+        // manage here. we just build the reader stream and hand it to
+        // datafusion. `execute` has to return synchronously, but opening the
+        // store is async, so we wrap the async construction in a future that
+        // resolves to the stream and flatten it.
+        let config = self.zarr_config.clone();
+        let filter_expr = self.filters.clone();
+        let metrics = ZarrMetrics::new(&self.metrics, partition);
+        let schema = config.get_projected_schema_ref();
+        let limit = self.limit;
 
-        let dummy_object_store = Arc::new(LocalFileSystem::new());
-        let file_opener =
-            zarr_source.create_file_opener(dummy_object_store, &file_scan_config, partition)?;
+        let stream_fut = async move {
+            let filter = filter_expr
+                .as_ref()
+                .map(|f| create_zarr_chunk_filter(f, config.get_schema_ref()))
+                .transpose()?;
+            let (store, prefix) = config.get_store_pointer_and_prefix().await?;
+            let inner = ZarrRecordBatchStream::try_new(
+                store,
+                config.get_schema_ref(),
+                prefix,
+                config.get_projection(),
+                n_partitions,
+                partition,
+                filter,
+                metrics,
+                limit,
+            )
+            .await
+            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+            Ok::<_, DataFusionError>(inner.map(|batch| batch.map_err(DataFusionError::from)))
+        };
 
-        // Note: the "partition" argument is hardcoded to 0 here. We are not making
-        // use of most of the logic in the file stream, for example the partitioning
-        // logic is handled in the zarr stream object, so we need to effectively
-        // "disable" it in the file stream obejct by always setting it to 0.
-        // Passing in dummy metrics because the real metrics are computed directly
-        // from the data stream, don't want to create any confusion around that.
-        let dummy_metrics = ExecutionPlanMetricsSet::default();
-        let file_stream = FileStreamBuilder::new(&file_scan_config)
-            .with_partition(0)
-            .with_file_opener(file_opener)
-            .with_metrics(&dummy_metrics)
-            .build()?;
-
-        Ok(Box::pin(file_stream))
+        Ok(Box::pin(RecordBatchStreamAdapter::new(
+            schema,
+            stream_fut.try_flatten_stream(),
+        )))
     }
 }
 
@@ -273,6 +294,33 @@ mod scanner_tests {
         ]);
         validate_names_and_types(&target_types, &records[0]);
         assert_eq!(records.len(), 4);
+    }
+
+    // pushes a limit of 10 onto a single-partition scan. the store's chunks hold
+    // 9 rows each (for the full chunks), and the reader only stops between chunks,
+    // so it reads two chunks (9 + 9) to reach the limit -> 18 rows.
+    #[tokio::test]
+    async fn limit_test() {
+        let (wrapper, schema) =
+            get_local_zarr_store(true, 0.0, "lat_lon_data_for_scan_limit").await;
+        let path = wrapper.get_store_path();
+        let table_url = ZarrUrlBuilder::try_new(ListingTableUrl::parse(path).unwrap(), None)
+            .unwrap()
+            .build()
+            .unwrap();
+        let config = ZarrTableConfig::new(table_url, schema);
+
+        let session = SessionContext::new();
+        let scan = ZarrScan::new(config, None).with_limit(10);
+        let records: Vec<_> = scan
+            .execute(0, session.task_ctx())
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+
+        let total: usize = records.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total, 18);
     }
 
     // reads the row-count statistics off the exec plan for different sets of selected

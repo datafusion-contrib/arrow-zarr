@@ -21,7 +21,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use datafusion::arrow::datatypes::{Schema, SchemaRef};
 use datafusion::catalog::{Session, TableProviderFactory};
-use datafusion::common::ToDFSchema;
+use datafusion::common::{Statistics, ToDFSchema};
 use datafusion::datasource::listing::ListingTableUrl;
 use datafusion::datasource::{TableProvider, TableType};
 use datafusion::error::{DataFusionError, Result as DfResult};
@@ -83,12 +83,18 @@ impl TableProvider for ZarrTable {
         Ok(vec![TableProviderFilterPushDown::Inexact; filters.len()])
     }
 
+    // whole-table, unprojected planning-time statistics, computed from the
+    // cached array metadata (same source as ZarrScan::partition_statistics).
+    fn statistics(&self) -> Option<Statistics> {
+        self.table_config.statistics().ok()
+    }
+
     async fn scan(
         &self,
         state: &dyn Session,
         projection: Option<&Vec<usize>>,
         filters: &[Expr],
-        _limit: Option<usize>,
+        limit: Option<usize>,
     ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
         let mut filters_physical_expr = None;
         if let Some(filters) = conjunction(filters.to_vec()) {
@@ -103,7 +109,10 @@ impl TableProvider for ZarrTable {
         if let Some(proj) = projection {
             config = config.with_projection(proj.to_vec());
         }
-        let scanner = ZarrScan::new(config, filters_physical_expr);
+        let mut scanner = ZarrScan::new(config, filters_physical_expr);
+        if let Some(limit) = limit {
+            scanner = scanner.with_limit(limit);
+        }
 
         Ok(Arc::new(scanner))
     }
