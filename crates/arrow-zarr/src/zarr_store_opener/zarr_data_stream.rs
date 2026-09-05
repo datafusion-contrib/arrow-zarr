@@ -443,7 +443,7 @@ impl ZarrInMemoryChunk {
     /// and max (row 1) in schema-field order. An all-null/empty column yields
     /// `[null, null]`. Used to cheaply test a chunk's coordinate envelope against
     /// a pushed-down spatial filter without materializing the whole chunk.
-    fn into_min_max_record_batch(&self, schema: &SchemaRef) -> ZarrQueryResult<RecordBatch> {
+    fn to_min_max_record_batch(&self, schema: &SchemaRef) -> ZarrQueryResult<RecordBatch> {
         let min_max = self
             .columns_in_schema_order(schema)?
             .into_iter()
@@ -1037,7 +1037,7 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrRecordBatchSt
                         .zarr_store
                         .get_chunk(cols, idx.clone(), false, None, &self.metrics)
                         .await?;
-                    let min_max = prune_chunk.into_min_max_record_batch(&pruning.schema)?;
+                    let min_max = prune_chunk.to_min_max_record_batch(&pruning.schema)?;
                     if !chunk_kept(&pruning.expr, &min_max)? {
                         chunk_index = self.pop_chunk_idx();
                         continue;
