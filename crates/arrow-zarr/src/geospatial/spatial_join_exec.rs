@@ -15,9 +15,17 @@ use std::sync::{Arc, Mutex};
 
 use arrow_schema::SchemaRef;
 use datafusion::common::{project_schema, DataFusionError, JoinType, Result};
+use datafusion::config::ConfigOptions;
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
 use datafusion::physical_expr::equivalence::{join_equivalence_properties, ProjectionMapping};
+use datafusion::physical_expr::expressions::{lit, DynamicFilterPhysicalExpr};
+use datafusion::physical_expr::utils::collect_columns;
+use datafusion::physical_expr::PhysicalExpr;
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
+use datafusion::physical_plan::filter_pushdown::{
+    ChildFilterDescription, ChildPushdownResult, FilterDescription, FilterPushdownPhase,
+    FilterPushdownPropagation,
+};
 use datafusion::physical_plan::joins::utils::{
     adjust_right_output_partitioning, build_join_schema, check_join_is_valid, ColumnIndex,
     JoinFilter,
@@ -30,10 +38,11 @@ use futures::future::{BoxFuture, FutureExt};
 
 use crate::geospatial::boxed_geo_batch::BBoxedGeoStream;
 use crate::geospatial::indexed_build_side::{build_from_streams, IndexedBuildSide};
+use crate::geospatial::probe_pruning_expr::ProbePruningExpr;
 use crate::geospatial::spatial_join_stream::{SharedIndexFuture, SpatialJoinStream};
 use crate::geospatial::spatial_predicate::RelationPredicate;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SpatialJoinExec {
     pub(crate) left: Arc<dyn ExecutionPlan>,
     pub(crate) right: Arc<dyn ExecutionPlan>,
@@ -50,6 +59,12 @@ pub struct SpatialJoinExec {
     // await it while the others just wait for the result that will
     // get cached in the shared future.
     build_side_shared: Arc<Mutex<Option<SharedIndexFuture>>>,
+
+    // Probe-side chunk-pruning filter, shared with the probe child. Set during
+    // filter pushdown (`handle_child_pushdown_result`) when the child accepts
+    // it; filled in with the real spatial index once the build side is ready.
+    // None when pushdown didn't happen or the child declined.
+    dynamic_filter: Option<Arc<DynamicFilterPhysicalExpr>>,
 }
 
 impl SpatialJoinExec {
@@ -99,7 +114,30 @@ impl SpatialJoinExec {
             projection,
             props: Arc::new(props),
             build_side_shared: Arc::new(Mutex::new(None)),
+            dynamic_filter: None,
         })
+    }
+
+    // Returns a copy of this exec carrying the pushed-down dynamic filter. Used
+    // by handle_child_pushdown_result to attach the filter once the probe
+    // child accepts it.
+    fn with_dynamic_filter(&self, dynamic_filter: Arc<DynamicFilterPhysicalExpr>) -> Result<Self> {
+        // A plain clone only carries over immutable config, not execution state.
+        // That's correct only while the build side is still uninitialized, which
+        // holds because pushdown runs before execute.
+        let build_side_unset = self
+            .build_side_shared
+            .lock()
+            .map_err(|e| DataFusionError::Internal(e.to_string()))?
+            .is_none();
+        if !build_side_unset {
+            return Err(DataFusionError::Internal(
+                "with_dynamic_filter called after the build side was initialized".into(),
+            ));
+        }
+        let mut new = self.clone();
+        new.dynamic_filter = Some(dynamic_filter);
+        Ok(new)
     }
 
     fn compute_properties(
@@ -284,6 +322,70 @@ impl ExecutionPlan for SpatialJoinExec {
         )?))
     }
 
+    fn gather_filters_for_pushdown(
+        &self,
+        phase: FilterPushdownPhase,
+        parent_filters: Vec<Arc<dyn PhysicalExpr>>,
+        config: &ConfigOptions,
+    ) -> Result<FilterDescription> {
+        // A spatial join can't route arbitrary parent predicates across itself,
+        // so neither child accepts them.
+        let left_child = ChildFilterDescription::all_unsupported(&parent_filters);
+        let mut right_child = ChildFilterDescription::all_unsupported(&parent_filters);
+
+        // Honor both the master switch and the join-specific one, the master is
+        // only guaranteed to override the specific flag when set via the string
+        // API, so check both.
+        let dynamic_filters_enabled = config.optimizer.enable_dynamic_filter_pushdown
+            && config.optimizer.enable_join_dynamic_filter_pushdown;
+
+        // Dynamic filters are a post-optimization, only push one when
+        // pruning the probe (right) side is sound: Inner/Left. Right/Full must
+        // emit unmatched probe rows, so their chunks can't be pruned. The filter
+        // is filled in once the build side is ready.
+        if dynamic_filters_enabled
+            && matches!(phase, FilterPushdownPhase::Post)
+            && matches!(self.join_type, JoinType::Inner | JoinType::Left)
+        {
+            let children = collect_columns(&self.predicate.right)
+                .into_iter()
+                .map(|c| Arc::new(c) as Arc<dyn PhysicalExpr>)
+                .collect();
+            let dynamic_filter = Arc::new(DynamicFilterPhysicalExpr::new(children, lit(true)));
+            right_child = right_child.with_self_filter(dynamic_filter);
+        }
+
+        Ok(FilterDescription::new()
+            .with_child(left_child)
+            .with_child(right_child))
+    }
+
+    fn handle_child_pushdown_result(
+        &self,
+        _phase: FilterPushdownPhase,
+        child_pushdown_result: ChildPushdownResult,
+        _config: &ConfigOptions,
+    ) -> Result<FilterPushdownPropagation<Arc<dyn ExecutionPlan>>> {
+        let mut result = FilterPushdownPropagation::if_any(child_pushdown_result.clone());
+
+        // Recover the same dynamic filter we pushed to the right child (index 1).
+        // If the child kept it, store it on a new node so we can fill it in at
+        // runtime (the child holds a clone of the same shared handle).
+        if let Some(filter) = child_pushdown_result
+            .self_filters
+            .get(1)
+            .and_then(|filters| filters.first())
+        {
+            let predicate = Arc::clone(&filter.predicate);
+            if let Ok(dynamic_filter) = Arc::downcast::<DynamicFilterPhysicalExpr>(predicate) {
+                let new_node = Arc::new(self.with_dynamic_filter(dynamic_filter)?);
+                result = result.with_updated_node(new_node as Arc<dyn ExecutionPlan>);
+            }
+        }
+
+        Ok(result)
+    }
+
     // The main method, produces streams that will produce record
     // batches. Not much here, the main logic is to drain all
     // the build side streams to build the indexed build side,
@@ -306,6 +408,12 @@ impl ExecutionPlan for SpatialJoinExec {
                 let probe_partition_count = self.right.output_partitioning().partition_count();
                 let ctx = Arc::clone(&context);
 
+                // The probe-side geometry expression and the shared dynamic
+                // filter, so the build future can publish the chunk-pruning
+                // predicate into the filter once the index is ready.
+                let probe_geo_expr = Arc::clone(&self.predicate.right);
+                let dynamic_filter = self.dynamic_filter.clone();
+
                 let fut: BoxFuture<'static, Result<Arc<IndexedBuildSide>, Arc<DataFusionError>>> =
                     Box::pin(async move {
                         let num_build_partitions = left.output_partitioning().partition_count();
@@ -318,12 +426,24 @@ impl ExecutionPlan for SpatialJoinExec {
                             })
                             .collect::<Result<_, Arc<DataFusionError>>>()?;
 
-                        let build_side =
+                        let build_side = Arc::new(
                             build_from_streams(streams, needs_visited, probe_partition_count)
                                 .await
-                                .map_err(Arc::new)?;
+                                .map_err(Arc::new)?,
+                        );
 
-                        Ok(Arc::new(build_side))
+                        // Now that the index exists, fill in the pushed-down
+                        // dynamic filter so the probe scan can prune chunks.
+                        if let Some(dynamic_filter) = &dynamic_filter {
+                            let pruning: Arc<dyn PhysicalExpr> = Arc::new(ProbePruningExpr::new(
+                                Arc::clone(&probe_geo_expr),
+                                Arc::clone(&build_side),
+                            ));
+                            dynamic_filter.update(pruning).map_err(Arc::new)?;
+                            dynamic_filter.mark_complete();
+                        }
+
+                        Ok(build_side)
                     });
                 *guard = Some(fut.shared());
             }

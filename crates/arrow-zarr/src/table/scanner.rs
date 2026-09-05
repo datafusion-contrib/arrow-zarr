@@ -13,9 +13,14 @@
 use std::sync::Arc;
 
 use datafusion::common::Statistics;
+use datafusion::config::ConfigOptions;
 use datafusion::error::DataFusionError;
+use datafusion::physical_expr::expressions::DynamicFilterPhysicalExpr;
 use datafusion::physical_expr::{EquivalenceProperties, Partitioning};
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
+use datafusion::physical_plan::filter_pushdown::{
+    ChildPushdownResult, FilterPushdownPhase, FilterPushdownPropagation, PushedDown,
+};
 use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{
@@ -33,12 +38,15 @@ use crate::ZarrRecordBatchStream;
 pub struct ZarrScan {
     zarr_config: ZarrTableConfig,
     filters: Option<Arc<dyn PhysicalExpr>>,
+    // Dynamic filters pushed down from parents (e.g. the spatial join's
+    // chunk-pruning filter). Accepted during filter pushdown and threaded into
+    // the reader stream, which resolves which ones it can actually use.
+    dynamic_filters: Vec<Arc<dyn PhysicalExpr>>,
     plan_properties: Arc<PlanProperties>,
     metrics: ExecutionPlanMetricsSet,
-    // an optional per-partition row limit, taken from the advisory `limit`
-    // datafusion passes to TableProvider::scan. it's best-effort (a chunk
-    // is emitted whole, so the count can overshoot), which is fine because
-    // datafusion will enforce the actual limit later.
+    // an optional per-partition row limit.it's best-effort (a chunk
+    // is emitted whole, so the count can overshoot), which is fine
+    // because datafusion will enforce the actual limit later.
     limit: Option<usize>,
 }
 
@@ -57,6 +65,7 @@ impl ZarrScan {
         Self {
             zarr_config,
             filters,
+            dynamic_filters: Vec::new(),
             plan_properties: Arc::new(plan_properties),
             metrics: ExecutionPlanMetricsSet::default(),
             limit: None,
@@ -138,6 +147,49 @@ impl ExecutionPlan for ZarrScan {
         Ok(Arc::new(new_plan))
     }
 
+    // Absorb a pushed-down dynamic filter so the reader can consult it at scan
+    // time. We accept any dynamic filter here (they all look alike until runtime)
+    // and store the handle; the stream decides later whether it's one we can use.
+    fn handle_child_pushdown_result(
+        &self,
+        phase: FilterPushdownPhase,
+        child_pushdown_result: ChildPushdownResult,
+        _config: &ConfigOptions,
+    ) -> datafusion::error::Result<FilterPushdownPropagation<Arc<dyn ExecutionPlan>>> {
+        // The chunk-pruning filters, the only one that's currently used, are only
+        // produced in the post phase, so ignore anything pushed in the pre phase.
+        if !matches!(phase, FilterPushdownPhase::Post) {
+            let results = vec![PushedDown::No; child_pushdown_result.parent_filters.len()];
+            return Ok(FilterPushdownPropagation::with_parent_pushdown_result(
+                results,
+            ));
+        }
+
+        let mut dynamic_filters = Vec::new();
+        let results = child_pushdown_result
+            .parent_filters
+            .into_iter()
+            .map(|pushed| {
+                let expr = pushed.filter;
+                if expr.downcast_ref::<DynamicFilterPhysicalExpr>().is_some() {
+                    dynamic_filters.push(expr);
+                    PushedDown::Yes
+                } else {
+                    PushedDown::No
+                }
+            })
+            .collect();
+
+        let propagation = FilterPushdownPropagation::with_parent_pushdown_result(results);
+        if dynamic_filters.is_empty() {
+            Ok(propagation)
+        } else {
+            let mut new_node = self.clone();
+            new_node.dynamic_filters = dynamic_filters;
+            Ok(propagation.with_updated_node(Arc::new(new_node) as Arc<dyn ExecutionPlan>))
+        }
+    }
+
     fn execute(
         &self,
         partition: usize,
@@ -160,6 +212,7 @@ impl ExecutionPlan for ZarrScan {
         // resolves to the stream and flatten it.
         let config = self.zarr_config.clone();
         let filter_expr = self.filters.clone();
+        let dynamic_filters = self.dynamic_filters.clone();
         let metrics = ZarrMetrics::new(&self.metrics, partition);
         let schema = config.get_projected_schema_ref();
         let limit = self.limit;
@@ -178,6 +231,7 @@ impl ExecutionPlan for ZarrScan {
                 n_partitions,
                 partition,
                 filter,
+                dynamic_filters,
                 metrics,
                 limit,
             )

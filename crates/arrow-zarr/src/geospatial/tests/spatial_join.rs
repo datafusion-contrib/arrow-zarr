@@ -106,7 +106,7 @@ async fn test_spatial_join_from_parquet() {
             SELECT b.col1, p.col4
             FROM build b
             JOIN probe p
-                ON st_within_bulk(b.geo, p.geo)
+                ON st_within(b.geo, p.geo)
             ",
         )
         .await
@@ -136,7 +136,7 @@ async fn test_spatial_join_from_parquet() {
             SELECT b.col1, p.col4
             FROM build b
             LEFT JOIN probe p
-                ON st_within_bulk(b.geo, p.geo)
+                ON st_within(b.geo, p.geo)
             ",
         )
         .await
@@ -170,7 +170,7 @@ async fn test_spatial_join_from_parquet() {
             SELECT b.col1, p.col4
             FROM build b
             JOIN probe p
-                ON st_within_bulk(b.geo, p.geo) AND p.col4 > 0
+                ON st_within(b.geo, p.geo) AND p.col4 > 0
             ",
         )
         .await
@@ -198,7 +198,7 @@ async fn test_spatial_join_from_parquet() {
             SELECT b.col1, p.col4
             FROM build b
             LEFT JOIN probe p
-                ON p.col4 > 0.0 AND st_within_bulk(b.geo, p.geo)
+                ON p.col4 > 0.0 AND st_within(b.geo, p.geo)
             ",
         )
         .await
