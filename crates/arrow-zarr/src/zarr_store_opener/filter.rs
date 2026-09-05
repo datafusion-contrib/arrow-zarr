@@ -13,7 +13,6 @@
 use arrow::compute::and_kleene;
 use arrow_array::{BooleanArray, RecordBatch};
 use arrow_schema::{ArrowError, SchemaRef};
-
 /// A predicate operating on [`RecordBatch`].
 pub trait ZarrArrowPredicate: Send + 'static {
     /// Evaluate this predicate for the given [`RecordBatch`]. Rows that are `true`

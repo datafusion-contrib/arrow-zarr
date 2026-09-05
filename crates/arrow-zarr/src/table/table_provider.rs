@@ -174,11 +174,16 @@ mod table_provider_tests {
     use arrow::compute::concat_batches;
     use arrow::datatypes::Float64Type;
     use arrow_schema::DataType;
+    use datafusion::assert_batches_sorted_eq;
     use datafusion::execution::SessionStateBuilder;
+    use datafusion::logical_expr::ScalarUDF;
     use datafusion::prelude::SessionContext;
     use futures_util::TryStreamExt;
 
     use super::*;
+    use crate::geospatial::test_utils::wkt_to_wkb;
+    use crate::geospatial::udfs::StPointUdf;
+    use crate::geospatial::{SpatialJoinPhysicalOptimizer, StWithinUdf};
     #[cfg(feature = "icechunk")]
     use crate::table::config::IcechunkVersion;
     use crate::table::table_provider::ZarrTable;
@@ -640,5 +645,58 @@ mod table_provider_tests {
         assert_eq!(value("chunks_looked_at"), 9);
         assert_eq!(value("chunks_read"), 9);
         assert_eq!(value("rows_produced"), 64);
+    }
+
+    #[tokio::test]
+    async fn spatial_join_pushdown_query() {
+        let (wrapper, _) = get_local_zarr_store(true, 0.0, "lat_lon_data_spatial_join").await;
+        let table_path = wrapper.get_store_path();
+
+        let state = SessionStateBuilder::new()
+            .with_default_features()
+            .with_physical_optimizer_rule(Arc::new(SpatialJoinPhysicalOptimizer))
+            .build();
+        let session = SessionContext::new_with_state(state);
+        session.register_udf(ScalarUDF::from(StWithinUdf::default()));
+        session.register_udf(ScalarUDF::from(StPointUdf::default()));
+        session
+            .register_table(
+                "zarr_table",
+                Arc::new(zarr_table_from_path(table_path).await),
+            )
+            .unwrap();
+
+        // Two bounding boxes, each enclosing a single grid point: box 1 -> (lon
+        // -119, lat 36) = data 9; box 2 -> (lon -114, lat 41) = data 54.
+        let hex: Vec<String> = [
+            "POLYGON((-119.5 35.5, -118.5 35.5, -118.5 36.5, -119.5 36.5, -119.5 35.5))",
+            "POLYGON((-114.5 40.5, -113.5 40.5, -113.5 41.5, -114.5 41.5, -114.5 40.5))",
+        ]
+        .iter()
+        .map(|wkt| wkt_to_wkb(wkt).iter().map(|b| format!("{b:02x}")).collect())
+        .collect();
+
+        // The zarr table is the probe (right) side, so the chunk-pruning filter is
+        // pushed into its scan. only the two chunks containing the boxes survive,
+        // and the exact within test keeps the two enclosed points.
+        let query = format!(
+            "
+            WITH boxes AS (
+                SELECT decode(hex, 'hex') AS geom
+                FROM (VALUES ('{}'), ('{}')) AS t(hex)
+            )
+            SELECT z.data
+            FROM boxes b
+            JOIN zarr_table z
+                ON st_within(st_point(z.lon, z.lat), b.geom)
+            ",
+            hex[0], hex[1],
+        );
+        let batches = session.sql(&query).await.unwrap().collect().await.unwrap();
+
+        assert_batches_sorted_eq!(
+            ["+------+", "| data |", "+------+", "| 54.0 |", "| 9.0  |", "+------+",],
+            &batches
+        );
     }
 }

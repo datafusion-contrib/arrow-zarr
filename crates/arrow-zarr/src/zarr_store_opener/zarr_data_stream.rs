@@ -19,11 +19,16 @@ use std::task::{Context, Poll};
 use std::time::Instant;
 
 use arrow::array::*;
+use arrow::compute::kernels::aggregate::{max as arrow_max, min as arrow_min};
 use arrow::datatypes::*;
 use arrow::record_batch::RecordBatch;
 use arrow_schema::ArrowError;
 use async_stream::try_stream;
 use bytes::Bytes;
+use datafusion::common::ScalarValue;
+use datafusion::logical_expr::ColumnarValue;
+use datafusion::physical_expr::utils::{collect_columns, reassign_expr_columns};
+use datafusion::physical_plan::PhysicalExpr;
 use futures::stream::{BoxStream, Stream};
 use itertools::{izip, Itertools};
 use tokio::sync::mpsc::Receiver;
@@ -44,6 +49,7 @@ use super::filter::ZarrChunkFilter;
 use super::io_runtime::IoRuntime;
 use super::metrics::ZarrMetrics;
 use super::zarr_errors::{ZarrQueryError, ZarrQueryResult};
+use crate::geospatial::probe_pruning_expr::ProbePruningExpr;
 
 /// A struct to handle 1-D coordinate arrays stored in reduced form, and
 /// "broadcasting" them up to the full chunk shape when reading multidimensional
@@ -432,6 +438,55 @@ impl ZarrInMemoryChunk {
         let array_refs = self.columns_in_schema_order(schema)?;
         RecordBatch::try_from_iter(array_refs).map_err(|e| ZarrQueryError::External(Box::new(e)))
     }
+
+    /// Builds a 2-row record batch holding, per column, that column's min (row 0)
+    /// and max (row 1) in schema-field order. An all-null/empty column yields
+    /// `[null, null]`. Used to cheaply test a chunk's coordinate envelope against
+    /// a pushed-down spatial filter without materializing the whole chunk.
+    fn to_min_max_record_batch(&self, schema: &SchemaRef) -> ZarrQueryResult<RecordBatch> {
+        let min_max = self
+            .columns_in_schema_order(schema)?
+            .into_iter()
+            .map(|(name, arr)| Ok((name, min_max_array(&arr)?)))
+            .collect::<ZarrQueryResult<Vec<_>>>()?;
+        RecordBatch::try_from_iter(min_max).map_err(|e| ZarrQueryError::External(Box::new(e)))
+    }
+}
+
+/// Returns a length-2 array `[min, max]` of the same numeric type as `array`.
+/// `None` min/max (empty or all-null input) become nulls.
+fn min_max_array(array: &ArrayRef) -> ZarrQueryResult<ArrayRef> {
+    macro_rules! min_max {
+        ($ty:ty) => {{
+            let a = array
+                .as_any()
+                .downcast_ref::<PrimitiveArray<$ty>>()
+                .expect("array data type matched");
+            Arc::new(PrimitiveArray::<$ty>::from(vec![
+                arrow_min(a),
+                arrow_max(a),
+            ])) as ArrayRef
+        }};
+    }
+
+    let out = match array.data_type() {
+        DataType::Float64 => min_max!(Float64Type),
+        DataType::Float32 => min_max!(Float32Type),
+        DataType::Int64 => min_max!(Int64Type),
+        DataType::Int32 => min_max!(Int32Type),
+        DataType::Int16 => min_max!(Int16Type),
+        DataType::Int8 => min_max!(Int8Type),
+        DataType::UInt64 => min_max!(UInt64Type),
+        DataType::UInt32 => min_max!(UInt32Type),
+        DataType::UInt16 => min_max!(UInt16Type),
+        DataType::UInt8 => min_max!(UInt8Type),
+        other => {
+            return Err(ZarrQueryError::InvalidColumnRequest(format!(
+                "min/max not supported for data type {other}"
+            )))
+        }
+    };
+    Ok(out)
 }
 
 /// A wrapper for a map of arrays, which will handle interleaving
@@ -744,12 +799,63 @@ struct ZarrRecordBatchStreamInner<T: AsyncReadableListableStorageTraits + ?Sized
     // the columns still to read once a chunk passes). either both
     // are present or neither is.
     filter: Option<(ZarrChunkFilter, SchemaRef)>,
+    // Dynamic filters pushed down from the scan (e.g. the spatial join's
+    // chunk-pruning filter). Drained into `pruning` on the first `next_chunk`.
+    dynamic_filters: Vec<Arc<dyn PhysicalExpr>>,
+    // Resolved chunk-pruning expression and the coordinate subset schema it reads.
+    pruning: Option<ChunkPruning>,
     chunk_indices: VecDeque<Vec<u64>>,
     // the number of rows this partition may still produce, if a limit
     // is set. the last chunk can push the running total slightly over
     // the original limit.
     limit: Option<usize>,
     metrics: ZarrMetrics,
+}
+
+/// A resolved chunk-pruning expression and the coordinate subset
+/// schema it reads.
+struct ChunkPruning {
+    expr: Arc<dyn PhysicalExpr>,
+    schema: SchemaRef,
+}
+
+impl ChunkPruning {
+    /// Selects the columns `expr` references from `projected_schema` (by name)
+    /// into a subset schema, and reassigns the expression's column indices to it
+    /// so it evaluates against a min/max batch built from that subset.
+    fn try_new(expr: Arc<dyn PhysicalExpr>, projected_schema: &SchemaRef) -> ZarrQueryResult<Self> {
+        let mut indices = collect_columns(&expr)
+            .iter()
+            .map(|c| projected_schema.index_of(c.name()))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| ZarrQueryError::External(Box::new(e)))?;
+        indices.sort_unstable();
+        indices.dedup();
+
+        let schema = Arc::new(
+            projected_schema
+                .project(&indices)
+                .map_err(|e| ZarrQueryError::External(Box::new(e)))?,
+        );
+        let expr = reassign_expr_columns(expr, &schema)
+            .map_err(|e| ZarrQueryError::External(Box::new(e)))?;
+        Ok(Self { expr, schema })
+    }
+}
+
+/// Evaluates a chunk-pruning expression against a chunk's min/max record batch,
+/// returning whether the chunk should be kept (a null verdict keeps it).
+fn chunk_kept(expr: &Arc<dyn PhysicalExpr>, min_max: &RecordBatch) -> ZarrQueryResult<bool> {
+    let value = expr
+        .evaluate(min_max)
+        .map_err(|e| ZarrQueryError::External(Box::new(e)))?;
+    match value {
+        ColumnarValue::Scalar(ScalarValue::Boolean(Some(keep))) => Ok(keep),
+        ColumnarValue::Scalar(ScalarValue::Boolean(None)) => Ok(true),
+        other => Err(ZarrQueryError::InvalidCompute(format!(
+            "chunk-pruning expression must return a boolean scalar, got {other:?}"
+        ))),
+    }
 }
 
 /// collect the column (array) names from a schema's fields.
@@ -774,6 +880,7 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrRecordBatchSt
         projection: Option<Vec<usize>>,
         n_partitions: usize,
         partition: usize,
+        dynamic_filters: Vec<Arc<dyn PhysicalExpr>>,
         metrics: ZarrMetrics,
         limit: Option<usize>,
     ) -> ZarrQueryResult<Self> {
@@ -842,10 +949,46 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrRecordBatchSt
             zarr_store,
             projected_schema_ref,
             filter: None,
+            dynamic_filters,
+            pruning: None,
             chunk_indices,
             limit,
             metrics,
         })
+    }
+
+    /// Resolves the pushed dynamic filters into a chunk-pruning expression, on
+    /// the first `next_chunk` call. By this point the spatial join has finished
+    /// its build side, so the shared dynamic filter holds the real
+    /// `ProbePruningExpr`.
+    fn resolve_pruning(&mut self) -> ZarrQueryResult<()> {
+        if self.dynamic_filters.is_empty() {
+            return Ok(());
+        }
+
+        let mut pruning_expr: Option<Arc<dyn PhysicalExpr>> = None;
+        for filter in self.dynamic_filters.drain(..) {
+            let Some(inner) = filter
+                .snapshot()
+                .map_err(|e| ZarrQueryError::External(Box::new(e)))?
+            else {
+                continue;
+            };
+            if inner.downcast_ref::<ProbePruningExpr>().is_some() {
+                if pruning_expr.is_some() {
+                    return Err(ZarrQueryError::InvalidCompute(
+                        "more than one chunk-pruning expression pushed to the zarr scan".into(),
+                    ));
+                }
+                pruning_expr = Some(inner);
+            }
+        }
+
+        if let Some(expr) = pruning_expr {
+            self.pruning = Some(ChunkPruning::try_new(expr, &self.projected_schema_ref)?);
+        }
+
+        Ok(())
     }
 
     /// Fetch the next chunk, returning None if there are no more chunks.
@@ -874,64 +1017,78 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrRecordBatchSt
         // wall-clock timer for the whole batch-producing body.
         let total_start = Instant::now();
 
+        // resolve the pushed dynamic filters into a pruning expression once.
+        self.resolve_pruning()?;
+
         let mut chunk_index = self.pop_chunk_idx();
         let mut filter_zarr_chunk: Option<ZarrInMemoryChunk> = None;
 
-        let filter = self.filter.take();
-        if let Some((filter, schema_without_filter_cols)) = filter {
-            let mut filter_passed = false;
-            while !filter_passed {
-                if let Some(idx) = &chunk_index {
-                    let next_chnk_idx = self.see_chunk_idx();
-                    let column_names = column_names(filter.schema_ref());
+        // walk chunks until one passes all present gates (pruning, then static
+        // filter).
+        if self.pruning.is_some() || self.filter.is_some() {
+            let filter = self.filter.take();
+            let pruning = self.pruning.take();
+            while let Some(idx) = chunk_index.clone() {
+                filter_zarr_chunk = None;
+
+                if let Some(pruning) = &pruning {
+                    let cols = column_names(&pruning.schema);
+                    let prune_chunk = self
+                        .zarr_store
+                        .get_chunk(cols, idx.clone(), false, None, &self.metrics)
+                        .await?;
+                    let min_max = prune_chunk.to_min_max_record_batch(&pruning.schema)?;
+                    if !chunk_kept(&pruning.expr, &min_max)? {
+                        chunk_index = self.pop_chunk_idx();
+                        continue;
+                    }
+                }
+
+                if filter.is_some() {
+                    // Extract the columns without holding a filter reference across
+                    // the read (the predicate isn't Sync, holding across await is a
+                    // problem), re-borrow it afterwards.
+                    #[allow(clippy::unnecessary_unwrap)]
+                    let cols = column_names(filter.as_ref().unwrap().0.schema_ref());
                     let zarr_chunk = self
                         .zarr_store
-                        .get_chunk(
-                            column_names,
-                            idx.clone(),
-                            true,
-                            next_chnk_idx,
-                            &self.metrics,
-                        )
+                        .get_chunk(cols, idx.clone(), false, None, &self.metrics)
                         .await?;
-                    filter_passed = zarr_chunk.check_filter(&filter)?;
-                    filter_zarr_chunk = Some(zarr_chunk);
-                    // advance to the next candidate only if this one didn't pass;
-                    // on a pass we keep chunk_index pointing at the passing chunk.
-                    if !filter_passed {
+                    #[allow(clippy::unnecessary_unwrap)]
+                    let (chunk_filter, _) = filter.as_ref().unwrap();
+                    if !zarr_chunk.check_filter(chunk_filter)? {
                         chunk_index = self.pop_chunk_idx();
+                        continue;
                     }
-                } else {
-                    filter_passed = true;
+                    filter_zarr_chunk = Some(zarr_chunk);
                 }
+
+                break;
             }
-            self.filter = Some((filter, schema_without_filter_cols));
+            self.filter = filter;
+            self.pruning = pruning;
         }
 
         if let Some(chunk_index) = chunk_index {
-            let mut zarr_chunk;
-            if let Some((_, schema_without_filter_cols)) = &self.filter {
-                let filter_zarr_chunk = filter_zarr_chunk.expect("Filter zarr chunk missing.");
-                let column_names = column_names(schema_without_filter_cols);
-                zarr_chunk = self
-                    .zarr_store
-                    .get_chunk(column_names, chunk_index, false, None, &self.metrics)
-                    .await?;
-                zarr_chunk.combine(filter_zarr_chunk);
+            // Only interleave the next chunk when there's no filter (static or
+            // dynamic), since a filter may skip it.
+            let interleave = self.filter.is_none() && self.pruning.is_none();
+            let next_chnk_idx = if interleave {
+                self.see_chunk_idx()
             } else {
-                let next_chnk_idx = self.see_chunk_idx();
-                let column_names = column_names(&self.projected_schema_ref);
+                None
+            };
+            let cols = match &self.filter {
+                Some((_, schema_without_filter_cols)) => column_names(schema_without_filter_cols),
+                None => column_names(&self.projected_schema_ref),
+            };
 
-                zarr_chunk = self
-                    .zarr_store
-                    .get_chunk(
-                        column_names,
-                        chunk_index,
-                        true,
-                        next_chnk_idx,
-                        &self.metrics,
-                    )
-                    .await?;
+            let mut zarr_chunk = self
+                .zarr_store
+                .get_chunk(cols, chunk_index, interleave, next_chnk_idx, &self.metrics)
+                .await?;
+            if let Some(filter_zarr_chunk) = filter_zarr_chunk {
+                zarr_chunk.combine(filter_zarr_chunk);
             }
 
             let record_batch = zarr_chunk.into_record_batch(&self.projected_schema_ref)?;
@@ -1022,6 +1179,7 @@ impl ZarrRecordBatchStream {
         n_partitions: usize,
         partition: usize,
         filter: Option<ZarrChunkFilter>,
+        dynamic_filters: Vec<Arc<dyn PhysicalExpr>>,
         metrics: ZarrMetrics,
         limit: Option<usize>,
     ) -> ZarrQueryResult<Self> {
@@ -1032,6 +1190,7 @@ impl ZarrRecordBatchStream {
             projection,
             n_partitions,
             partition,
+            dynamic_filters,
             metrics,
             limit,
         )
@@ -1069,9 +1228,15 @@ impl Stream for ZarrRecordBatchStream {
 #[cfg(test)]
 mod zarr_stream_tests {
     use arrow::compute::concat_batches;
+    use datafusion::config::ConfigOptions;
+    use datafusion::logical_expr::ScalarUDF;
+    use datafusion::physical_expr::expressions::{lit, Column, DynamicFilterPhysicalExpr};
+    use datafusion::physical_expr::ScalarFunctionExpr;
     use futures_util::TryStreamExt;
 
     use super::*;
+    use crate::geospatial::indexed_build_side::test_helpers::make_indexed_build_side;
+    use crate::geospatial::udfs::StPointUdf;
     use crate::test_utils::{
         extract_col, get_local_zarr_store, get_local_zarr_store_3d, get_local_zarr_store_4d,
         get_local_zarr_store_mix_dims, get_local_zarr_store_no_coords, validate_names_and_types,
@@ -1110,6 +1275,7 @@ mod zarr_stream_tests {
             1,
             0,
             None,
+            Vec::new(),
             ZarrMetrics::disconnected(),
             None,
         )
@@ -1180,6 +1346,74 @@ mod zarr_stream_tests {
     }
 
     #[tokio::test]
+    async fn spatial_pruning_test() {
+        let (wrapper, schema) =
+            get_local_zarr_store(true, 0.0, "lat_lon_data_spatial_pruning").await;
+        let store = wrapper.get_store();
+
+        // Build side: two squares, each landing inside one corner chunk of the
+        // 3x3 grid (lat 35-42, lon -120 to -113). Their combined bbox spans the
+        // whole store, but only chunks (0,0) and (2,2) intersect a square.
+        let squares = [
+            "POLYGON((-119.5 35.5, -118.5 35.5, -118.5 36.5, -119.5 36.5, -119.5 35.5))",
+            "POLYGON((-114.5 40.5, -113.5 40.5, -113.5 41.5, -114.5 41.5, -114.5 40.5))",
+        ];
+        let index = make_indexed_build_side(&squares, 1, 1, false, "geometry", "val");
+
+        // Probe geometry: st_point(lon, lat) over the store's coordinate columns.
+        let st_point = Arc::new(ScalarUDF::from(StPointUdf::default()));
+        let probe_expr: Arc<dyn PhysicalExpr> = Arc::new(ScalarFunctionExpr::new(
+            "st_point",
+            st_point,
+            vec![
+                Arc::new(Column::new("lon", 2)),
+                Arc::new(Column::new("lat", 1)),
+            ],
+            Arc::new(Field::new("geometry", DataType::Binary, true)),
+            Arc::new(ConfigOptions::default()),
+        ));
+
+        // Wrap the pruning expression in a dynamic filter, as the spatial join does.
+        let pruning = Arc::new(ProbePruningExpr::new(probe_expr, index)) as Arc<dyn PhysicalExpr>;
+        let dynamic_filter = Arc::new(DynamicFilterPhysicalExpr::new(
+            vec![
+                Arc::new(Column::new("lon", 2)),
+                Arc::new(Column::new("lat", 1)),
+            ],
+            lit(true),
+        ));
+        dynamic_filter.update(pruning).unwrap();
+
+        let stream = ZarrRecordBatchStream::try_new(
+            store,
+            schema,
+            None,
+            None,
+            1,
+            0,
+            None,
+            vec![dynamic_filter as Arc<dyn PhysicalExpr>],
+            ZarrMetrics::disconnected(),
+            None,
+        )
+        .await
+        .unwrap();
+        let records: Vec<_> = stream.try_collect().await.unwrap();
+
+        assert_eq!(records.len(), 2);
+        validate_primitive_column::<Float64Type, f64>(
+            "data",
+            &records[0],
+            &[0.0, 1.0, 2.0, 8.0, 9.0, 10.0, 16.0, 17.0, 18.0],
+        );
+        validate_primitive_column::<Float64Type, f64>(
+            "data",
+            &records[1],
+            &[54.0, 55.0, 62.0, 63.0],
+        );
+    }
+
+    #[tokio::test]
     async fn read_data_no_coords_test() {
         let (wrapper, schema) = get_local_zarr_store_no_coords(0.0, "data_no_coords").await;
         let store = wrapper.get_store();
@@ -1192,6 +1426,7 @@ mod zarr_stream_tests {
             1,
             0,
             None,
+            Vec::new(),
             ZarrMetrics::disconnected(),
             None,
         )
@@ -1245,6 +1480,7 @@ mod zarr_stream_tests {
             1,
             0,
             filter,
+            Vec::new(),
             ZarrMetrics::disconnected(),
             None,
         )
@@ -1298,6 +1534,7 @@ mod zarr_stream_tests {
                 None,
                 n_partitions,
                 partition,
+                Vec::new(),
                 ZarrMetrics::disconnected(),
                 Some(limit),
             )
@@ -1343,6 +1580,7 @@ mod zarr_stream_tests {
             1,
             0,
             None,
+            Vec::new(),
             ZarrMetrics::disconnected(),
             None,
         )
@@ -1394,6 +1632,7 @@ mod zarr_stream_tests {
             1,
             0,
             None,
+            Vec::new(),
             ZarrMetrics::disconnected(),
             None,
         )
@@ -1466,6 +1705,7 @@ mod zarr_stream_tests {
             1,
             0,
             None,
+            Vec::new(),
             ZarrMetrics::disconnected(),
             None,
         )
@@ -1621,6 +1861,7 @@ mod zarr_stream_tests {
             1,
             0,
             None,
+            Vec::new(),
             ZarrMetrics::disconnected(),
             None,
         )
@@ -1672,6 +1913,7 @@ mod zarr_stream_tests {
             2,
             0,
             None,
+            Vec::new(),
             ZarrMetrics::disconnected(),
             None,
         )
@@ -1689,6 +1931,7 @@ mod zarr_stream_tests {
             2,
             1,
             None,
+            Vec::new(),
             ZarrMetrics::disconnected(),
             None,
         )
@@ -1736,6 +1979,7 @@ mod zarr_stream_tests {
             20,
             0,
             None,
+            Vec::new(),
             ZarrMetrics::disconnected(),
             None,
         )
@@ -1752,6 +1996,7 @@ mod zarr_stream_tests {
             20,
             8,
             None,
+            Vec::new(),
             ZarrMetrics::disconnected(),
             None,
         )
@@ -1768,6 +2013,7 @@ mod zarr_stream_tests {
             20,
             10,
             None,
+            Vec::new(),
             ZarrMetrics::disconnected(),
             None,
         )
@@ -1784,6 +2030,7 @@ mod zarr_stream_tests {
             20,
             19,
             None,
+            Vec::new(),
             ZarrMetrics::disconnected(),
             None,
         )
@@ -1813,10 +2060,20 @@ mod zarr_stream_tests {
         let metrics_set = ExecutionPlanMetricsSet::new();
         let metrics = ZarrMetrics::new(&metrics_set, 0);
 
-        let stream =
-            ZarrRecordBatchStream::try_new(store, schema, None, None, 1, 0, filter, metrics, None)
-                .await
-                .unwrap();
+        let stream = ZarrRecordBatchStream::try_new(
+            store,
+            schema,
+            None,
+            None,
+            1,
+            0,
+            filter,
+            Vec::new(),
+            metrics,
+            None,
+        )
+        .await
+        .unwrap();
         let records: Vec<_> = stream.try_collect().await.unwrap();
         assert_eq!(records.len(), 4);
 
