@@ -967,7 +967,6 @@ impl JoinableGeo {
     // Order-independent descent: lockstep dual descent when both sides are indexed,
     // otherwise a single descent (iterate self, descend/scan other), same traversal a
     // fold_single call would produce.
-    #[allow(dead_code)] // used once more predicates (e.g. st_intersects) are implemented
     pub(crate) fn fold_for_unordered_check(&self, other: &JoinableGeo, acc: &mut impl Accumulator) {
         match self {
             JoinableGeo::Point { points } => dual_into(points, None, other, acc),
@@ -1011,7 +1010,6 @@ fn single_into<LC: Bboxable, A: Accumulator>(left: &[LC], other: &JoinableGeo, a
 
 // Resolves other for an order-independent descent: dual descent when both sides are indexed,
 // else fall back to a single descent (iterating left).
-#[allow(dead_code)] // used once more predicates (e.g. st_intersects) are implemented
 fn dual_into<LC: Bboxable, A: Accumulator>(
     left: &[LC],
     left_index: Option<&NaturalIndex>,
@@ -1049,7 +1047,10 @@ pub(crate) fn point_on_segment_t(p: &Point, seg: &impl SegmentTrait) -> Option<f
 // The portion of left (in left's parameter, clamped to [0, 1]) covered by
 // right. Returns None when the two aren't collinear or the clamped overlap
 // is empty.
-pub(crate) fn covered_range(left: &LineSegment, right: &LineSegment) -> Option<(f64, f64)> {
+pub(crate) fn covered_range(
+    left: &impl SegmentTrait,
+    right: &impl SegmentTrait,
+) -> Option<(f64, f64)> {
     if !segments_collinear(left, right) {
         return None;
     }
@@ -1190,9 +1191,26 @@ pub(crate) fn segment_crossing_check(
     (false, None)
 }
 
-fn segments_collinear(a: &LineSegment, b: &LineSegment) -> bool {
+fn segments_collinear(a: &impl SegmentTrait, b: &impl SegmentTrait) -> bool {
     let (q1, q2) = b.as_points();
     a.is_collinear_with(q1) && a.is_collinear_with(q2)
+}
+
+// Whether two segments touch via a non-parallel crossing: a proper crossing, a
+// shared endpoint, or a T-junction. Solves for the parameters t (on a) and u (on
+// b); they touch iff both land in [0, 1] (inclusive, so endpoints count). Returns
+// false for parallel segments.
+pub(crate) fn segments_cross(a: &impl SegmentTrait, b: &impl SegmentTrait) -> bool {
+    let cross = a.dir().cross(&b.dir());
+    if cross.abs() < EPS {
+        return false;
+    }
+    let (a1, _) = a.as_points();
+    let (b1, _) = b.as_points();
+    let f = b1.diff(a1);
+    let t = -b.dir().cross(&f) / cross;
+    let u = -a.dir().cross(&f) / cross;
+    (-EPS..=1.0 + EPS).contains(&t) && (-EPS..=1.0 + EPS).contains(&u)
 }
 
 // How one left polygon edge relates to one right polygon edge (edge, interior wedge

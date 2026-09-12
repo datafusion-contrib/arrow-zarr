@@ -67,7 +67,8 @@ macro_rules! spatial_predicate_stub {
 
 spatial_predicate_stub! {
 StWithinUdf => "st_within",
-StContainsUdf => "st_contains",}
+StContainsUdf => "st_contains",
+StIntersectsUdf => "st_intersects",}
 
 /// Byte length of a 2D WKB point: 1 (byte order) + 4 (geometry type) + 2 * 8 (x, y).
 const WKB_POINT_2D_LEN: usize = 21;
@@ -111,7 +112,7 @@ impl ScalarUDFImpl for StPointUdf {
 
         let opts = WriteOptions::default();
         // Every point is exactly WKB_POINT_2D_LEN bytes, so a fixed buffer is fully
-        // overwritten each row via a cursor — no per-row allocation or clearing.
+        // overwritten each row via a cursor.
         let mut buf = [0u8; WKB_POINT_2D_LEN];
         let mut builder = BinaryBuilder::with_capacity(xs.len(), xs.len() * WKB_POINT_2D_LEN);
         for i in 0..xs.len() {
@@ -142,6 +143,7 @@ mod udf_tests {
     fn test_udf_names() {
         assert_eq!(StWithinUdf::default().name(), "st_within");
         assert_eq!(StContainsUdf::default().name(), "st_contains");
+        assert_eq!(StIntersectsUdf::default().name(), "st_intersects");
         assert_eq!(StPointUdf::default().name(), "st_point");
     }
 

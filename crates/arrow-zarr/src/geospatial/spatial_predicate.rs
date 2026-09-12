@@ -18,6 +18,7 @@ use datafusion::physical_plan::PhysicalExpr;
 pub enum SpatialRelationType {
     Within,
     Contains,
+    Intersects,
 }
 
 #[derive(Debug, Clone)]
@@ -32,6 +33,7 @@ impl SpatialRelationType {
         match name.to_lowercase().as_str() {
             "st_within" => Some(Self::Within),
             "st_contains" => Some(Self::Contains),
+            "st_intersects" => Some(Self::Intersects),
             _ => None,
         }
     }
@@ -43,6 +45,8 @@ impl SpatialRelationType {
         match self {
             Self::Within => Self::Contains,
             Self::Contains => Self::Within,
+            // Intersects is symmetric, so swapping operands leaves it unchanged.
+            Self::Intersects => Self::Intersects,
         }
     }
 }
@@ -75,6 +79,10 @@ mod tests {
             SpatialRelationType::from_name("ST_Contains"),
             Some(SpatialRelationType::Contains)
         );
+        assert_eq!(
+            SpatialRelationType::from_name("st_intersects"),
+            Some(SpatialRelationType::Intersects)
+        );
 
         assert_eq!(
             SpatialRelationType::Within.opposite(),
@@ -83,6 +91,10 @@ mod tests {
         assert_eq!(
             SpatialRelationType::Contains.opposite(),
             SpatialRelationType::Within
+        );
+        assert_eq!(
+            SpatialRelationType::Intersects.opposite(),
+            SpatialRelationType::Intersects
         );
     }
 }

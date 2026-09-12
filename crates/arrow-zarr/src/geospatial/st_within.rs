@@ -89,13 +89,13 @@ pub(crate) fn st_contains(a: &JoinableGeo, b: &JoinableGeo) -> bool {
 }
 
 // *************************************************************
-// The accumulators for each compibnation of left and right geometry The general logic
+// The accumulators for each combination of left and right geometry The general logic
 // is to loop over all the left side components (st_within is a "grouped" check) and
 // when one component is done, we check if it is contained by anything on the right.
 // If there are any components that we never see, on the left side, because it didn't
 // match anything on the right during index traversal, it's an automatic false. Also,
 // some combinations allow for left to be on right's boundary, this is neither qualifying
-// or disqualifying, so as long as there is one left component that touches the right
+// nor disqualifying, so as long as there is one left component that touches the right
 // side's interior, all other components can be on a boundary, that's fine.
 // *************************************************************
 

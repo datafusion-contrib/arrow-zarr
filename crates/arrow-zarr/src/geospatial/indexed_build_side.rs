@@ -29,6 +29,7 @@ use geo_types::Rect;
 use super::boxed_geo_batch::{BBoxedGeoBatch, BBoxedGeoStream};
 use super::joinable_geo::{GeoError, JoinableGeo};
 use super::spatial_predicate::SpatialRelationType;
+use super::st_intersects::st_intersects;
 use super::st_within::{st_contains, st_within};
 
 // In-place partition of the first boundary probe entries: keep those whose
@@ -195,6 +196,7 @@ fn evaluate_relation(
     Ok(match predicate {
         SpatialRelationType::Within => st_within(left, right),
         SpatialRelationType::Contains => st_contains(left, right),
+        SpatialRelationType::Intersects => st_intersects(left, right),
     })
 }
 
