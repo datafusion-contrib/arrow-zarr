@@ -19,12 +19,13 @@ pub(crate) mod spatial_join_optimizer;
 pub(crate) mod spatial_join_stream;
 pub mod spatial_predicate;
 pub(crate) mod st_intersects;
+pub(crate) mod st_touches;
 pub(crate) mod st_within;
 pub mod udfs;
 
 pub use spatial_join_exec::SpatialJoinExec;
 pub use spatial_join_optimizer::SpatialJoinPhysicalOptimizer;
-pub use udfs::{StContainsUdf, StIntersectsUdf, StWithinUdf};
+pub use udfs::{StContainsUdf, StIntersectsUdf, StTouchesUdf, StWithinUdf};
 
 // #[cfg(test)]
 pub(crate) mod test_utils;

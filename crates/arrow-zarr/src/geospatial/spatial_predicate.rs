@@ -19,6 +19,7 @@ pub enum SpatialRelationType {
     Within,
     Contains,
     Intersects,
+    Touches,
 }
 
 #[derive(Debug, Clone)]
@@ -34,6 +35,7 @@ impl SpatialRelationType {
             "st_within" => Some(Self::Within),
             "st_contains" => Some(Self::Contains),
             "st_intersects" => Some(Self::Intersects),
+            "st_touches" => Some(Self::Touches),
             _ => None,
         }
     }
@@ -45,8 +47,10 @@ impl SpatialRelationType {
         match self {
             Self::Within => Self::Contains,
             Self::Contains => Self::Within,
-            // Intersects is symmetric, so swapping operands leaves it unchanged.
+            // Intersects and Touches are symmetric, so swapping operands leaves
+            // them unchanged.
             Self::Intersects => Self::Intersects,
+            Self::Touches => Self::Touches,
         }
     }
 }
@@ -83,6 +87,10 @@ mod tests {
             SpatialRelationType::from_name("st_intersects"),
             Some(SpatialRelationType::Intersects)
         );
+        assert_eq!(
+            SpatialRelationType::from_name("st_touches"),
+            Some(SpatialRelationType::Touches)
+        );
 
         assert_eq!(
             SpatialRelationType::Within.opposite(),
@@ -95,6 +103,10 @@ mod tests {
         assert_eq!(
             SpatialRelationType::Intersects.opposite(),
             SpatialRelationType::Intersects
+        );
+        assert_eq!(
+            SpatialRelationType::Touches.opposite(),
+            SpatialRelationType::Touches
         );
     }
 }

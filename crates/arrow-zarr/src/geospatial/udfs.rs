@@ -68,7 +68,8 @@ macro_rules! spatial_predicate_stub {
 spatial_predicate_stub! {
 StWithinUdf => "st_within",
 StContainsUdf => "st_contains",
-StIntersectsUdf => "st_intersects",}
+StIntersectsUdf => "st_intersects",
+StTouchesUdf => "st_touches",}
 
 /// Byte length of a 2D WKB point: 1 (byte order) + 4 (geometry type) + 2 * 8 (x, y).
 const WKB_POINT_2D_LEN: usize = 21;
@@ -144,6 +145,7 @@ mod udf_tests {
         assert_eq!(StWithinUdf::default().name(), "st_within");
         assert_eq!(StContainsUdf::default().name(), "st_contains");
         assert_eq!(StIntersectsUdf::default().name(), "st_intersects");
+        assert_eq!(StTouchesUdf::default().name(), "st_touches");
         assert_eq!(StPointUdf::default().name(), "st_point");
     }
 

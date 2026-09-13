@@ -164,9 +164,17 @@ pub(crate) trait SegmentTrait: AsPoints {
         self.dot(&dp) / self.norm_sq()
     }
 
-    fn x_intercept_at_point(&self, p: &Point) -> f64 {
+    // The x-coordinate where this segment reaches height p.y, or None when p.y is
+    // outside the segment's y-span (the segment is not extended to infinity) or the
+    // segment is horizontal (no single intercept).
+    fn x_intercept_at_point(&self, p: &Point) -> Option<f64> {
         let (p1, p2) = self.as_points();
-        p1.x + (p.y - p1.y) * (p2.x - p1.x) / (p2.y - p1.y)
+        let dy = p2.y - p1.y;
+        if dy == 0.0 {
+            return None;
+        }
+        let t = (p.y - p1.y) / dy;
+        (0.0..=1.0).contains(&t).then(|| p1.x + t * (p2.x - p1.x))
     }
 
     fn midpoint(&self) -> Point {
@@ -180,6 +188,16 @@ pub(crate) trait SegmentTrait: AsPoints {
 
 impl<T: AsPoints> SegmentTrait for T {}
 
+impl LineSegment {
+    pub(crate) fn p1_boundary(&self) -> bool {
+        self.p1_boundary
+    }
+
+    pub(crate) fn p2_boundary(&self) -> bool {
+        self.p2_boundary
+    }
+}
+
 impl Edge {
     pub(crate) fn interior_on_left(&self) -> bool {
         self.interior_on_left
@@ -188,6 +206,15 @@ impl Edge {
     // Index of the next edge in this ring (in the geometry's global edge vector).
     pub(crate) fn next(&self) -> usize {
         self.next
+    }
+
+    // For two collinear, overlapping edges, whether their polygon interiors are on
+    // the same side — i.e. the two polygons overlap along the shared boundary (an
+    // interior–interior contact), rather than being adjacent (interiors on opposite
+    // sides, a boundary-only touch). Only meaningful for a collinear overlapping pair.
+    pub(crate) fn interiors_same_side(&self, other: &Edge) -> bool {
+        let same_dir = self.dir().dot(&other.dir()) > 0.0;
+        (self.interior_on_left == other.interior_on_left) == same_dir
     }
 
     // Interior angle of the polygon at this edge's end vertex, from this edge's
@@ -1087,7 +1114,8 @@ pub(crate) fn ray_crosses_edge(p: &Point, edge: &Edge, next: &Edge) -> bool {
     if p.y == p1.y {
         return false; // first endpoint: owned by the previous edge
     }
-    edge.x_intercept_at_point(p) > p.x
+    // x_intercept_at_point returns None when p.y is outside the edge's y-span.
+    edge.x_intercept_at_point(p).is_some_and(|xi| xi > p.x)
 }
 
 // The ray-cast / midpoint classification of one left segment against one poly
@@ -1125,7 +1153,7 @@ pub(crate) fn midpoint_ray_check(
 // collinear with the segment. Both need to be checked to detect entring the edge
 // and leaving the edge.
 pub(crate) fn segment_crossing_check(
-    left: &LineSegment,
+    left: &impl SegmentTrait,
     edge: &Edge,
     next: &Edge,
 ) -> (bool, Option<f64>) {
@@ -1196,21 +1224,27 @@ fn segments_collinear(a: &impl SegmentTrait, b: &impl SegmentTrait) -> bool {
     a.is_collinear_with(q1) && a.is_collinear_with(q2)
 }
 
-// Whether two segments touch via a non-parallel crossing: a proper crossing, a
-// shared endpoint, or a T-junction. Solves for the parameters t (on a) and u (on
-// b); they touch iff both land in [0, 1] (inclusive, so endpoints count). Returns
-// false for parallel segments.
-pub(crate) fn segments_cross(a: &impl SegmentTrait, b: &impl SegmentTrait) -> bool {
+// The parameters (t on a, u on b) of the intersection of two non-parallel
+// segments, when it lands within both segments ([0, 1] inclusive, so endpoints
+// count). None if there are no intersections.
+pub(crate) fn segment_intersection(
+    a: &impl SegmentTrait,
+    b: &impl SegmentTrait,
+) -> Option<(f64, f64)> {
     let cross = a.dir().cross(&b.dir());
     if cross.abs() < EPS {
-        return false;
+        return None;
     }
     let (a1, _) = a.as_points();
     let (b1, _) = b.as_points();
     let f = b1.diff(a1);
     let t = -b.dir().cross(&f) / cross;
     let u = -a.dir().cross(&f) / cross;
-    (-EPS..=1.0 + EPS).contains(&t) && (-EPS..=1.0 + EPS).contains(&u)
+    ((-EPS..=1.0 + EPS).contains(&t) && (-EPS..=1.0 + EPS).contains(&u)).then_some((t, u))
+}
+
+pub(crate) fn segments_cross(a: &impl SegmentTrait, b: &impl SegmentTrait) -> bool {
+    segment_intersection(a, b).is_some()
 }
 
 // How one left polygon edge relates to one right polygon edge (edge, interior wedge

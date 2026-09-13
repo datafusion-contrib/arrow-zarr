@@ -770,8 +770,9 @@ impl Accumulator for PolyInPoly<'_> {
         if ray {
             self.parity ^= true;
             let mid = seg.midpoint();
-            let xi = edge.x_intercept_at_point(&mid);
-            self.consider_container(xi - mid.x(), rp);
+            if let Some(xi) = edge.x_intercept_at_point(&mid) {
+                self.consider_container(xi - mid.x(), rp);
+            }
         }
         if inside {
             self.mid_inside = true;
