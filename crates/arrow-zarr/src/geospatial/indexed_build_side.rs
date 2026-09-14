@@ -29,6 +29,7 @@ use geo_types::Rect;
 use super::boxed_geo_batch::{BBoxedGeoBatch, BBoxedGeoStream};
 use super::joinable_geo::{GeoError, JoinableGeo};
 use super::spatial_predicate::SpatialRelationType;
+use super::st_coveredby::{st_covered_by, st_covers};
 use super::st_intersects::st_intersects;
 use super::st_touches::st_touches;
 use super::st_within::{st_contains, st_within};
@@ -197,6 +198,8 @@ fn evaluate_relation(
     Ok(match predicate {
         SpatialRelationType::Within => st_within(left, right),
         SpatialRelationType::Contains => st_contains(left, right),
+        SpatialRelationType::CoveredBy => st_covered_by(left, right),
+        SpatialRelationType::Covers => st_covers(left, right),
         SpatialRelationType::Intersects => st_intersects(left, right),
         SpatialRelationType::Touches => st_touches(left, right),
     })

@@ -174,7 +174,7 @@ pub(crate) trait SegmentTrait: AsPoints {
             return None;
         }
         let t = (p.y - p1.y) / dy;
-        (0.0..=1.0).contains(&t).then(|| p1.x + t * (p2.x - p1.x))
+        (0.0..=1.0).contains(&t).then_some(p1.x + t * (p2.x - p1.x))
     }
 
     fn midpoint(&self) -> Point {

@@ -18,6 +18,8 @@ use datafusion::physical_plan::PhysicalExpr;
 pub enum SpatialRelationType {
     Within,
     Contains,
+    CoveredBy,
+    Covers,
     Intersects,
     Touches,
 }
@@ -34,6 +36,8 @@ impl SpatialRelationType {
         match name.to_lowercase().as_str() {
             "st_within" => Some(Self::Within),
             "st_contains" => Some(Self::Contains),
+            "st_coveredby" => Some(Self::CoveredBy),
+            "st_covers" => Some(Self::Covers),
             "st_intersects" => Some(Self::Intersects),
             "st_touches" => Some(Self::Touches),
             _ => None,
@@ -47,6 +51,8 @@ impl SpatialRelationType {
         match self {
             Self::Within => Self::Contains,
             Self::Contains => Self::Within,
+            Self::CoveredBy => Self::Covers,
+            Self::Covers => Self::CoveredBy,
             // Intersects and Touches are symmetric, so swapping operands leaves
             // them unchanged.
             Self::Intersects => Self::Intersects,
@@ -76,7 +82,7 @@ mod tests {
     #[test]
     fn test_from_name_and_opposite() {
         assert_eq!(
-            SpatialRelationType::from_name("st_within"),
+            SpatialRelationType::from_name("ST_Within"),
             Some(SpatialRelationType::Within)
         );
         assert_eq!(
@@ -84,11 +90,19 @@ mod tests {
             Some(SpatialRelationType::Contains)
         );
         assert_eq!(
-            SpatialRelationType::from_name("st_intersects"),
+            SpatialRelationType::from_name("ST_CoveredBy"),
+            Some(SpatialRelationType::CoveredBy)
+        );
+        assert_eq!(
+            SpatialRelationType::from_name("ST_Covers"),
+            Some(SpatialRelationType::Covers)
+        );
+        assert_eq!(
+            SpatialRelationType::from_name("ST_Intersects"),
             Some(SpatialRelationType::Intersects)
         );
         assert_eq!(
-            SpatialRelationType::from_name("st_touches"),
+            SpatialRelationType::from_name("ST_Touches"),
             Some(SpatialRelationType::Touches)
         );
 
@@ -99,6 +113,14 @@ mod tests {
         assert_eq!(
             SpatialRelationType::Contains.opposite(),
             SpatialRelationType::Within
+        );
+        assert_eq!(
+            SpatialRelationType::CoveredBy.opposite(),
+            SpatialRelationType::Covers
+        );
+        assert_eq!(
+            SpatialRelationType::Covers.opposite(),
+            SpatialRelationType::CoveredBy
         );
         assert_eq!(
             SpatialRelationType::Intersects.opposite(),

@@ -68,6 +68,8 @@ macro_rules! spatial_predicate_stub {
 spatial_predicate_stub! {
 StWithinUdf => "st_within",
 StContainsUdf => "st_contains",
+StCoveredByUdf => "st_coveredby",
+StCoversUdf => "st_covers",
 StIntersectsUdf => "st_intersects",
 StTouchesUdf => "st_touches",}
 
@@ -144,6 +146,8 @@ mod udf_tests {
     fn test_udf_names() {
         assert_eq!(StWithinUdf::default().name(), "st_within");
         assert_eq!(StContainsUdf::default().name(), "st_contains");
+        assert_eq!(StCoveredByUdf::default().name(), "st_coveredby");
+        assert_eq!(StCoversUdf::default().name(), "st_covers");
         assert_eq!(StIntersectsUdf::default().name(), "st_intersects");
         assert_eq!(StTouchesUdf::default().name(), "st_touches");
         assert_eq!(StPointUdf::default().name(), "st_point");
