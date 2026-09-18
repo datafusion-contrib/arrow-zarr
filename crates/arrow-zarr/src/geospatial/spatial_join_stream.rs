@@ -31,7 +31,7 @@ use geo_types::Rect;
 
 use super::boxed_geo_batch::{BBoxedGeoBatch, BBoxedGeoStream};
 use super::indexed_build_side::IndexedBuildSide;
-use super::spatial_predicate::RelationPredicate;
+use super::spatial_predicate::{RelationPredicate, SpatialRelationType};
 
 // Hard coded build side. That has to match what the optimizer
 // does, how it defines the build side.
@@ -99,7 +99,14 @@ impl InnerSpatialJoinStream {
         build_side_fut: SharedIndexFuture,
         predicate: RelationPredicate,
     ) -> Self {
-        let probe_stream = BBoxedGeoStream::new(probe_stream, predicate.right.clone());
+        // ST_DWithin buffers the probe bboxes by its distance so the coarse bbox
+        // filter keeps candidate pairs within that distance of a build geometry.
+        let probe_buffer = match predicate.relation_type {
+            SpatialRelationType::DWithin { distance } => Some(distance),
+            _ => None,
+        };
+        let probe_stream =
+            BBoxedGeoStream::new(probe_stream, predicate.right.clone(), probe_buffer);
         Self {
             schema,
             join_type,
@@ -474,6 +481,7 @@ mod spatial_join_stream_tests {
     pub(crate) async fn run_join(
         join_type: JoinType,
         filter: Option<JoinFilter>,
+        relation_type: SpatialRelationType,
     ) -> Vec<RecordBatch> {
         let needs_visited = matches!(join_type, JoinType::Left | JoinType::Full);
         let build_side =
@@ -505,7 +513,7 @@ mod spatial_join_stream_tests {
         let predicate = RelationPredicate::new(
             Arc::new(Column::new("geometry_1", 0)) as Arc<dyn PhysicalExpr>,
             Arc::new(Column::new("geometry_2", 0)) as Arc<dyn PhysicalExpr>,
-            SpatialRelationType::Within,
+            relation_type,
         );
 
         let stream = SpatialJoinStream::new(
@@ -523,7 +531,7 @@ mod spatial_join_stream_tests {
 
     #[tokio::test]
     async fn test_join_types() {
-        let inner = run_join(JoinType::Inner, None).await;
+        let inner = run_join(JoinType::Inner, None, SpatialRelationType::Within).await;
         assert_batches_sorted_eq!(
             [
                 "+-------+-------+",
@@ -537,7 +545,7 @@ mod spatial_join_stream_tests {
             &inner
         );
 
-        let left = run_join(JoinType::Left, None).await;
+        let left = run_join(JoinType::Left, None, SpatialRelationType::Within).await;
         assert_batches_sorted_eq!(
             [
                 "+-------+-------+",
@@ -553,7 +561,7 @@ mod spatial_join_stream_tests {
             &left
         );
 
-        let right = run_join(JoinType::Right, None).await;
+        let right = run_join(JoinType::Right, None, SpatialRelationType::Within).await;
         assert_batches_sorted_eq!(
             [
                 "+-------+-------+",
@@ -571,7 +579,12 @@ mod spatial_join_stream_tests {
 
     #[tokio::test]
     async fn test_join_types_with_filter() {
-        let inner = run_join(JoinType::Inner, Some(col1_gte_col2_filter())).await;
+        let inner = run_join(
+            JoinType::Inner,
+            Some(col1_gte_col2_filter()),
+            SpatialRelationType::Within,
+        )
+        .await;
         assert_batches_sorted_eq!(
             [
                 "+-------+-------+",
@@ -583,7 +596,12 @@ mod spatial_join_stream_tests {
             &inner
         );
 
-        let left = run_join(JoinType::Left, Some(col1_gte_col2_filter())).await;
+        let left = run_join(
+            JoinType::Left,
+            Some(col1_gte_col2_filter()),
+            SpatialRelationType::Within,
+        )
+        .await;
         assert_batches_sorted_eq!(
             [
                 "+-------+-------+",
@@ -598,7 +616,12 @@ mod spatial_join_stream_tests {
             &left
         );
 
-        let right = run_join(JoinType::Right, Some(col1_gte_col2_filter())).await;
+        let right = run_join(
+            JoinType::Right,
+            Some(col1_gte_col2_filter()),
+            SpatialRelationType::Within,
+        )
+        .await;
         assert_batches_sorted_eq!(
             [
                 "+-------+-------+",
@@ -611,6 +634,54 @@ mod spatial_join_stream_tests {
                 "+-------+-------+",
             ],
             &right
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dwithin() {
+        // distance 2 is below every non-containment gap (the nearest is ~2.83), so
+        // it collapses to the within rows.
+        let two = run_join(
+            JoinType::Inner,
+            None,
+            SpatialRelationType::DWithin { distance: 2.0 },
+        )
+        .await;
+        assert_batches_sorted_eq!(
+            [
+                "+-------+-------+",
+                "| col_1 | col_2 |",
+                "+-------+-------+",
+                "| 0     | 1     |",
+                "| 2     | 2     |",
+                "| 2     | 3     |",
+                "+-------+-------+",
+            ],
+            &two
+        );
+
+        // distance 3 additionally matches near-but-disjoint pairs (both ~2.83):
+        // build[0]=[1,2]^2 to probe[3]=[4,10]^2 -> (0, 3)
+        // build[2]=[6,7]^2 to probe[1]=[0,4]^2  -> (2, 1)
+        let three = run_join(
+            JoinType::Inner,
+            None,
+            SpatialRelationType::DWithin { distance: 3.0 },
+        )
+        .await;
+        assert_batches_sorted_eq!(
+            [
+                "+-------+-------+",
+                "| col_1 | col_2 |",
+                "+-------+-------+",
+                "| 0     | 1     |",
+                "| 0     | 3     |",
+                "| 2     | 1     |",
+                "| 2     | 2     |",
+                "| 2     | 3     |",
+                "+-------+-------+",
+            ],
+            &three
         );
     }
 }

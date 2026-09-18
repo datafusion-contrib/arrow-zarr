@@ -73,6 +73,51 @@ StCoversUdf => "st_covers",
 StIntersectsUdf => "st_intersects",
 StTouchesUdf => "st_touches",}
 
+// `st_dwithin(geom, geom, distance)` — like the other predicates, but
+// with a third `Float64` distance argument. Only meaningful as a join
+// condition.
+#[derive(Debug, PartialEq, Eq, Hash)]
+pub struct StDWithinUdf {
+    signature: Signature,
+}
+
+impl Default for StDWithinUdf {
+    fn default() -> Self {
+        Self {
+            signature: Signature::one_of(
+                vec![
+                    TypeSignature::Exact(vec![
+                        DataType::Binary,
+                        DataType::Binary,
+                        DataType::Float64,
+                    ]),
+                    TypeSignature::Exact(vec![
+                        DataType::BinaryView,
+                        DataType::BinaryView,
+                        DataType::Float64,
+                    ]),
+                ],
+                Volatility::Immutable,
+            ),
+        }
+    }
+}
+
+impl ScalarUDFImpl for StDWithinUdf {
+    fn name(&self) -> &str {
+        "st_dwithin"
+    }
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
+        Ok(DataType::Boolean)
+    }
+    fn invoke_with_args(&self, _: ScalarFunctionArgs) -> Result<ColumnarValue> {
+        not_impl_err!("st_dwithin is only supported as a join condition")
+    }
+}
+
 /// Byte length of a 2D WKB point: 1 (byte order) + 4 (geometry type) + 2 * 8 (x, y).
 const WKB_POINT_2D_LEN: usize = 21;
 
@@ -149,6 +194,7 @@ mod udf_tests {
         assert_eq!(StCoveredByUdf::default().name(), "st_coveredby");
         assert_eq!(StCoversUdf::default().name(), "st_covers");
         assert_eq!(StIntersectsUdf::default().name(), "st_intersects");
+        assert_eq!(StDWithinUdf::default().name(), "st_dwithin");
         assert_eq!(StTouchesUdf::default().name(), "st_touches");
         assert_eq!(StPointUdf::default().name(), "st_point");
     }

@@ -29,19 +29,19 @@ pub(crate) fn st_covered_by(a: &JoinableGeo, b: &JoinableGeo) -> bool {
         (JoinableGeo::Line { .. } | JoinableGeo::Poly { .. }, JoinableGeo::Point { .. })
         | (JoinableGeo::Poly { .. }, JoinableGeo::Line { .. }) => false,
 
-        (JoinableGeo::Point { points }, JoinableGeo::Poly { edges, .. }) => {
+        (JoinableGeo::Point { points, .. }, JoinableGeo::Poly { edges, .. }) => {
             let mut acc = PointInPoly::new(points, edges, true);
             a.fold_for_grouped_check(b, &mut acc);
             acc.finish()
         }
 
-        (JoinableGeo::Point { points: a_pts }, JoinableGeo::Point { points: b_pts }) => {
+        (JoinableGeo::Point { points: a_pts, .. }, JoinableGeo::Point { points: b_pts, .. }) => {
             let mut acc = PointInPoint::new(a_pts, b_pts);
             a.fold_for_grouped_check(b, &mut acc);
             acc.finish()
         }
 
-        (JoinableGeo::Point { points }, JoinableGeo::Line { lines, .. }) => {
+        (JoinableGeo::Point { points, .. }, JoinableGeo::Line { lines, .. }) => {
             let mut acc = PointInLine::new(points, lines, true);
             a.fold_for_grouped_check(b, &mut acc);
             acc.finish()

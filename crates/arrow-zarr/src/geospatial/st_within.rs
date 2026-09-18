@@ -26,19 +26,19 @@ pub(crate) fn st_within(a: &JoinableGeo, b: &JoinableGeo) -> bool {
         (JoinableGeo::Line { .. } | JoinableGeo::Poly { .. }, JoinableGeo::Point { .. })
         | (JoinableGeo::Poly { .. }, JoinableGeo::Line { .. }) => false,
 
-        (JoinableGeo::Point { points }, JoinableGeo::Poly { edges, .. }) => {
+        (JoinableGeo::Point { points, .. }, JoinableGeo::Poly { edges, .. }) => {
             let mut acc = PointInPoly::new(points, edges, false);
             a.fold_for_grouped_check(b, &mut acc);
             acc.finish()
         }
 
-        (JoinableGeo::Point { points: a_pts }, JoinableGeo::Point { points: b_pts }) => {
+        (JoinableGeo::Point { points: a_pts, .. }, JoinableGeo::Point { points: b_pts, .. }) => {
             let mut acc = PointInPoint::new(a_pts, b_pts);
             a.fold_for_grouped_check(b, &mut acc);
             acc.finish()
         }
 
-        (JoinableGeo::Point { points }, JoinableGeo::Line { lines, .. }) => {
+        (JoinableGeo::Point { points, .. }, JoinableGeo::Line { lines, .. }) => {
             let mut acc = PointInLine::new(points, lines, false);
             a.fold_for_grouped_check(b, &mut acc);
             acc.finish()
@@ -401,7 +401,7 @@ fn fully_covered(ranges: &mut [(f64, f64)]) -> bool {
 impl Accumulator for LineInLine<'_> {
     // No ray casting for this one, so a symmetric bbox overlap (not the rightward
     // ray) is the correct, tighter prune.
-    fn prune(a: &impl Bboxable, b: &impl Bboxable) -> bool {
+    fn prune(&self, a: &impl Bboxable, b: &impl Bboxable) -> bool {
         a.box_overlap(b)
     }
 

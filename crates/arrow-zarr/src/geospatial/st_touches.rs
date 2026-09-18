@@ -27,14 +27,14 @@ pub(crate) fn st_touches(a: &JoinableGeo, b: &JoinableGeo) -> bool {
         // between two point sets is interior–interior. Touches is never true.
         (JoinableGeo::Point { .. }, JoinableGeo::Point { .. }) => false,
 
-        (JoinableGeo::Point { points }, JoinableGeo::Line { lines, .. }) => {
+        (JoinableGeo::Point { points, .. }, JoinableGeo::Line { lines, .. }) => {
             let mut acc = PointTouchesLine::new(points, lines);
             a.fold_for_unordered_check(b, &mut acc);
             acc.finish()
         }
         (JoinableGeo::Line { .. }, JoinableGeo::Point { .. }) => st_touches(b, a),
 
-        (JoinableGeo::Point { points }, JoinableGeo::Poly { edges, .. }) => {
+        (JoinableGeo::Point { points, .. }, JoinableGeo::Poly { edges, .. }) => {
             let mut acc = PointTouchesPoly::new(points, edges);
             a.fold_for_grouped_check(b, &mut acc);
             acc.finish()
@@ -115,7 +115,7 @@ impl<'a> PointTouchesLine<'a> {
 }
 
 impl Accumulator for PointTouchesLine<'_> {
-    fn prune(a: &impl Bboxable, b: &impl Bboxable) -> bool {
+    fn prune(&self, a: &impl Bboxable, b: &impl Bboxable) -> bool {
         a.box_overlap(b)
     }
 
@@ -247,7 +247,7 @@ impl<'a> LineTouchesLine<'a> {
 }
 
 impl Accumulator for LineTouchesLine<'_> {
-    fn prune(a: &impl Bboxable, b: &impl Bboxable) -> bool {
+    fn prune(&self, a: &impl Bboxable, b: &impl Bboxable) -> bool {
         a.box_overlap(b)
     }
 

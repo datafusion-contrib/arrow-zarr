@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use datafusion::physical_plan::PhysicalExpr;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum SpatialRelationType {
     Within,
     Contains,
@@ -22,6 +22,7 @@ pub enum SpatialRelationType {
     Covers,
     Intersects,
     Touches,
+    DWithin { distance: f64 },
 }
 
 #[derive(Debug, Clone)]
@@ -53,10 +54,13 @@ impl SpatialRelationType {
             Self::Contains => Self::Within,
             Self::CoveredBy => Self::Covers,
             Self::Covers => Self::CoveredBy,
-            // Intersects and Touches are symmetric, so swapping operands leaves
-            // them unchanged.
+            // Intersects, Touches and DWithin are symmetric, so swapping operands
+            // leaves them unchanged.
             Self::Intersects => Self::Intersects,
             Self::Touches => Self::Touches,
+            Self::DWithin { distance } => Self::DWithin {
+                distance: *distance,
+            },
         }
     }
 }
@@ -130,5 +134,15 @@ mod tests {
             SpatialRelationType::Touches.opposite(),
             SpatialRelationType::Touches
         );
+
+        // DWithin is not produced by from_name (the distance comes from the call's
+        // third argument), but it is symmetric and must preserve the distance.
+        assert_eq!(SpatialRelationType::from_name("st_dwithin"), None);
+        let dwithin = SpatialRelationType::DWithin { distance: 5.0 };
+        assert_eq!(dwithin.opposite(), dwithin);
+        match dwithin.opposite() {
+            SpatialRelationType::DWithin { distance } => assert_eq!(distance, 5.0),
+            other => panic!("expected DWithin, got {other:?}"),
+        }
     }
 }

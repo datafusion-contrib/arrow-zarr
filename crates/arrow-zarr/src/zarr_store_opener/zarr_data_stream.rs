@@ -1374,7 +1374,8 @@ mod zarr_stream_tests {
         ));
 
         // Wrap the pruning expression in a dynamic filter, as the spatial join does.
-        let pruning = Arc::new(ProbePruningExpr::new(probe_expr, index)) as Arc<dyn PhysicalExpr>;
+        let pruning =
+            Arc::new(ProbePruningExpr::new(probe_expr, index, None)) as Arc<dyn PhysicalExpr>;
         let dynamic_filter = Arc::new(DynamicFilterPhysicalExpr::new(
             vec![
                 Arc::new(Column::new("lon", 2)),

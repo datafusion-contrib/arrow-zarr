@@ -183,7 +183,7 @@ mod table_provider_tests {
     use super::*;
     use crate::geospatial::test_utils::wkt_to_wkb;
     use crate::geospatial::udfs::StPointUdf;
-    use crate::geospatial::{SpatialJoinPhysicalOptimizer, StWithinUdf};
+    use crate::geospatial::{SpatialJoinPhysicalOptimizer, StDWithinUdf, StWithinUdf};
     #[cfg(feature = "icechunk")]
     use crate::table::config::IcechunkVersion;
     use crate::table::table_provider::ZarrTable;
@@ -648,8 +648,8 @@ mod table_provider_tests {
     }
 
     #[tokio::test]
-    async fn spatial_join_pushdown_query() {
-        let (wrapper, _) = get_local_zarr_store(true, 0.0, "lat_lon_data_spatial_join").await;
+    async fn st_within_test() {
+        let (wrapper, _) = get_local_zarr_store(true, 0.0, "lat_lon_data_spatial_within").await;
         let table_path = wrapper.get_store_path();
 
         let state = SessionStateBuilder::new()
@@ -696,6 +696,64 @@ mod table_provider_tests {
 
         assert_batches_sorted_eq!(
             ["+------+", "| data |", "+------+", "| 54.0 |", "| 9.0  |", "+------+",],
+            &batches
+        );
+    }
+
+    #[tokio::test]
+    async fn st_dwithin_test() {
+        let (wrapper, _) = get_local_zarr_store(true, 0.0, "lat_lon_data_spatial_dwithin").await;
+        let table_path = wrapper.get_store_path();
+
+        let state = SessionStateBuilder::new()
+            .with_default_features()
+            .with_physical_optimizer_rule(Arc::new(SpatialJoinPhysicalOptimizer))
+            .build();
+        let session = SessionContext::new_with_state(state);
+        session.register_udf(ScalarUDF::from(StDWithinUdf::default()));
+        session.register_udf(ScalarUDF::from(StPointUdf::default()));
+        session
+            .register_table(
+                "zarr_table",
+                Arc::new(zarr_table_from_path(table_path).await),
+            )
+            .unwrap();
+
+        // Same two boxes as the within test, centered on the (lon -119, lat 36) and
+        // (lon -114, lat 41) grid points.
+        let hex: Vec<String> = [
+            "POLYGON((-119.5 35.5, -118.5 35.5, -118.5 36.5, -119.5 36.5, -119.5 35.5))",
+            "POLYGON((-114.5 40.5, -113.5 40.5, -113.5 41.5, -114.5 41.5, -114.5 40.5))",
+        ]
+        .iter()
+        .map(|wkt| wkt_to_wkb(wkt).iter().map(|b| format!("{b:02x}")).collect())
+        .collect();
+
+        // A distance of 1.5 reaches 1.5 beyond each 1x1 box's edges, so every grid
+        // point within 1.5 of a box is kept (including points in neighbouring
+        // chunks that the buffered probe bbox pulls in). Each box matches 11 points.
+        let query = format!(
+            "
+            WITH boxes AS (
+                SELECT decode(hex, 'hex') AS geom
+                FROM (VALUES ('{}'), ('{}')) AS t(hex)
+            )
+            SELECT z.data
+            FROM boxes b
+            JOIN zarr_table z
+                ON st_dwithin(st_point(z.lon, z.lat), b.geom, 1.5)
+            ",
+            hex[0], hex[1],
+        );
+        let batches = session.sql(&query).await.unwrap().collect().await.unwrap();
+
+        assert_batches_sorted_eq!(
+            [
+                "+------+", "| data |", "+------+", "| 0.0  |", "| 1.0  |", "| 10.0 |", "| 11.0 |",
+                "| 16.0 |", "| 17.0 |", "| 18.0 |", "| 2.0  |", "| 25.0 |", "| 38.0 |", "| 45.0 |",
+                "| 46.0 |", "| 47.0 |", "| 52.0 |", "| 53.0 |", "| 54.0 |", "| 55.0 |", "| 61.0 |",
+                "| 62.0 |", "| 63.0 |", "| 8.0  |", "| 9.0  |", "+------+",
+            ],
             &batches
         );
     }

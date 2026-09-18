@@ -36,7 +36,13 @@ pub(crate) struct BBoxedGeoBatch {
 }
 
 impl BBoxedGeoBatch {
-    pub(crate) fn new(batch: RecordBatch, geo_expr: &Arc<dyn PhysicalExpr>) -> Result<Self> {
+    pub(crate) fn new(
+        batch: RecordBatch,
+        geo_expr: &Arc<dyn PhysicalExpr>,
+        // `buffer` (Some for ST_DWithin) expands every bbox by that distance
+        // on all sides.
+        buffer: Option<f64>,
+    ) -> Result<Self> {
         let n = batch.num_rows();
         let geo_array = geo_expr.evaluate(&batch)?.into_array(n)?;
 
@@ -93,6 +99,12 @@ impl BBoxedGeoBatch {
             }
         }
 
+        if let Some(b) = buffer {
+            for rect in &mut rects {
+                *rect = inflate(*rect, b);
+            }
+        }
+
         Ok(Self {
             batch,
             geo_array,
@@ -113,6 +125,21 @@ impl BBoxedGeoBatch {
     pub(crate) fn is_empty(&self) -> bool {
         self.geo_ids.is_empty()
     }
+}
+
+// Expands a rect by `buffer` on all four sides.
+fn inflate(rect: Rect<f32>, buffer: f64) -> Rect<f32> {
+    let b = buffer as f32;
+    Rect::new(
+        Coord {
+            x: rect.min().x - b,
+            y: rect.min().y - b,
+        },
+        Coord {
+            x: rect.max().x + b,
+            y: rect.max().y + b,
+        },
+    )
 }
 
 // Precomputes the bounding box of each geometry. Those will also be computed when
@@ -199,11 +226,20 @@ fn bbox_of(wkb: &Wkb) -> Option<Rect<f32>> {
 pub(crate) struct BBoxedGeoStream {
     inner: SendableRecordBatchStream,
     geo_expr: Arc<dyn PhysicalExpr>,
+    buffer: Option<f64>,
 }
 
 impl BBoxedGeoStream {
-    pub(crate) fn new(inner: SendableRecordBatchStream, geo_expr: Arc<dyn PhysicalExpr>) -> Self {
-        Self { inner, geo_expr }
+    pub(crate) fn new(
+        inner: SendableRecordBatchStream,
+        geo_expr: Arc<dyn PhysicalExpr>,
+        buffer: Option<f64>,
+    ) -> Self {
+        Self {
+            inner,
+            geo_expr,
+            buffer,
+        }
     }
 }
 
@@ -213,9 +249,11 @@ impl Stream for BBoxedGeoStream {
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
         match Pin::new(&mut this.inner).poll_next(cx) {
-            Poll::Ready(Some(Ok(batch))) => {
-                Poll::Ready(Some(BBoxedGeoBatch::new(batch, &this.geo_expr)))
-            }
+            Poll::Ready(Some(Ok(batch))) => Poll::Ready(Some(BBoxedGeoBatch::new(
+                batch,
+                &this.geo_expr,
+                this.buffer,
+            ))),
             Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(e))),
             Poll::Ready(None) => Poll::Ready(None),
             Poll::Pending => Poll::Pending,
@@ -264,7 +302,7 @@ mod bbox_geo_batch_tests {
         .unwrap();
 
         let geo_expr = Arc::new(Column::new("geometry", 2)) as Arc<dyn PhysicalExpr>;
-        let boxed = BBoxedGeoBatch::new(batch, &geo_expr).unwrap();
+        let boxed = BBoxedGeoBatch::new(batch, &geo_expr, None).unwrap();
 
         assert_eq!(boxed.geo_ids, vec![0, 1, 2, 3]);
         assert_eq!(

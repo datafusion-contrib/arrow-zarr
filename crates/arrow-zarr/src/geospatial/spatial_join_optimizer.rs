@@ -12,11 +12,12 @@
 
 use std::sync::Arc;
 
+use arrow_schema::DataType;
 use datafusion::common::tree_node::{Transformed, TreeNode};
-use datafusion::common::{HashMap, JoinSide, Result};
+use datafusion::common::{HashMap, JoinSide, Result, ScalarValue};
 use datafusion::config::ConfigOptions;
 use datafusion::logical_expr::Operator;
-use datafusion::physical_expr::expressions::{BinaryExpr, Column};
+use datafusion::physical_expr::expressions::{BinaryExpr, Column, Literal};
 use datafusion::physical_expr::ScalarFunctionExpr;
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
@@ -187,9 +188,18 @@ fn match_relation_predicate(
     f: &ScalarFunctionExpr,
     col_indices: &[ColumnIndex],
 ) -> Option<RelationPredicate> {
-    let relation_type = SpatialRelationType::from_name(f.fun().name())?;
     let args = f.args();
     assert!(args.len() >= 2);
+
+    // st_dwithin carries its distance in the third argument, so it isn't derivable
+    // from the function name alone. every other predicate maps by name.
+    let name = f.fun().name();
+    let relation_type = if name.eq_ignore_ascii_case("st_dwithin") {
+        let distance = literal_f64(args.get(2)?)?;
+        SpatialRelationType::DWithin { distance }
+    } else {
+        SpatialRelationType::from_name(name)?
+    };
 
     let refs0 = collect_column_references(&args[0], col_indices);
     let refs1 = collect_column_references(&args[1], col_indices);
@@ -207,6 +217,16 @@ fn match_relation_predicate(
         (JoinSide::Right, JoinSide::Left) => {
             Some(RelationPredicate::new(arg1, arg0, relation_type.opposite()))
         }
+        _ => None,
+    }
+}
+
+// Extracts a constant f64 from a literal argument. Returns None for a
+// non-literal or non-numeric arg.
+fn literal_f64(expr: &Arc<dyn PhysicalExpr>) -> Option<f64> {
+    let value = expr.downcast_ref::<Literal>()?.value();
+    match value.cast_to(&DataType::Float64).ok()? {
+        ScalarValue::Float64(Some(v)) => Some(v),
         _ => None,
     }
 }
@@ -283,11 +303,12 @@ mod optimizer_tests {
     use arrow_schema::{DataType, Field, Schema};
     use datafusion::common::JoinType;
     use datafusion::logical_expr::ScalarUDF;
+    use datafusion::physical_expr::expressions::lit;
     use datafusion::physical_plan::empty::EmptyExec;
     use datafusion::physical_plan::joins::NestedLoopJoinExec;
 
     use super::super::spatial_predicate::SpatialRelationType;
-    use super::super::udfs::StWithinUdf;
+    use super::super::udfs::{StDWithinUdf, StWithinUdf};
     use super::*;
 
     fn within_expr(left_idx: usize, right_idx: usize) -> Arc<dyn PhysicalExpr> {
@@ -304,6 +325,21 @@ mod optimizer_tests {
         ))
     }
 
+    fn dwithin_expr(left_idx: usize, right_idx: usize, distance: f64) -> Arc<dyn PhysicalExpr> {
+        let udf = Arc::new(ScalarUDF::from(StDWithinUdf::default()));
+        Arc::new(ScalarFunctionExpr::new(
+            "st_dwithin",
+            udf,
+            vec![
+                Arc::new(Column::new("left_geom", left_idx)),
+                Arc::new(Column::new("right_geom", right_idx)),
+                lit(distance),
+            ],
+            Arc::new(Field::new("result", DataType::Boolean, true)),
+            Arc::new(ConfigOptions::default()),
+        ))
+    }
+
     fn geom_schema() -> Arc<Schema> {
         Arc::new(Schema::new(vec![Field::new(
             "geom",
@@ -312,11 +348,7 @@ mod optimizer_tests {
         )]))
     }
 
-    fn run_optimizer(
-        join_type: JoinType,
-        left_arg_idx: usize,
-        right_arg_idx: usize,
-    ) -> Arc<dyn ExecutionPlan> {
+    fn run_optimizer(join_type: JoinType, expr: Arc<dyn PhysicalExpr>) -> Arc<dyn ExecutionPlan> {
         let left = Arc::new(EmptyExec::new(geom_schema())) as Arc<dyn ExecutionPlan>;
         let right = Arc::new(EmptyExec::new(geom_schema())) as Arc<dyn ExecutionPlan>;
         let filter_schema = Arc::new(Schema::new(vec![
@@ -333,11 +365,7 @@ mod optimizer_tests {
                 side: JoinSide::Right,
             },
         ];
-        let filter = JoinFilter::new(
-            within_expr(left_arg_idx, right_arg_idx),
-            column_indices,
-            filter_schema,
-        );
+        let filter = JoinFilter::new(expr, column_indices, filter_schema);
         let nlj = NestedLoopJoinExec::try_new(left, right, Some(filter), &join_type, None).unwrap();
         SpatialJoinPhysicalOptimizer::new()
             .optimize(Arc::new(nlj), &ConfigOptions::default())
@@ -346,7 +374,7 @@ mod optimizer_tests {
 
     #[test]
     fn test_optimizer_converts_nlj_to_spatial_join() {
-        let optimized = run_optimizer(JoinType::Inner, 0, 1);
+        let optimized = run_optimizer(JoinType::Inner, within_expr(0, 1));
         let spatial = optimized
             .downcast_ref::<SpatialJoinExec>()
             .expect("should be converted to SpatialJoinExec");
@@ -357,7 +385,7 @@ mod optimizer_tests {
 
     #[test]
     fn test_optimizer_converts_nlj_to_spatial_join_left() {
-        let optimized = run_optimizer(JoinType::Left, 0, 1);
+        let optimized = run_optimizer(JoinType::Left, within_expr(0, 1));
         let spatial = optimized
             .downcast_ref::<SpatialJoinExec>()
             .expect("should be converted to SpatialJoinExec");
@@ -368,7 +396,7 @@ mod optimizer_tests {
 
     #[test]
     fn test_optimizer_converts_nlj_to_spatial_join_right() {
-        let optimized = run_optimizer(JoinType::Right, 0, 1);
+        let optimized = run_optimizer(JoinType::Right, within_expr(0, 1));
         let spatial = optimized
             .downcast_ref::<SpatialJoinExec>()
             .expect("should be converted to SpatialJoinExec");
@@ -378,10 +406,23 @@ mod optimizer_tests {
     }
 
     #[test]
+    fn test_optimizer_converts_dwithin() {
+        // The distance literal (third arg) is carried into the relation type.
+        let optimized = run_optimizer(JoinType::Inner, dwithin_expr(0, 1, 5.0));
+        let spatial = optimized
+            .downcast_ref::<SpatialJoinExec>()
+            .expect("st_dwithin should convert to a SpatialJoinExec");
+        assert_eq!(
+            spatial.predicate.relation_type,
+            SpatialRelationType::DWithin { distance: 5.0 }
+        );
+    }
+
+    #[test]
     fn test_optimizer_flips_inverted_args() {
         // st_within(right.geom, left.geom) — args reference the sides in reverse, so the
         // optimizer expresses it left-first as st_contains(left, right) instead of rejecting it.
-        let optimized = run_optimizer(JoinType::Inner, 1, 0);
+        let optimized = run_optimizer(JoinType::Inner, within_expr(1, 0));
         let spatial = optimized
             .downcast_ref::<SpatialJoinExec>()
             .expect("inverted st_within(right, left) should convert to a flipped SpatialJoinExec");

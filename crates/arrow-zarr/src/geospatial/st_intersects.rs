@@ -21,18 +21,18 @@ use super::joinable_geo::{
 // *************************************************************
 pub(crate) fn st_intersects(a: &JoinableGeo, b: &JoinableGeo) -> bool {
     match (a, b) {
-        (JoinableGeo::Point { points: a_pts }, JoinableGeo::Point { points: b_pts }) => {
+        (JoinableGeo::Point { points: a_pts, .. }, JoinableGeo::Point { points: b_pts, .. }) => {
             let mut acc = PointIntersectsPoint::new(a_pts, b_pts);
             a.fold_for_unordered_check(b, &mut acc);
             acc.finish()
         }
 
-        (JoinableGeo::Point { points }, JoinableGeo::Line { lines, .. }) => {
+        (JoinableGeo::Point { points, .. }, JoinableGeo::Line { lines, .. }) => {
             let mut acc = PointIntersectsLine::new(points, lines);
             a.fold_for_unordered_check(b, &mut acc);
             acc.finish()
         }
-        (JoinableGeo::Point { points }, JoinableGeo::Poly { edges, .. }) => {
+        (JoinableGeo::Point { points, .. }, JoinableGeo::Poly { edges, .. }) => {
             let mut acc = PointIntersectsPoly::new(points, edges);
             a.fold_for_grouped_check(b, &mut acc);
             acc.finish()
@@ -96,7 +96,7 @@ impl<'a> PointIntersectsPoint<'a> {
 
 impl Accumulator for PointIntersectsPoint<'_> {
     // No ray casting, so a symmetric bbox overlap is the correct, tighter prune.
-    fn prune(a: &impl Bboxable, b: &impl Bboxable) -> bool {
+    fn prune(&self, a: &impl Bboxable, b: &impl Bboxable) -> bool {
         a.box_overlap(b)
     }
 
@@ -134,7 +134,7 @@ impl<'a> PointIntersectsLine<'a> {
 }
 
 impl Accumulator for PointIntersectsLine<'_> {
-    fn prune(a: &impl Bboxable, b: &impl Bboxable) -> bool {
+    fn prune(&self, a: &impl Bboxable, b: &impl Bboxable) -> bool {
         a.box_overlap(b)
     }
 
@@ -238,7 +238,7 @@ impl<'a> LineIntersectsLine<'a> {
 }
 
 impl Accumulator for LineIntersectsLine<'_> {
-    fn prune(a: &impl Bboxable, b: &impl Bboxable) -> bool {
+    fn prune(&self, a: &impl Bboxable, b: &impl Bboxable) -> bool {
         a.box_overlap(b)
     }
 

@@ -30,6 +30,7 @@ use super::boxed_geo_batch::{BBoxedGeoBatch, BBoxedGeoStream};
 use super::joinable_geo::{GeoError, JoinableGeo};
 use super::spatial_predicate::SpatialRelationType;
 use super::st_coveredby::{st_covered_by, st_covers};
+use super::st_dwithin::st_dwithin;
 use super::st_intersects::st_intersects;
 use super::st_touches::st_touches;
 use super::st_within::{st_contains, st_within};
@@ -202,6 +203,7 @@ fn evaluate_relation(
         SpatialRelationType::Covers => st_covers(left, right),
         SpatialRelationType::Intersects => st_intersects(left, right),
         SpatialRelationType::Touches => st_touches(left, right),
+        SpatialRelationType::DWithin { distance } => st_dwithin(left, right, *distance),
     })
 }
 
@@ -472,7 +474,7 @@ pub(crate) mod test_helpers {
         )
         .unwrap();
         let geo_expr = Arc::new(Column::new(geo_col, 0)) as Arc<dyn PhysicalExpr>;
-        BBoxedGeoBatch::new(batch, &geo_expr).unwrap()
+        BBoxedGeoBatch::new(batch, &geo_expr, None).unwrap()
     }
 
     fn make_build_batch(
@@ -498,7 +500,7 @@ pub(crate) mod test_helpers {
         )
         .unwrap();
         let geo_expr = Arc::new(Column::new(geo_col, 0)) as Arc<dyn PhysicalExpr>;
-        BBoxedGeoBatch::new(batch, &geo_expr).unwrap()
+        BBoxedGeoBatch::new(batch, &geo_expr, None).unwrap()
     }
 
     pub(crate) fn make_indexed_build_side(
