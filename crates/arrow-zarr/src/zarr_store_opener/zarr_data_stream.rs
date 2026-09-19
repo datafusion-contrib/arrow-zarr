@@ -1235,8 +1235,8 @@ mod zarr_stream_tests {
     use futures_util::TryStreamExt;
 
     use super::*;
-    use crate::geospatial::indexed_build_side::test_helpers::make_indexed_build_side;
-    use crate::geospatial::udfs::StPointUdf;
+    use crate::geospatial::geos::indexed_build_side::test_helpers::make_indexed_build_side;
+    use crate::geospatial::udfs::st_point::StPointUdf;
     use crate::test_utils::{
         extract_col, get_local_zarr_store, get_local_zarr_store_3d, get_local_zarr_store_4d,
         get_local_zarr_store_mix_dims, get_local_zarr_store_no_coords, validate_names_and_types,

@@ -28,12 +28,10 @@ use geo_types::Rect;
 
 use super::boxed_geo_batch::{BBoxedGeoBatch, BBoxedGeoStream};
 use super::joinable_geo::{GeoError, JoinableGeo};
-use super::spatial_predicate::SpatialRelationType;
-use super::st_coveredby::{st_covered_by, st_covers};
-use super::st_dwithin::st_dwithin;
-use super::st_intersects::st_intersects;
-use super::st_touches::st_touches;
-use super::st_within::{st_contains, st_within};
+use crate::geospatial::join_predicates::{
+    st_contains, st_covered_by, st_covers, st_dwithin, st_intersects, st_touches, st_within,
+    SpatialRelationType,
+};
 
 // In-place partition of the first boundary probe entries: keep those whose
 // rect overlaps the given node bbox by swapping survivors to the front; returns
@@ -450,7 +448,7 @@ pub(crate) mod test_helpers {
     use datafusion::physical_plan::PhysicalExpr;
 
     use super::{IndexedBuildSide, IndexedBuildSideBuilder};
-    use crate::geospatial::boxed_geo_batch::BBoxedGeoBatch;
+    use crate::geospatial::geos::boxed_geo_batch::BBoxedGeoBatch;
     use crate::geospatial::test_utils::wkt_to_wkb;
 
     pub(crate) fn make_geo_batch(
@@ -530,7 +528,7 @@ mod indexed_build_side_tests {
 
     use super::test_helpers::{make_geo_batch, make_indexed_build_side};
     use super::*;
-    use crate::geospatial::spatial_predicate::SpatialRelationType;
+    use crate::geospatial::join_predicates::SpatialRelationType;
     use crate::geospatial::test_utils::make_squares;
 
     fn traverse_within_and_mark(

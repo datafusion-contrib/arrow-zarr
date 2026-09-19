@@ -10,7 +10,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::joinable_geo::{
+use crate::geospatial::geos::{
     covered_range, point_on_segment_t, ray_crosses_edge, segments_cross, Accumulator, Bboxable,
     Edge, JoinableGeo, LineSegment, Point, SegmentTrait,
 };
@@ -342,9 +342,9 @@ impl<L: SegmentTrait> Accumulator for SegmentsIntersectPoly<'_, L> {
 mod test_helpers {
     use geos::Geom;
 
-    pub(super) use super::super::test_utils::wkt_to_wkb;
     use super::JoinableGeo;
-    use crate::geospatial::st_intersects::st_intersects;
+    use crate::geospatial::join_predicates::st_intersects::st_intersects;
+    pub(super) use crate::geospatial::test_utils::wkt_to_wkb;
 
     pub(super) fn compare_intersects(label: &str, wkt_a: &str, wkt_b: &str) {
         let bytes_a = wkt_to_wkb(wkt_a);

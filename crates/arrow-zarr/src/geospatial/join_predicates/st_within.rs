@@ -10,7 +10,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::joinable_geo::{
+use crate::geospatial::geos::{
     covered_range, midpoint_ray_check, point_at_line_endpoint, point_on_segment_t,
     poly_edge_relation, ray_crosses_edge, segment_crossing_check, Accumulator, Bboxable, Edge,
     JoinableGeo, LineSegment, Point, SegmentTrait, EPS,
@@ -854,9 +854,9 @@ impl Accumulator for PolyInPoly<'_> {
 mod test_helpers {
     use geos::Geom;
 
-    pub(super) use super::super::test_utils::wkt_to_wkb;
     use super::JoinableGeo;
-    use crate::geospatial::st_within::{st_contains, st_within};
+    use crate::geospatial::join_predicates::st_within::{st_contains, st_within};
+    pub(super) use crate::geospatial::test_utils::wkt_to_wkb;
 
     pub(super) fn compare_within(label: &str, wkt_a: &str, wkt_b: &str) {
         let bytes_a = wkt_to_wkb(wkt_a);

@@ -29,9 +29,8 @@ use futures::stream::BoxStream;
 use futures::{Stream, TryStreamExt};
 use geo_types::Rect;
 
-use super::boxed_geo_batch::{BBoxedGeoBatch, BBoxedGeoStream};
-use super::indexed_build_side::IndexedBuildSide;
-use super::spatial_predicate::{RelationPredicate, SpatialRelationType};
+use crate::geospatial::geos::{BBoxedGeoBatch, BBoxedGeoStream, IndexedBuildSide};
+use crate::geospatial::join_predicates::{RelationPredicate, SpatialRelationType};
 
 // Hard coded build side. That has to match what the optimizer
 // does, how it defines the build side.
@@ -450,8 +449,8 @@ mod spatial_join_stream_tests {
     use futures::{FutureExt, TryStreamExt};
 
     use super::SpatialJoinStream;
-    use crate::geospatial::indexed_build_side::test_helpers::make_indexed_build_side;
-    use crate::geospatial::spatial_predicate::{RelationPredicate, SpatialRelationType};
+    use crate::geospatial::geos::indexed_build_side::test_helpers::make_indexed_build_side;
+    use crate::geospatial::join_predicates::{RelationPredicate, SpatialRelationType};
     use crate::geospatial::test_utils::{col1_gte_col2_filter, make_geo_stream};
 
     // Build side: 4 unit squares across 2 partitions.

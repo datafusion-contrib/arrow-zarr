@@ -36,11 +36,10 @@ use datafusion::physical_plan::{
 };
 use futures::future::{BoxFuture, FutureExt};
 
-use crate::geospatial::boxed_geo_batch::BBoxedGeoStream;
-use crate::geospatial::indexed_build_side::{build_from_streams, IndexedBuildSide};
+use crate::geospatial::geos::{build_from_streams, BBoxedGeoStream, IndexedBuildSide};
+use crate::geospatial::join_predicates::{RelationPredicate, SpatialRelationType};
 use crate::geospatial::probe_pruning_expr::ProbePruningExpr;
 use crate::geospatial::spatial_join_stream::{SharedIndexFuture, SpatialJoinStream};
-use crate::geospatial::spatial_predicate::{RelationPredicate, SpatialRelationType};
 
 #[derive(Debug, Clone)]
 pub struct SpatialJoinExec {
@@ -498,7 +497,7 @@ mod exec_tests {
     use futures::TryStreamExt;
 
     use super::SpatialJoinExec;
-    use crate::geospatial::spatial_predicate::{RelationPredicate, SpatialRelationType};
+    use crate::geospatial::join_predicates::{RelationPredicate, SpatialRelationType};
     use crate::geospatial::test_utils::{col1_gte_col2_filter, wkt_to_wkb};
 
     // Build side: 8 unit squares, col_1 = row index.

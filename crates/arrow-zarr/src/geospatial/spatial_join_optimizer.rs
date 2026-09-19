@@ -12,7 +12,7 @@
 
 use std::sync::Arc;
 
-use arrow_schema::DataType;
+use arrow_schema::{DataType, Schema};
 use datafusion::common::tree_node::{Transformed, TreeNode};
 use datafusion::common::{HashMap, JoinSide, Result, ScalarValue};
 use datafusion::config::ConfigOptions;
@@ -29,7 +29,12 @@ use datafusion::physical_plan::{
 };
 
 use super::spatial_join_exec::SpatialJoinExec;
-use super::spatial_predicate::{RelationPredicate, SpatialRelationType};
+use crate::geospatial::join_predicates::{RelationPredicate, SpatialRelationType};
+use crate::geospatial::udfs::st_geomfrom::require_geometry;
+
+// A matched spatial predicate plus any leftover (non-spatial) predicate that
+// must still be applied as a join filter.
+type SpatialPredicateMatch = (RelationPredicate, Option<Arc<dyn PhysicalExpr>>);
 #[derive(Debug, Default)]
 pub struct SpatialJoinPhysicalOptimizer;
 
@@ -73,7 +78,7 @@ fn try_convert_to_spatial_join(nlj: &NestedLoopJoinExec) -> Result<Option<Arc<dy
     let Some(join_filter) = nlj.filter() else {
         return Ok(None);
     };
-    let Some((predicate, remainder)) = transform_join_filter(join_filter) else {
+    let Some((predicate, remainder)) = transform_join_filter(join_filter)? else {
         return Ok(None);
     };
 
@@ -106,13 +111,18 @@ fn try_convert_to_spatial_join(nlj: &NestedLoopJoinExec) -> Result<Option<Arc<dy
 // point in the code the original join has to be a nested loop), that other
 // condition(s) are moved to a join filter, and the spatial predicate now
 // drives the join logic.
-fn transform_join_filter(jf: &JoinFilter) -> Option<(RelationPredicate, Option<JoinFilter>)> {
-    let (predicate, remainder_expr) =
-        extract_spatial_predicate(jf.expression(), jf.column_indices())?;
+fn transform_join_filter(
+    jf: &JoinFilter,
+) -> Result<Option<(RelationPredicate, Option<JoinFilter>)>> {
+    let Some((predicate, remainder_expr)) =
+        extract_spatial_predicate(jf.expression(), jf.column_indices(), jf.schema())?
+    else {
+        return Ok(None);
+    };
     let remainder = remainder_expr
         .as_ref()
         .map(|expr| rebuild_join_filter(expr, jf));
-    Some((predicate, remainder))
+    Ok(Some((predicate, remainder)))
 }
 
 fn rebuild_join_filter(expr: &Arc<dyn PhysicalExpr>, jf: &JoinFilter) -> JoinFilter {
@@ -145,21 +155,22 @@ fn rebuild_join_filter(expr: &Arc<dyn PhysicalExpr>, jf: &JoinFilter) -> JoinFil
 fn extract_spatial_predicate(
     expr: &Arc<dyn PhysicalExpr>,
     col_indices: &[ColumnIndex],
-) -> Option<(RelationPredicate, Option<Arc<dyn PhysicalExpr>>)> {
+    schema: &Schema,
+) -> Result<Option<SpatialPredicateMatch>> {
     if let Some(f) = expr.downcast_ref::<ScalarFunctionExpr>() {
-        if let Some(pred) = match_relation_predicate(f, col_indices) {
-            return Some((pred, None));
+        if let Some(pred) = match_relation_predicate(f, col_indices, schema)? {
+            return Ok(Some((pred, None)));
         }
     }
 
     if let Some(bin) = expr.downcast_ref::<BinaryExpr>() {
         if !matches!(bin.op(), Operator::And) {
-            return None;
+            return Ok(None);
         }
         let lhs = bin.left();
         let rhs = bin.right();
 
-        if let Some((pred, rem)) = extract_spatial_predicate(lhs, col_indices) {
+        if let Some((pred, rem)) = extract_spatial_predicate(lhs, col_indices, schema)? {
             let remainder = rem.map_or_else(
                 || rhs.clone(),
                 |r| {
@@ -167,9 +178,9 @@ fn extract_spatial_predicate(
                         as Arc<dyn PhysicalExpr>
                 },
             );
-            return Some((pred, Some(remainder)));
+            return Ok(Some((pred, Some(remainder))));
         }
-        if let Some((pred, rem)) = extract_spatial_predicate(rhs, col_indices) {
+        if let Some((pred, rem)) = extract_spatial_predicate(rhs, col_indices, schema)? {
             let remainder = rem.map_or_else(
                 || lhs.clone(),
                 |r| {
@@ -177,17 +188,18 @@ fn extract_spatial_predicate(
                         as Arc<dyn PhysicalExpr>
                 },
             );
-            return Some((pred, Some(remainder)));
+            return Ok(Some((pred, Some(remainder))));
         }
     }
 
-    None
+    Ok(None)
 }
 
 fn match_relation_predicate(
     f: &ScalarFunctionExpr,
     col_indices: &[ColumnIndex],
-) -> Option<RelationPredicate> {
+    schema: &Schema,
+) -> Result<Option<RelationPredicate>> {
     let args = f.args();
     assert!(args.len() >= 2);
 
@@ -195,20 +207,33 @@ fn match_relation_predicate(
     // from the function name alone. every other predicate maps by name.
     let name = f.fun().name();
     let relation_type = if name.eq_ignore_ascii_case("st_dwithin") {
-        let distance = literal_f64(args.get(2)?)?;
-        SpatialRelationType::DWithin { distance }
+        match args.get(2).and_then(literal_f64) {
+            Some(distance) => SpatialRelationType::DWithin { distance },
+            None => return Ok(None),
+        }
     } else {
-        SpatialRelationType::from_name(name)?
+        match SpatialRelationType::from_name(name) {
+            Some(rt) => rt,
+            None => return Ok(None),
+        }
     };
 
     let refs0 = collect_column_references(&args[0], col_indices);
     let refs1 = collect_column_references(&args[1], col_indices);
-    let (side0, side1) = resolve_sides(&refs0, &refs1)?;
+    let Some((side0, side1)) = resolve_sides(&refs0, &refs1) else {
+        return Ok(None);
+    };
+
+    // Now that we know this is a spatial predicate, enforce that both geometry
+    // operands are tagged geometry (mirrors the UDF's planning-time check, so a
+    // join built without going through the UDFs can't run against bare binary).
+    require_geometry(args[0].return_field(schema)?.as_ref())?;
+    require_geometry(args[1].return_field(schema)?.as_ref())?;
 
     let arg0 = reproject_for_side(&args[0], col_indices, side0);
     let arg1 = reproject_for_side(&args[1], col_indices, side1);
 
-    match (side0, side1) {
+    Ok(match (side0, side1) {
         (JoinSide::Left, JoinSide::Right) => {
             Some(RelationPredicate::new(arg0, arg1, relation_type))
         }
@@ -218,7 +243,7 @@ fn match_relation_predicate(
             Some(RelationPredicate::new(arg1, arg0, relation_type.opposite()))
         }
         _ => None,
-    }
+    })
 }
 
 // Extracts a constant f64 from a literal argument. Returns None for a
@@ -300,6 +325,8 @@ fn reproject_columns(
 
 #[cfg(test)]
 mod optimizer_tests {
+    use std::collections::HashMap;
+
     use arrow_schema::{DataType, Field, Schema};
     use datafusion::common::JoinType;
     use datafusion::logical_expr::ScalarUDF;
@@ -307,9 +334,18 @@ mod optimizer_tests {
     use datafusion::physical_plan::empty::EmptyExec;
     use datafusion::physical_plan::joins::NestedLoopJoinExec;
 
-    use super::super::spatial_predicate::SpatialRelationType;
     use super::super::udfs::{StDWithinUdf, StWithinUdf};
     use super::*;
+    use crate::geospatial::join_predicates::SpatialRelationType;
+    use crate::geospatial::udfs::st_geomfrom::geometry_field;
+
+    // The field metadata a real geometry column carries (the `geoarrow.wkb`
+    // extension tag), reused to build tagged filter-schema fields.
+    fn geo_meta() -> HashMap<String, String> {
+        geometry_field("g", DataType::Binary, true)
+            .metadata()
+            .clone()
+    }
 
     fn within_expr(left_idx: usize, right_idx: usize) -> Arc<dyn PhysicalExpr> {
         let udf = Arc::new(ScalarUDF::from(StWithinUdf::default()));
@@ -348,12 +384,18 @@ mod optimizer_tests {
         )]))
     }
 
-    fn run_optimizer(join_type: JoinType, expr: Arc<dyn PhysicalExpr>) -> Arc<dyn ExecutionPlan> {
+    fn try_run_optimizer(
+        join_type: JoinType,
+        expr: Arc<dyn PhysicalExpr>,
+        metadata: HashMap<String, String>,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
         let left = Arc::new(EmptyExec::new(geom_schema())) as Arc<dyn ExecutionPlan>;
         let right = Arc::new(EmptyExec::new(geom_schema())) as Arc<dyn ExecutionPlan>;
+        let geom_field =
+            |name: &str| Field::new(name, DataType::Binary, true).with_metadata(metadata.clone());
         let filter_schema = Arc::new(Schema::new(vec![
-            Field::new("left_geom", DataType::Binary, true),
-            Field::new("right_geom", DataType::Binary, true),
+            geom_field("left_geom"),
+            geom_field("right_geom"),
         ]));
         let column_indices = vec![
             ColumnIndex {
@@ -367,9 +409,26 @@ mod optimizer_tests {
         ];
         let filter = JoinFilter::new(expr, column_indices, filter_schema);
         let nlj = NestedLoopJoinExec::try_new(left, right, Some(filter), &join_type, None).unwrap();
-        SpatialJoinPhysicalOptimizer::new()
-            .optimize(Arc::new(nlj), &ConfigOptions::default())
-            .unwrap()
+        SpatialJoinPhysicalOptimizer::new().optimize(Arc::new(nlj), &ConfigOptions::default())
+    }
+
+    fn run_optimizer(join_type: JoinType, expr: Arc<dyn PhysicalExpr>) -> Arc<dyn ExecutionPlan> {
+        try_run_optimizer(join_type, expr, geo_meta()).unwrap()
+    }
+
+    // The filter schema tags neither geometry column (plain Binary, as if the
+    // query skipped st_geomfromwkb/wkt), so the optimizer must reject it.
+    #[test]
+    fn test_optimizer_rejects_untagged_geometry() {
+        let err =
+            try_run_optimizer(JoinType::Inner, within_expr(0, 1), HashMap::new()).unwrap_err();
+        assert!(
+            err.to_string().contains(
+                "expected a geometry column tagged 'geoarrow.wkb' \
+                 (use st_geomfromwkb / st_geomfromwkt), got a plain Binary column"
+            ),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

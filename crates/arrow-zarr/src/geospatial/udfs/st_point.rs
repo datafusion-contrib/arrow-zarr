@@ -15,108 +15,16 @@ use std::sync::Arc;
 
 use arrow_array::builder::BinaryBuilder;
 use arrow_array::Array;
-use arrow_schema::DataType;
+use arrow_schema::{DataType, FieldRef};
 use datafusion::common::cast::as_float64_array;
-use datafusion::common::{not_impl_err, Result};
+use datafusion::common::Result;
 use datafusion::logical_expr::{
-    ColumnarValue, ScalarFunctionArgs, ScalarUDFImpl, Signature, TypeSignature, Volatility,
+    ColumnarValue, ReturnFieldArgs, ScalarFunctionArgs, ScalarUDFImpl, Signature, Volatility,
 };
 use geo_types::Point;
 use wkb::writer::{write_point, WriteOptions};
 
-// For now th stubs only exist so that the query optimizer has something
-// to reference before it converts the nested join loop to a spatial join.
-// Obviously a TODO to actually implement this.
-macro_rules! spatial_predicate_stub {
-    ($($struct_name:ident => $udf_name:literal),* $(,)?) => {
-        $(
-            #[derive(Debug, PartialEq, Eq, Hash)]
-            pub struct $struct_name {
-                signature: Signature,
-            }
-
-            impl Default for $struct_name {
-                fn default() -> Self {
-                    Self {
-                        signature: Signature::one_of(
-                            vec![
-                                TypeSignature::Exact(vec![DataType::Binary, DataType::Binary]),
-                                TypeSignature::Exact(vec![DataType::BinaryView, DataType::BinaryView]),
-                            ],
-                            Volatility::Immutable,
-                        ),
-                    }
-                }
-            }
-
-            impl ScalarUDFImpl for $struct_name {
-                fn name(&self) -> &str { $udf_name }
-                fn signature(&self) -> &Signature {
-                    &self.signature
-                }
-                fn return_type(&self, _: &[DataType]) -> Result<DataType> {
-                    Ok(DataType::Boolean)
-                }
-                fn invoke_with_args(&self, _: ScalarFunctionArgs) -> Result<ColumnarValue> {
-                    not_impl_err!("{} is only supported as a join condition", $udf_name)
-                }
-            }
-        )*
-    }
-}
-
-spatial_predicate_stub! {
-StWithinUdf => "st_within",
-StContainsUdf => "st_contains",
-StCoveredByUdf => "st_coveredby",
-StCoversUdf => "st_covers",
-StIntersectsUdf => "st_intersects",
-StTouchesUdf => "st_touches",}
-
-// `st_dwithin(geom, geom, distance)` — like the other predicates, but
-// with a third `Float64` distance argument. Only meaningful as a join
-// condition.
-#[derive(Debug, PartialEq, Eq, Hash)]
-pub struct StDWithinUdf {
-    signature: Signature,
-}
-
-impl Default for StDWithinUdf {
-    fn default() -> Self {
-        Self {
-            signature: Signature::one_of(
-                vec![
-                    TypeSignature::Exact(vec![
-                        DataType::Binary,
-                        DataType::Binary,
-                        DataType::Float64,
-                    ]),
-                    TypeSignature::Exact(vec![
-                        DataType::BinaryView,
-                        DataType::BinaryView,
-                        DataType::Float64,
-                    ]),
-                ],
-                Volatility::Immutable,
-            ),
-        }
-    }
-}
-
-impl ScalarUDFImpl for StDWithinUdf {
-    fn name(&self) -> &str {
-        "st_dwithin"
-    }
-    fn signature(&self) -> &Signature {
-        &self.signature
-    }
-    fn return_type(&self, _: &[DataType]) -> Result<DataType> {
-        Ok(DataType::Boolean)
-    }
-    fn invoke_with_args(&self, _: ScalarFunctionArgs) -> Result<ColumnarValue> {
-        not_impl_err!("st_dwithin is only supported as a join condition")
-    }
-}
+use super::st_geomfrom::geometry_field;
 
 /// Byte length of a 2D WKB point: 1 (byte order) + 4 (geometry type) + 2 * 8 (x, y).
 const WKB_POINT_2D_LEN: usize = 21;
@@ -151,6 +59,11 @@ impl ScalarUDFImpl for StPointUdf {
 
     fn return_type(&self, _: &[DataType]) -> Result<DataType> {
         Ok(DataType::Binary)
+    }
+
+    // st_point builds a geometry, so its output is tagged as WKB geometry.
+    fn return_field_from_args(&self, _: ReturnFieldArgs) -> Result<FieldRef> {
+        Ok(geometry_field(self.name(), DataType::Binary, true))
     }
 
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> Result<ColumnarValue> {
@@ -189,13 +102,6 @@ mod udf_tests {
 
     #[test]
     fn test_udf_names() {
-        assert_eq!(StWithinUdf::default().name(), "st_within");
-        assert_eq!(StContainsUdf::default().name(), "st_contains");
-        assert_eq!(StCoveredByUdf::default().name(), "st_coveredby");
-        assert_eq!(StCoversUdf::default().name(), "st_covers");
-        assert_eq!(StIntersectsUdf::default().name(), "st_intersects");
-        assert_eq!(StDWithinUdf::default().name(), "st_dwithin");
-        assert_eq!(StTouchesUdf::default().name(), "st_touches");
         assert_eq!(StPointUdf::default().name(), "st_point");
     }
 

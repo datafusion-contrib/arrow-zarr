@@ -10,26 +10,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub(crate) mod boxed_geo_batch;
-pub(crate) mod indexed_build_side;
-pub(crate) mod joinable_geo;
+pub(crate) mod geos;
+pub(crate) mod join_predicates;
 pub(crate) mod probe_pruning_expr;
 pub(crate) mod spatial_join_exec;
 pub(crate) mod spatial_join_optimizer;
 pub(crate) mod spatial_join_stream;
-pub mod spatial_predicate;
-pub(crate) mod st_coveredby;
-pub(crate) mod st_dwithin;
-pub(crate) mod st_intersects;
-pub(crate) mod st_touches;
-pub(crate) mod st_within;
 pub mod udfs;
 
 pub use spatial_join_exec::SpatialJoinExec;
 pub use spatial_join_optimizer::SpatialJoinPhysicalOptimizer;
 pub use udfs::{
-    StContainsUdf, StCoveredByUdf, StCoversUdf, StDWithinUdf, StIntersectsUdf, StTouchesUdf,
-    StWithinUdf,
+    StAreaUdf, StContainsUdf, StCoveredByUdf, StCoversUdf, StDWithinUdf, StDistanceUdf,
+    StGeomFromWkbUdf, StGeomFromWktUdf, StIntersectsUdf, StPointUdf, StTouchesUdf, StWithinUdf,
 };
 
 // #[cfg(test)]

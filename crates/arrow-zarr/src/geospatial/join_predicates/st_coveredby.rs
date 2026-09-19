@@ -10,10 +10,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::joinable_geo::{Accumulator, JoinableGeo};
 use super::st_within::{
     HolesInLeftPoly, LineInLine, LineInPoly, PointInLine, PointInPoint, PointInPoly, PolyInPoly,
 };
+use crate::geospatial::geos::{Accumulator, JoinableGeo};
 
 // *************************************************************
 // covered_by(a, b) -> true if every point of a lies in b (interior or boundary).
@@ -92,9 +92,9 @@ pub(crate) fn st_covers(a: &JoinableGeo, b: &JoinableGeo) -> bool {
 mod test_helpers {
     use geos::Geom;
 
-    pub(super) use super::super::test_utils::wkt_to_wkb;
     use super::JoinableGeo;
-    use crate::geospatial::st_coveredby::{st_covered_by, st_covers};
+    use crate::geospatial::join_predicates::st_coveredby::{st_covered_by, st_covers};
+    pub(super) use crate::geospatial::test_utils::wkt_to_wkb;
 
     pub(super) fn compare_covered_by(label: &str, wkt_a: &str, wkt_b: &str) {
         let bytes_a = wkt_to_wkb(wkt_a);

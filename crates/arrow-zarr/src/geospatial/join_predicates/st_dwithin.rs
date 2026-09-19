@@ -10,8 +10,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::joinable_geo::{Accumulator, Bboxable, JoinableGeo, Point, SegmentTrait};
 use super::st_intersects::st_intersects;
+use crate::geospatial::geos::{Accumulator, Bboxable, JoinableGeo, Point, SegmentTrait};
 
 // *************************************************************
 // dwithin(a, b, distance) -> true if the minimum distance between a
@@ -223,9 +223,9 @@ impl<L: SegmentTrait, R: SegmentTrait> Accumulator for SegmentsToSegmentsDist<'_
 mod test_helpers {
     use geos::Geom;
 
-    pub(super) use super::super::test_utils::wkt_to_wkb;
     use super::JoinableGeo;
-    use crate::geospatial::st_dwithin::st_dwithin;
+    use crate::geospatial::join_predicates::st_dwithin::st_dwithin;
+    pub(super) use crate::geospatial::test_utils::wkt_to_wkb;
 
     // Checks st_dwithin against GEOS (min distance <= threshold), both operand
     // orders since dwithin is symmetric.

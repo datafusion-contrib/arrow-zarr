@@ -22,8 +22,7 @@ use datafusion::logical_expr::ColumnarValue;
 use datafusion::physical_plan::PhysicalExpr;
 use geo_types::{Coord, Rect};
 
-use super::boxed_geo_batch::BBoxedGeoBatch;
-use super::indexed_build_side::IndexedBuildSide;
+use crate::geospatial::geos::{BBoxedGeoBatch, IndexedBuildSide};
 
 /// A physical expression that prunes probe-side chunks against the build-side
 /// spatial index.
