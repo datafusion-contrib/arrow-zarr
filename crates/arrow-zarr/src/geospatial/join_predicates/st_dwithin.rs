@@ -224,7 +224,7 @@ mod test_helpers {
     use geos::Geom;
 
     use super::JoinableGeo;
-    use crate::geospatial::join_predicates::st_dwithin::st_dwithin;
+    use crate::geospatial::join_predicates::st_dwithin;
     pub(super) use crate::geospatial::test_utils::wkt_to_wkb;
 
     // Checks st_dwithin against GEOS (min distance <= threshold), both operand

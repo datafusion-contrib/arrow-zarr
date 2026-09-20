@@ -472,7 +472,7 @@ mod test_helpers {
     use geos::Geom;
 
     use super::JoinableGeo;
-    use crate::geospatial::join_predicates::st_touches::st_touches;
+    use crate::geospatial::join_predicates::st_touches;
     pub(super) use crate::geospatial::test_utils::wkt_to_wkb;
 
     pub(super) fn compare_touches(label: &str, wkt_a: &str, wkt_b: &str) {

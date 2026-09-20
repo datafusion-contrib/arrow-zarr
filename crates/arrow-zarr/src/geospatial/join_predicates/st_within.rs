@@ -855,7 +855,7 @@ mod test_helpers {
     use geos::Geom;
 
     use super::JoinableGeo;
-    use crate::geospatial::join_predicates::st_within::{st_contains, st_within};
+    use crate::geospatial::join_predicates::{st_contains, st_within};
     pub(super) use crate::geospatial::test_utils::wkt_to_wkb;
 
     pub(super) fn compare_within(label: &str, wkt_a: &str, wkt_b: &str) {

@@ -93,7 +93,7 @@ mod test_helpers {
     use geos::Geom;
 
     use super::JoinableGeo;
-    use crate::geospatial::join_predicates::st_coveredby::{st_covered_by, st_covers};
+    use crate::geospatial::join_predicates::{st_covered_by, st_covers};
     pub(super) use crate::geospatial::test_utils::wkt_to_wkb;
 
     pub(super) fn compare_covered_by(label: &str, wkt_a: &str, wkt_b: &str) {

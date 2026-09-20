@@ -343,7 +343,7 @@ mod test_helpers {
     use geos::Geom;
 
     use super::JoinableGeo;
-    use crate::geospatial::join_predicates::st_intersects::st_intersects;
+    use crate::geospatial::join_predicates::st_intersects;
     pub(super) use crate::geospatial::test_utils::wkt_to_wkb;
 
     pub(super) fn compare_intersects(label: &str, wkt_a: &str, wkt_b: &str) {
