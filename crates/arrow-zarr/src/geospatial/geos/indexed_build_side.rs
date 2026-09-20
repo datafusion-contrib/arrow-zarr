@@ -28,8 +28,10 @@ use geo_types::Rect;
 
 use super::boxed_geo_batch::{BBoxedGeoBatch, BBoxedGeoStream};
 use super::joinable_geo::{GeoError, JoinableGeo};
-use super::spatial_predicate::SpatialRelationType;
-use super::st_within::{st_contains, st_within};
+use crate::geospatial::join_predicates::{
+    st_contains, st_covered_by, st_covers, st_dwithin, st_intersects, st_touches, st_within,
+    SpatialRelationType,
+};
 
 // In-place partition of the first boundary probe entries: keep those whose
 // rect overlaps the given node bbox by swapping survivors to the front; returns
@@ -195,6 +197,11 @@ fn evaluate_relation(
     Ok(match predicate {
         SpatialRelationType::Within => st_within(left, right),
         SpatialRelationType::Contains => st_contains(left, right),
+        SpatialRelationType::CoveredBy => st_covered_by(left, right),
+        SpatialRelationType::Covers => st_covers(left, right),
+        SpatialRelationType::Intersects => st_intersects(left, right),
+        SpatialRelationType::Touches => st_touches(left, right),
+        SpatialRelationType::DWithin { distance } => st_dwithin(left, right, *distance),
     })
 }
 
@@ -441,7 +448,7 @@ pub(crate) mod test_helpers {
     use datafusion::physical_plan::PhysicalExpr;
 
     use super::{IndexedBuildSide, IndexedBuildSideBuilder};
-    use crate::geospatial::boxed_geo_batch::BBoxedGeoBatch;
+    use crate::geospatial::geos::boxed_geo_batch::BBoxedGeoBatch;
     use crate::geospatial::test_utils::wkt_to_wkb;
 
     pub(crate) fn make_geo_batch(
@@ -465,7 +472,7 @@ pub(crate) mod test_helpers {
         )
         .unwrap();
         let geo_expr = Arc::new(Column::new(geo_col, 0)) as Arc<dyn PhysicalExpr>;
-        BBoxedGeoBatch::new(batch, &geo_expr).unwrap()
+        BBoxedGeoBatch::new(batch, &geo_expr, None).unwrap()
     }
 
     fn make_build_batch(
@@ -491,7 +498,7 @@ pub(crate) mod test_helpers {
         )
         .unwrap();
         let geo_expr = Arc::new(Column::new(geo_col, 0)) as Arc<dyn PhysicalExpr>;
-        BBoxedGeoBatch::new(batch, &geo_expr).unwrap()
+        BBoxedGeoBatch::new(batch, &geo_expr, None).unwrap()
     }
 
     pub(crate) fn make_indexed_build_side(
@@ -521,7 +528,7 @@ mod indexed_build_side_tests {
 
     use super::test_helpers::{make_geo_batch, make_indexed_build_side};
     use super::*;
-    use crate::geospatial::spatial_predicate::SpatialRelationType;
+    use crate::geospatial::join_predicates::SpatialRelationType;
     use crate::geospatial::test_utils::make_squares;
 
     fn traverse_within_and_mark(

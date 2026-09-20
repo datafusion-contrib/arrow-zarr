@@ -36,11 +36,10 @@ use datafusion::physical_plan::{
 };
 use futures::future::{BoxFuture, FutureExt};
 
-use crate::geospatial::boxed_geo_batch::BBoxedGeoStream;
-use crate::geospatial::indexed_build_side::{build_from_streams, IndexedBuildSide};
+use crate::geospatial::geos::{build_from_streams, BBoxedGeoStream, IndexedBuildSide};
+use crate::geospatial::join_predicates::{RelationPredicate, SpatialRelationType};
 use crate::geospatial::probe_pruning_expr::ProbePruningExpr;
 use crate::geospatial::spatial_join_stream::{SharedIndexFuture, SpatialJoinStream};
-use crate::geospatial::spatial_predicate::RelationPredicate;
 
 #[derive(Debug, Clone)]
 pub struct SpatialJoinExec {
@@ -414,6 +413,13 @@ impl ExecutionPlan for SpatialJoinExec {
                 let probe_geo_expr = Arc::clone(&self.predicate.right);
                 let dynamic_filter = self.dynamic_filter.clone();
 
+                // For ST_DWithin the probe chunk bboxes must be inflated by the
+                // distance threshold so the chunk prune matches what the join does.
+                let probe_side_buffer = match &self.predicate.relation_type {
+                    SpatialRelationType::DWithin { distance } => Some(*distance),
+                    _ => None,
+                };
+
                 let fut: BoxFuture<'static, Result<Arc<IndexedBuildSide>, Arc<DataFusionError>>> =
                     Box::pin(async move {
                         let num_build_partitions = left.output_partitioning().partition_count();
@@ -422,7 +428,7 @@ impl ExecutionPlan for SpatialJoinExec {
                         let streams: Vec<BBoxedGeoStream> = (0..num_build_partitions)
                             .map(|k| {
                                 let stream = left.execute(k, Arc::clone(&ctx)).map_err(Arc::new)?;
-                                Ok(BBoxedGeoStream::new(stream, Arc::clone(&geo_expr)))
+                                Ok(BBoxedGeoStream::new(stream, Arc::clone(&geo_expr), None))
                             })
                             .collect::<Result<_, Arc<DataFusionError>>>()?;
 
@@ -438,6 +444,7 @@ impl ExecutionPlan for SpatialJoinExec {
                             let pruning: Arc<dyn PhysicalExpr> = Arc::new(ProbePruningExpr::new(
                                 Arc::clone(&probe_geo_expr),
                                 Arc::clone(&build_side),
+                                probe_side_buffer,
                             ));
                             dynamic_filter.update(pruning).map_err(Arc::new)?;
                             dynamic_filter.mark_complete();
@@ -490,7 +497,7 @@ mod exec_tests {
     use futures::TryStreamExt;
 
     use super::SpatialJoinExec;
-    use crate::geospatial::spatial_predicate::{RelationPredicate, SpatialRelationType};
+    use crate::geospatial::join_predicates::{RelationPredicate, SpatialRelationType};
     use crate::geospatial::test_utils::{col1_gte_col2_filter, wkt_to_wkb};
 
     // Build side: 8 unit squares, col_1 = row index.
@@ -584,7 +591,11 @@ mod exec_tests {
         ]
     }
 
-    fn make_exec(join_type: JoinType, filter: Option<JoinFilter>) -> SpatialJoinExec {
+    fn make_exec(
+        join_type: JoinType,
+        filter: Option<JoinFilter>,
+        relation_type: SpatialRelationType,
+    ) -> SpatialJoinExec {
         let build_exec =
             MemorySourceConfig::try_new_exec(&make_build_batches(), build_schema(), None).unwrap();
         let probe_exec =
@@ -592,7 +603,7 @@ mod exec_tests {
         let predicate = RelationPredicate::new(
             Arc::new(Column::new("geometry_1", 0)) as Arc<dyn PhysicalExpr>,
             Arc::new(Column::new("geometry_2", 0)) as Arc<dyn PhysicalExpr>,
-            SpatialRelationType::Within,
+            relation_type,
         );
         // projection [1, 3]: geometry_1(0), col_1(1), geometry_2(2), col_2(3)
         SpatialJoinExec::try_new(
@@ -606,8 +617,12 @@ mod exec_tests {
         .unwrap()
     }
 
-    async fn run_exec(join_type: JoinType, filter: Option<JoinFilter>) -> Vec<RecordBatch> {
-        let exec = make_exec(join_type, filter);
+    async fn run_exec(
+        join_type: JoinType,
+        filter: Option<JoinFilter>,
+        relation_type: SpatialRelationType,
+    ) -> Vec<RecordBatch> {
+        let exec = make_exec(join_type, filter, relation_type);
         let ctx = Arc::new(TaskContext::default());
         let n = exec.right.output_partitioning().partition_count();
         let mut all = Vec::new();
@@ -620,7 +635,12 @@ mod exec_tests {
 
     #[tokio::test]
     async fn test_join_types_with_filter() {
-        let inner = run_exec(JoinType::Inner, Some(col1_gte_col2_filter())).await;
+        let inner = run_exec(
+            JoinType::Inner,
+            Some(col1_gte_col2_filter()),
+            SpatialRelationType::Within,
+        )
+        .await;
         assert_batches_sorted_eq!(
             [
                 "+-------+-------+",
@@ -633,7 +653,12 @@ mod exec_tests {
             &inner
         );
 
-        let left = run_exec(JoinType::Left, Some(col1_gte_col2_filter())).await;
+        let left = run_exec(
+            JoinType::Left,
+            Some(col1_gte_col2_filter()),
+            SpatialRelationType::Within,
+        )
+        .await;
         assert_batches_sorted_eq!(
             [
                 "+-------+-------+",
@@ -652,7 +677,12 @@ mod exec_tests {
             &left
         );
 
-        let right = run_exec(JoinType::Right, Some(col1_gte_col2_filter())).await;
+        let right = run_exec(
+            JoinType::Right,
+            Some(col1_gte_col2_filter()),
+            SpatialRelationType::Within,
+        )
+        .await;
         assert_batches_sorted_eq!(
             [
                 "+-------+-------+",
@@ -674,7 +704,7 @@ mod exec_tests {
 
     #[tokio::test]
     async fn test_join_types() {
-        let inner = run_exec(JoinType::Inner, None).await;
+        let inner = run_exec(JoinType::Inner, None, SpatialRelationType::Within).await;
         assert_batches_sorted_eq!(
             [
                 "+-------+-------+",
@@ -689,7 +719,7 @@ mod exec_tests {
             &inner
         );
 
-        let left = run_exec(JoinType::Left, None).await;
+        let left = run_exec(JoinType::Left, None, SpatialRelationType::Within).await;
         assert_batches_sorted_eq!(
             [
                 "+-------+-------+",
@@ -709,7 +739,7 @@ mod exec_tests {
             &left
         );
 
-        let right = run_exec(JoinType::Right, None).await;
+        let right = run_exec(JoinType::Right, None, SpatialRelationType::Within).await;
         assert_batches_sorted_eq!(
             [
                 "+-------+-------+",
@@ -726,6 +756,56 @@ mod exec_tests {
                 "+-------+-------+",
             ],
             &right
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dwithin() {
+        // distance 0 is effectively st_intersects; every matching build square is
+        // strictly inside its probe square, so this collapses to the within rows.
+        let zero = run_exec(
+            JoinType::Inner,
+            None,
+            SpatialRelationType::DWithin { distance: 0.0 },
+        )
+        .await;
+        assert_batches_sorted_eq!(
+            [
+                "+-------+-------+",
+                "| col_1 | col_2 |",
+                "+-------+-------+",
+                "| 1     | 0     |",
+                "| 3     | 5     |",
+                "| 3     | 6     |",
+                "| 5     | 2     |",
+                "+-------+-------+",
+            ],
+            &zero
+        );
+
+        // distance 3 additionally matches near-but-disjoint pairs:
+        // build[3]=[6,7]^2 to probe[0]=[0,5]^2 (~1.41) -> (3, 0)
+        // build[1]=[1,2]^2 to probe[6]=[4,12]^2 (~2.83) -> (1, 6)
+        let three = run_exec(
+            JoinType::Inner,
+            None,
+            SpatialRelationType::DWithin { distance: 3.0 },
+        )
+        .await;
+        assert_batches_sorted_eq!(
+            [
+                "+-------+-------+",
+                "| col_1 | col_2 |",
+                "+-------+-------+",
+                "| 1     | 0     |",
+                "| 1     | 6     |",
+                "| 3     | 0     |",
+                "| 3     | 5     |",
+                "| 3     | 6     |",
+                "| 5     | 2     |",
+                "+-------+-------+",
+            ],
+            &three
         );
     }
 }

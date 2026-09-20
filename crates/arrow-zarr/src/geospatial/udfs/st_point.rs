@@ -15,59 +15,16 @@ use std::sync::Arc;
 
 use arrow_array::builder::BinaryBuilder;
 use arrow_array::Array;
-use arrow_schema::DataType;
+use arrow_schema::{DataType, FieldRef};
 use datafusion::common::cast::as_float64_array;
-use datafusion::common::{not_impl_err, Result};
+use datafusion::common::Result;
 use datafusion::logical_expr::{
-    ColumnarValue, ScalarFunctionArgs, ScalarUDFImpl, Signature, TypeSignature, Volatility,
+    ColumnarValue, ReturnFieldArgs, ScalarFunctionArgs, ScalarUDFImpl, Signature, Volatility,
 };
 use geo_types::Point;
 use wkb::writer::{write_point, WriteOptions};
 
-// For now th stubs only exist so that the query optimizer has something
-// to reference before it converts the nested join loop to a spatial join.
-// Obviously a TODO to actually implement this.
-macro_rules! spatial_predicate_stub {
-    ($($struct_name:ident => $udf_name:literal),* $(,)?) => {
-        $(
-            #[derive(Debug, PartialEq, Eq, Hash)]
-            pub struct $struct_name {
-                signature: Signature,
-            }
-
-            impl Default for $struct_name {
-                fn default() -> Self {
-                    Self {
-                        signature: Signature::one_of(
-                            vec![
-                                TypeSignature::Exact(vec![DataType::Binary, DataType::Binary]),
-                                TypeSignature::Exact(vec![DataType::BinaryView, DataType::BinaryView]),
-                            ],
-                            Volatility::Immutable,
-                        ),
-                    }
-                }
-            }
-
-            impl ScalarUDFImpl for $struct_name {
-                fn name(&self) -> &str { $udf_name }
-                fn signature(&self) -> &Signature {
-                    &self.signature
-                }
-                fn return_type(&self, _: &[DataType]) -> Result<DataType> {
-                    Ok(DataType::Boolean)
-                }
-                fn invoke_with_args(&self, _: ScalarFunctionArgs) -> Result<ColumnarValue> {
-                    not_impl_err!("{} is only supported as a join condition", $udf_name)
-                }
-            }
-        )*
-    }
-}
-
-spatial_predicate_stub! {
-StWithinUdf => "st_within",
-StContainsUdf => "st_contains",}
+use super::st_geomfrom::geometry_field;
 
 /// Byte length of a 2D WKB point: 1 (byte order) + 4 (geometry type) + 2 * 8 (x, y).
 const WKB_POINT_2D_LEN: usize = 21;
@@ -104,6 +61,11 @@ impl ScalarUDFImpl for StPointUdf {
         Ok(DataType::Binary)
     }
 
+    // st_point builds a geometry, so its output is tagged as WKB geometry.
+    fn return_field_from_args(&self, _: ReturnFieldArgs) -> Result<FieldRef> {
+        Ok(geometry_field(self.name(), DataType::Binary, true))
+    }
+
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> Result<ColumnarValue> {
         let arrays = ColumnarValue::values_to_arrays(&args.args)?;
         let xs = as_float64_array(&arrays[0])?;
@@ -111,7 +73,7 @@ impl ScalarUDFImpl for StPointUdf {
 
         let opts = WriteOptions::default();
         // Every point is exactly WKB_POINT_2D_LEN bytes, so a fixed buffer is fully
-        // overwritten each row via a cursor — no per-row allocation or clearing.
+        // overwritten each row via a cursor.
         let mut buf = [0u8; WKB_POINT_2D_LEN];
         let mut builder = BinaryBuilder::with_capacity(xs.len(), xs.len() * WKB_POINT_2D_LEN);
         for i in 0..xs.len() {
@@ -140,8 +102,6 @@ mod udf_tests {
 
     #[test]
     fn test_udf_names() {
-        assert_eq!(StWithinUdf::default().name(), "st_within");
-        assert_eq!(StContainsUdf::default().name(), "st_contains");
         assert_eq!(StPointUdf::default().name(), "st_point");
     }
 

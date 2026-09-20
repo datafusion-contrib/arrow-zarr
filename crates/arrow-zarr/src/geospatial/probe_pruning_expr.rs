@@ -22,8 +22,7 @@ use datafusion::logical_expr::ColumnarValue;
 use datafusion::physical_plan::PhysicalExpr;
 use geo_types::{Coord, Rect};
 
-use super::boxed_geo_batch::BBoxedGeoBatch;
-use super::indexed_build_side::IndexedBuildSide;
+use crate::geospatial::geos::{BBoxedGeoBatch, IndexedBuildSide};
 
 /// A physical expression that prunes probe-side chunks against the build-side
 /// spatial index.
@@ -34,11 +33,23 @@ use super::indexed_build_side::IndexedBuildSide;
 pub(crate) struct ProbePruningExpr {
     probe_expr: Arc<dyn PhysicalExpr>,
     index: Arc<IndexedBuildSide>,
+
+    // For ST_DWithin: the distance threshold, used to inflate each probe chunk's
+    // bbox before testing it against the build index.
+    probe_side_buffer: Option<f64>,
 }
 
 impl ProbePruningExpr {
-    pub(crate) fn new(probe_expr: Arc<dyn PhysicalExpr>, index: Arc<IndexedBuildSide>) -> Self {
-        Self { probe_expr, index }
+    pub(crate) fn new(
+        probe_expr: Arc<dyn PhysicalExpr>,
+        index: Arc<IndexedBuildSide>,
+        probe_side_buffer: Option<f64>,
+    ) -> Self {
+        Self {
+            probe_expr,
+            index,
+            probe_side_buffer,
+        }
     }
 }
 
@@ -99,8 +110,11 @@ impl PhysicalExpr for ProbePruningExpr {
 
     fn evaluate(&self, batch: &RecordBatch) -> Result<ColumnarValue> {
         // One keep/skip verdict for the whole chunk. Callers pass either
-        // the chunk's full coordinate columns or just its min/max corners.
-        let geo_batch = BBoxedGeoBatch::new(batch.clone(), &self.probe_expr)?;
+        // the chunk's full coordinate columns or just its min/max corners. The
+        // buffer (Some for ST_DWithin) inflates the probe bboxes so the coarse
+        // filter keeps chunks within the distance of a build geometry.
+        let geo_batch =
+            BBoxedGeoBatch::new(batch.clone(), &self.probe_expr, self.probe_side_buffer)?;
 
         let keep = match union_rects(&geo_batch.rects) {
             // No geometry in the chunk → nothing can match → prune it.
@@ -125,6 +139,7 @@ impl PhysicalExpr for ProbePruningExpr {
         Ok(Arc::new(ProbePruningExpr::new(
             Arc::clone(&children[0]),
             Arc::clone(&self.index),
+            self.probe_side_buffer,
         )))
     }
 

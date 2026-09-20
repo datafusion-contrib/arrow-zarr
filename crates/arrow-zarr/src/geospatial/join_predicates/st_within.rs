@@ -10,7 +10,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::joinable_geo::{
+use crate::geospatial::geos::{
     covered_range, midpoint_ray_check, point_at_line_endpoint, point_on_segment_t,
     poly_edge_relation, ray_crosses_edge, segment_crossing_check, Accumulator, Bboxable, Edge,
     JoinableGeo, LineSegment, Point, SegmentTrait, EPS,
@@ -26,20 +26,20 @@ pub(crate) fn st_within(a: &JoinableGeo, b: &JoinableGeo) -> bool {
         (JoinableGeo::Line { .. } | JoinableGeo::Poly { .. }, JoinableGeo::Point { .. })
         | (JoinableGeo::Poly { .. }, JoinableGeo::Line { .. }) => false,
 
-        (JoinableGeo::Point { points }, JoinableGeo::Poly { edges, .. }) => {
-            let mut acc = PointInPoly::new(points, edges);
+        (JoinableGeo::Point { points, .. }, JoinableGeo::Poly { edges, .. }) => {
+            let mut acc = PointInPoly::new(points, edges, false);
             a.fold_for_grouped_check(b, &mut acc);
             acc.finish()
         }
 
-        (JoinableGeo::Point { points: a_pts }, JoinableGeo::Point { points: b_pts }) => {
+        (JoinableGeo::Point { points: a_pts, .. }, JoinableGeo::Point { points: b_pts, .. }) => {
             let mut acc = PointInPoint::new(a_pts, b_pts);
             a.fold_for_grouped_check(b, &mut acc);
             acc.finish()
         }
 
-        (JoinableGeo::Point { points }, JoinableGeo::Line { lines, .. }) => {
-            let mut acc = PointInLine::new(points, lines);
+        (JoinableGeo::Point { points, .. }, JoinableGeo::Line { lines, .. }) => {
+            let mut acc = PointInLine::new(points, lines, false);
             a.fold_for_grouped_check(b, &mut acc);
             acc.finish()
         }
@@ -51,7 +51,7 @@ pub(crate) fn st_within(a: &JoinableGeo, b: &JoinableGeo) -> bool {
         }
 
         (JoinableGeo::Line { lines, .. }, JoinableGeo::Poly { edges, .. }) => {
-            let mut acc = LineInPoly::new(lines, edges);
+            let mut acc = LineInPoly::new(lines, edges, false);
             a.fold_for_grouped_check(b, &mut acc);
             acc.finish()
         }
@@ -89,13 +89,13 @@ pub(crate) fn st_contains(a: &JoinableGeo, b: &JoinableGeo) -> bool {
 }
 
 // *************************************************************
-// The accumulators for each compibnation of left and right geometry The general logic
+// The accumulators for each combination of left and right geometry The general logic
 // is to loop over all the left side components (st_within is a "grouped" check) and
 // when one component is done, we check if it is contained by anything on the right.
 // If there are any components that we never see, on the left side, because it didn't
 // match anything on the right during index traversal, it's an automatic false. Also,
 // some combinations allow for left to be on right's boundary, this is neither qualifying
-// or disqualifying, so as long as there is one left component that touches the right
+// nor disqualifying, so as long as there is one left component that touches the right
 // side's interior, all other components can be on a boundary, that's fine.
 // *************************************************************
 
@@ -110,10 +110,15 @@ pub(crate) struct PointInPoly<'a> {
     pt_inside: bool,
     pt_outside: bool,
     left_to_see: usize,
+    right_side_boundary_qualifies: bool,
 }
 
 impl<'a> PointInPoly<'a> {
-    pub(crate) fn new(points: &'a [Point], edges: &'a [Edge]) -> Self {
+    pub(crate) fn new(
+        points: &'a [Point],
+        edges: &'a [Edge],
+        right_side_boundary_qualifies: bool,
+    ) -> Self {
         PointInPoly {
             left_to_see: points.len(),
             points,
@@ -123,16 +128,21 @@ impl<'a> PointInPoly<'a> {
             on_edge: false,
             pt_inside: false,
             pt_outside: false,
+            right_side_boundary_qualifies,
         }
     }
 
     fn finalize_group(&mut self) {
-        if !self.on_edge {
-            if self.parity {
+        if self.on_edge {
+            // On the poly boundary overrides interior: neither for Within,
+            // qualifying only under CoveredBy.
+            if self.right_side_boundary_qualifies {
                 self.pt_inside = true;
-            } else {
-                self.pt_outside = true;
             }
+        } else if self.parity {
+            self.pt_inside = true;
+        } else {
+            self.pt_outside = true;
         }
     }
 }
@@ -244,10 +254,15 @@ pub(crate) struct PointInLine<'a> {
     left_to_see: usize,
     pt_inside: bool,
     pt_outside: bool,
+    right_side_boundary_qualifies: bool,
 }
 
 impl<'a> PointInLine<'a> {
-    pub(crate) fn new(points: &'a [Point], lines: &'a [LineSegment]) -> Self {
+    pub(crate) fn new(
+        points: &'a [Point],
+        lines: &'a [LineSegment],
+        right_side_boundary_qualifies: bool,
+    ) -> Self {
         PointInLine {
             left_to_see: points.len(),
             points,
@@ -257,17 +272,21 @@ impl<'a> PointInLine<'a> {
             on_boundary: false,
             pt_inside: false,
             pt_outside: false,
+            right_side_boundary_qualifies,
         }
     }
 
     fn finalize_group(&mut self) {
-        // Boundary overrides interior, sets neither flag)
-        if !self.on_boundary {
-            if self.on_interior {
+        if self.on_boundary {
+            // Boundary overrides interior: neither for Within, qualifying only
+            // under CoveredBy.
+            if self.right_side_boundary_qualifies {
                 self.pt_inside = true;
-            } else {
-                self.pt_outside = true;
             }
+        } else if self.on_interior {
+            self.pt_inside = true;
+        } else {
+            self.pt_outside = true;
         }
     }
 }
@@ -382,7 +401,7 @@ fn fully_covered(ranges: &mut [(f64, f64)]) -> bool {
 impl Accumulator for LineInLine<'_> {
     // No ray casting for this one, so a symmetric bbox overlap (not the rightward
     // ray) is the correct, tighter prune.
-    fn prune(a: &impl Bboxable, b: &impl Bboxable) -> bool {
+    fn prune(&self, a: &impl Bboxable, b: &impl Bboxable) -> bool {
         a.box_overlap(b)
     }
 
@@ -455,10 +474,16 @@ pub(crate) struct LineInPoly<'a> {
     qualified: bool,
     failed: bool,
     any_interior: bool,
+    on_boundary_qualified: bool,
+    right_side_boundary_qualifies: bool,
 }
 
 impl<'a> LineInPoly<'a> {
-    pub(crate) fn new(left: &'a [LineSegment], edges: &'a [Edge]) -> Self {
+    pub(crate) fn new(
+        left: &'a [LineSegment],
+        edges: &'a [Edge],
+        right_side_boundary_qualifies: bool,
+    ) -> Self {
         LineInPoly {
             left,
             edges,
@@ -470,6 +495,8 @@ impl<'a> LineInPoly<'a> {
             qualified: false,
             failed: false,
             any_interior: false,
+            on_boundary_qualified: false,
+            right_side_boundary_qualifies,
         }
     }
 
@@ -489,6 +516,10 @@ impl<'a> LineInPoly<'a> {
             self.any_interior = true;
         } else if self.parity_valid && !self.parity {
             self.failed = true;
+        } else {
+            // Segment lies entirely on the polygon boundary, neither
+            // interior nor exterior.y.
+            self.on_boundary_qualified = true;
         }
     }
 }
@@ -557,7 +588,9 @@ impl Accumulator for LineInPoly<'_> {
             }
             None => return false,
         }
-        !self.failed && self.any_interior
+        let qualified =
+            self.any_interior || (self.right_side_boundary_qualifies && self.on_boundary_qualified);
+        !self.failed && qualified
     }
 }
 
@@ -770,8 +803,9 @@ impl Accumulator for PolyInPoly<'_> {
         if ray {
             self.parity ^= true;
             let mid = seg.midpoint();
-            let xi = edge.x_intercept_at_point(&mid);
-            self.consider_container(xi - mid.x(), rp);
+            if let Some(xi) = edge.x_intercept_at_point(&mid) {
+                self.consider_container(xi - mid.x(), rp);
+            }
         }
         if inside {
             self.mid_inside = true;
@@ -820,9 +854,9 @@ impl Accumulator for PolyInPoly<'_> {
 mod test_helpers {
     use geos::Geom;
 
-    pub(super) use super::super::test_utils::wkt_to_wkb;
     use super::JoinableGeo;
-    use crate::geospatial::st_within::{st_contains, st_within};
+    use crate::geospatial::join_predicates::{st_contains, st_within};
+    pub(super) use crate::geospatial::test_utils::wkt_to_wkb;
 
     pub(super) fn compare_within(label: &str, wkt_a: &str, wkt_b: &str) {
         let bytes_a = wkt_to_wkb(wkt_a);

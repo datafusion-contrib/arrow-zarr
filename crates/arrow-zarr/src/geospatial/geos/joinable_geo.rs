@@ -95,6 +95,25 @@ impl Point {
             y: self.y - other.y,
         }
     }
+
+    // Squared distance to another point.
+    pub(crate) fn dist_sq(&self, other: &Point) -> f64 {
+        let d = self.diff(other);
+        d.dot(&d)
+    }
+
+    // Squared distance to a segment: project onto the segment, clamp the
+    // parameter to the segment's extent, and measure to that closest point.
+    pub(crate) fn dist_sq_to_segment(&self, seg: &impl SegmentTrait) -> f64 {
+        let t = seg.projection_t(self).clamp(0.0, 1.0);
+        let (p1, _) = seg.as_points();
+        let dir = seg.dir();
+        let closest = Point {
+            x: p1.x + t * dir.x,
+            y: p1.y + t * dir.y,
+        };
+        self.dist_sq(&closest)
+    }
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -132,7 +151,7 @@ impl AsPoints for Edge {
 }
 
 // Geometric primitives shared by any segment-like component.
-pub(crate) trait SegmentTrait: AsPoints {
+pub(crate) trait SegmentTrait: AsPoints + Sized {
     fn dir(&self) -> Dir {
         let (p1, p2) = self.as_points();
         p2.diff(p1)
@@ -164,9 +183,17 @@ pub(crate) trait SegmentTrait: AsPoints {
         self.dot(&dp) / self.norm_sq()
     }
 
-    fn x_intercept_at_point(&self, p: &Point) -> f64 {
+    // The x-coordinate where this segment reaches height p.y, or None when p.y is
+    // outside the segment's y-span (the segment is not extended to infinity) or the
+    // segment is horizontal (no single intercept).
+    fn x_intercept_at_point(&self, p: &Point) -> Option<f64> {
         let (p1, p2) = self.as_points();
-        p1.x + (p.y - p1.y) * (p2.x - p1.x) / (p2.y - p1.y)
+        let dy = p2.y - p1.y;
+        if dy == 0.0 {
+            return None;
+        }
+        let t = (p.y - p1.y) / dy;
+        (0.0..=1.0).contains(&t).then_some(p1.x + t * (p2.x - p1.x))
     }
 
     fn midpoint(&self) -> Point {
@@ -176,9 +203,30 @@ pub(crate) trait SegmentTrait: AsPoints {
             y: (p1.y + p2.y) / 2.0,
         }
     }
+
+    // Squared minimum distance to another segment, assuming the two do NOT
+    // intersect (the caller must have already established that).
+    fn dist_sq_to_disjoint(&self, other: &impl SegmentTrait) -> f64 {
+        let (a1, a2) = self.as_points();
+        let (b1, b2) = other.as_points();
+        a1.dist_sq_to_segment(other)
+            .min(a2.dist_sq_to_segment(other))
+            .min(b1.dist_sq_to_segment(self))
+            .min(b2.dist_sq_to_segment(self))
+    }
 }
 
 impl<T: AsPoints> SegmentTrait for T {}
+
+impl LineSegment {
+    pub(crate) fn p1_boundary(&self) -> bool {
+        self.p1_boundary
+    }
+
+    pub(crate) fn p2_boundary(&self) -> bool {
+        self.p2_boundary
+    }
+}
 
 impl Edge {
     pub(crate) fn interior_on_left(&self) -> bool {
@@ -188,6 +236,15 @@ impl Edge {
     // Index of the next edge in this ring (in the geometry's global edge vector).
     pub(crate) fn next(&self) -> usize {
         self.next
+    }
+
+    // For two collinear, overlapping edges, whether their polygon interiors are on
+    // the same side — i.e. the two polygons overlap along the shared boundary (an
+    // interior–interior contact), rather than being adjacent (interiors on opposite
+    // sides, a boundary-only touch). Only meaningful for a collinear overlapping pair.
+    pub(crate) fn interiors_same_side(&self, other: &Edge) -> bool {
+        let same_dir = self.dir().dot(&other.dir()) > 0.0;
+        (self.interior_on_left == other.interior_on_left) == same_dir
     }
 
     // Interior angle of the polygon at this edge's end vertex, from this edge's
@@ -296,6 +353,15 @@ pub(crate) trait Bboxable {
             && a.min_y <= b.max_y + EPS
             && a.max_y >= b.min_y - EPS
     }
+
+    // Squared minimum distance between the two boxes (0 when they overlap).
+    fn box_min_dist_sq(&self, other: &impl Bboxable) -> f64 {
+        let a = self.bbox();
+        let b = other.bbox();
+        let dx = (a.min_x - b.max_x).max(b.min_x - a.max_x).max(0.0);
+        let dy = (a.min_y - b.max_y).max(b.min_y - a.max_y).max(0.0);
+        dx * dx + dy * dy
+    }
 }
 
 impl Bboxable for IndexBox {
@@ -400,6 +466,22 @@ impl NaturalIndex {
             geo_id_offset,
         }
     }
+
+    // A one-node index holding just the covering box of all components (empty when
+    // there are none). Not traversable as a hierarchy; used only to expose an
+    // overall bbox for the point variant.
+    fn single_node<C: Bboxable>(comps: &[C]) -> NaturalIndex {
+        let (boxes, level_bases) = if comps.is_empty() {
+            (Vec::new(), Vec::new())
+        } else {
+            (vec![union(comps)], vec![0])
+        };
+        NaturalIndex {
+            boxes,
+            level_bases,
+            geo_id_offset: 0,
+        }
+    }
 }
 
 //*************************************************
@@ -408,6 +490,10 @@ impl NaturalIndex {
 pub(crate) enum JoinableGeo {
     Point {
         points: Vec<Point>,
+
+        // A one-node index holding just the covering bbox of the points.
+        // It exists only so a point geo can expose an overall bbox.
+        index: NaturalIndex,
     },
     Line {
         lines: Vec<LineSegment>,
@@ -438,7 +524,8 @@ impl JoinableGeo {
                         y: coord.y(),
                     });
                 }
-                Ok(JoinableGeo::Point { points })
+                let index = NaturalIndex::single_node(&points);
+                Ok(JoinableGeo::Point { points, index })
             }
             GeometryType::MultiPoint(mp) => {
                 let mut points = Vec::new();
@@ -450,7 +537,8 @@ impl JoinableGeo {
                         });
                     }
                 }
-                Ok(JoinableGeo::Point { points })
+                let index = NaturalIndex::single_node(&points);
+                Ok(JoinableGeo::Point { points, index })
             }
             GeometryType::LineString(ls) => build_line_geo(std::iter::once(ls)),
             GeometryType::MultiLineString(mls) => build_line_geo(mls.line_strings()),
@@ -530,7 +618,7 @@ impl<'a> PointCoincidence<'a> {
 
 impl Accumulator for PointCoincidence<'_> {
     // Symmetric EPS-slack bbox-overlap for the descent.
-    fn prune(a: &impl Bboxable, b: &impl Bboxable) -> bool {
+    fn prune(&self, a: &impl Bboxable, b: &impl Bboxable) -> bool {
         a.box_overlap(b)
     }
 
@@ -652,7 +740,7 @@ pub(crate) trait Accumulator {
     // must look inside `b` for a possible match against `a`. Default is the
     // rightward-ray test, correct for ray-cast checks; crossing checks override
     // it with a symmetric bbox-overlap test.
-    fn prune(a: &impl Bboxable, b: &impl Bboxable) -> bool {
+    fn prune(&self, a: &impl Bboxable, b: &impl Bboxable) -> bool {
         a.ray_candidate(b)
     }
 
@@ -721,7 +809,7 @@ fn scan_leaves<LC: Bboxable, RC: Bboxable, A: Accumulator>(
     acc: &mut A,
 ) -> bool {
     for (i, leaf) in right_leaves[lo..hi].iter().enumerate() {
-        if A::prune(query, leaf) {
+        if acc.prune(query, leaf) {
             acc.update(li, right_offset + lo + i);
             if acc.ready() {
                 return true;
@@ -746,7 +834,7 @@ fn descend_node<LC: Bboxable, RC: Bboxable, A: Accumulator>(
     pos: usize,
     acc: &mut A,
 ) -> bool {
-    if !A::prune(query, &right_boxes[bases[level] + pos]) {
+    if !acc.prune(query, &right_boxes[bases[level] + pos]) {
         return false;
     }
     let lo = pos * INDEX_FANOUT;
@@ -835,7 +923,7 @@ fn dual_recurse<AC: Bboxable, BC: Bboxable, A: Accumulator>(
 ) -> bool {
     let a_box = &a_boxes[a_bases[a_level] + a_pos];
     let b_box = &b_boxes[b_bases[b_level] + b_pos];
-    if !A::prune(a_box, b_box) {
+    if !acc.prune(a_box, b_box) {
         return false;
     }
 
@@ -958,19 +1046,41 @@ impl JoinableGeo {
     // group and early-exit.
     pub(crate) fn fold_for_grouped_check(&self, other: &JoinableGeo, acc: &mut impl Accumulator) {
         match self {
-            JoinableGeo::Point { points } => single_into(points, other, acc),
+            JoinableGeo::Point { points, .. } => single_into(points, other, acc),
             JoinableGeo::Line { lines, .. } => single_into(lines, other, acc),
             JoinableGeo::Poly { edges, .. } => single_into(edges, other, acc),
+        }
+    }
+
+    fn bounding_box(&self) -> Option<IndexBox> {
+        match self {
+            JoinableGeo::Point { index, .. } => index.boxes.last().copied(),
+            JoinableGeo::Line { lines, index } => index
+                .boxes
+                .last()
+                .copied()
+                .or_else(|| (!lines.is_empty()).then(|| union(lines))),
+            // A non-empty poly always has >= 3 edges, so its index is always built;
+            // an empty index means an empty poly, for which None is correct.
+            JoinableGeo::Poly { index, .. } => index.boxes.last().copied(),
+        }
+    }
+
+    // Whether this geo's overall bbox overlaps another's (false when either
+    // side is empty).
+    pub(crate) fn top_bbox_overlaps(&self, other: &JoinableGeo) -> bool {
+        match (self.bounding_box(), other.bounding_box()) {
+            (Some(a), Some(b)) => a.box_overlap(&b),
+            _ => false,
         }
     }
 
     // Order-independent descent: lockstep dual descent when both sides are indexed,
     // otherwise a single descent (iterate self, descend/scan other), same traversal a
     // fold_single call would produce.
-    #[allow(dead_code)] // used once more predicates (e.g. st_intersects) are implemented
     pub(crate) fn fold_for_unordered_check(&self, other: &JoinableGeo, acc: &mut impl Accumulator) {
         match self {
-            JoinableGeo::Point { points } => dual_into(points, None, other, acc),
+            JoinableGeo::Point { points, .. } => dual_into(points, None, other, acc),
             JoinableGeo::Line { lines, index, .. } => dual_into(lines, Some(index), other, acc),
             JoinableGeo::Poly { edges, index, .. } => dual_into(edges, Some(index), other, acc),
         }
@@ -1003,7 +1113,7 @@ impl JoinableGeo {
 // Resolves other for a single descent: descend its index or scan it.
 fn single_into<LC: Bboxable, A: Accumulator>(left: &[LC], other: &JoinableGeo, acc: &mut A) {
     match other {
-        JoinableGeo::Point { points } => single_descend(left, points, None, acc),
+        JoinableGeo::Point { points, .. } => single_descend(left, points, None, acc),
         JoinableGeo::Line { lines, index, .. } => single_descend(left, lines, Some(index), acc),
         JoinableGeo::Poly { edges, index, .. } => single_descend(left, edges, Some(index), acc),
     }
@@ -1011,7 +1121,6 @@ fn single_into<LC: Bboxable, A: Accumulator>(left: &[LC], other: &JoinableGeo, a
 
 // Resolves other for an order-independent descent: dual descent when both sides are indexed,
 // else fall back to a single descent (iterating left).
-#[allow(dead_code)] // used once more predicates (e.g. st_intersects) are implemented
 fn dual_into<LC: Bboxable, A: Accumulator>(
     left: &[LC],
     left_index: Option<&NaturalIndex>,
@@ -1019,7 +1128,7 @@ fn dual_into<LC: Bboxable, A: Accumulator>(
     acc: &mut A,
 ) {
     match other {
-        JoinableGeo::Point { points } => single_descend(left, points, None, acc),
+        JoinableGeo::Point { points, .. } => single_descend(left, points, None, acc),
         JoinableGeo::Line { lines, index, .. } => match left_index {
             Some(li) => run_dual(left, li, lines, index, acc),
             None => single_descend(left, lines, Some(index), acc),
@@ -1049,7 +1158,10 @@ pub(crate) fn point_on_segment_t(p: &Point, seg: &impl SegmentTrait) -> Option<f
 // The portion of left (in left's parameter, clamped to [0, 1]) covered by
 // right. Returns None when the two aren't collinear or the clamped overlap
 // is empty.
-pub(crate) fn covered_range(left: &LineSegment, right: &LineSegment) -> Option<(f64, f64)> {
+pub(crate) fn covered_range(
+    left: &impl SegmentTrait,
+    right: &impl SegmentTrait,
+) -> Option<(f64, f64)> {
     if !segments_collinear(left, right) {
         return None;
     }
@@ -1086,7 +1198,8 @@ pub(crate) fn ray_crosses_edge(p: &Point, edge: &Edge, next: &Edge) -> bool {
     if p.y == p1.y {
         return false; // first endpoint: owned by the previous edge
     }
-    edge.x_intercept_at_point(p) > p.x
+    // x_intercept_at_point returns None when p.y is outside the edge's y-span.
+    edge.x_intercept_at_point(p).is_some_and(|xi| xi > p.x)
 }
 
 // The ray-cast / midpoint classification of one left segment against one poly
@@ -1124,7 +1237,7 @@ pub(crate) fn midpoint_ray_check(
 // collinear with the segment. Both need to be checked to detect entring the edge
 // and leaving the edge.
 pub(crate) fn segment_crossing_check(
-    left: &LineSegment,
+    left: &impl SegmentTrait,
     edge: &Edge,
     next: &Edge,
 ) -> (bool, Option<f64>) {
@@ -1190,9 +1303,32 @@ pub(crate) fn segment_crossing_check(
     (false, None)
 }
 
-fn segments_collinear(a: &LineSegment, b: &LineSegment) -> bool {
+fn segments_collinear(a: &impl SegmentTrait, b: &impl SegmentTrait) -> bool {
     let (q1, q2) = b.as_points();
     a.is_collinear_with(q1) && a.is_collinear_with(q2)
+}
+
+// The parameters (t on a, u on b) of the intersection of two non-parallel
+// segments, when it lands within both segments ([0, 1] inclusive, so endpoints
+// count). None if there are no intersections.
+pub(crate) fn segment_intersection(
+    a: &impl SegmentTrait,
+    b: &impl SegmentTrait,
+) -> Option<(f64, f64)> {
+    let cross = a.dir().cross(&b.dir());
+    if cross.abs() < EPS {
+        return None;
+    }
+    let (a1, _) = a.as_points();
+    let (b1, _) = b.as_points();
+    let f = b1.diff(a1);
+    let t = -b.dir().cross(&f) / cross;
+    let u = -a.dir().cross(&f) / cross;
+    ((-EPS..=1.0 + EPS).contains(&t) && (-EPS..=1.0 + EPS).contains(&u)).then_some((t, u))
+}
+
+pub(crate) fn segments_cross(a: &impl SegmentTrait, b: &impl SegmentTrait) -> bool {
+    segment_intersection(a, b).is_some()
 }
 
 // How one left polygon edge relates to one right polygon edge (edge, interior wedge
