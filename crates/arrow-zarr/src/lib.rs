@@ -11,13 +11,79 @@
 // limitations under the License.
 
 pub mod zarr_store_opener;
-pub use zarr_store_opener::ZarrRecordBatchStream;
 
-#[cfg(feature = "datafusion")]
 pub mod table;
 
-#[cfg(feature = "datafusion")]
 pub mod geospatial;
+
+pub use session::{zarr_session_context, zarr_session_context_with_config};
+
+mod session {
+    use std::sync::Arc;
+
+    use datafusion::error::{DataFusionError, Result};
+    use datafusion::execution::SessionStateBuilder;
+    use datafusion::logical_expr::ScalarUDF;
+    use datafusion::physical_optimizer::optimizer::PhysicalOptimizer;
+    use datafusion::prelude::{SessionConfig, SessionContext};
+
+    use crate::geospatial::{
+        SpatialJoinPhysicalOptimizer, StAreaUdf, StContainsUdf, StCoveredByUdf, StCoversUdf,
+        StDWithinUdf, StDistanceUdf, StGeomFromWkbUdf, StGeomFromWktUdf, StIntersectsUdf,
+        StPointUdf, StTouchesUdf, StWithinUdf,
+    };
+    use crate::table::ZarrTableFactory;
+
+    /// A session context set up to query zarr stores and icechunk repos, with
+    /// the spatial functions and the spatial join optimization registered.
+    pub fn zarr_session_context() -> Result<SessionContext> {
+        zarr_session_context_with_config(SessionConfig::new())
+    }
+
+    /// Same as [`zarr_session_context`], starting from the given config.
+    pub fn zarr_session_context_with_config(config: SessionConfig) -> Result<SessionContext> {
+        // the spatial join must replace the nested loop join before the
+        // post-phase filter pushdown runs, since that's where the join creates
+        // and pushes its dynamic filter.
+        let mut rules = PhysicalOptimizer::new().rules;
+        let post_pushdown = rules
+            .iter()
+            .position(|rule| rule.name() == "FilterPushdown(Post)")
+            .ok_or_else(|| {
+                DataFusionError::Internal("post-phase filter pushdown rule not found".into())
+            })?;
+        rules.insert(post_pushdown, Arc::new(SpatialJoinPhysicalOptimizer));
+
+        let mut state = SessionStateBuilder::new()
+            .with_config(config)
+            .with_default_features()
+            .with_physical_optimizer_rules(rules)
+            .build();
+        state
+            .table_factories_mut()
+            .insert("ZARR_STORE".into(), Arc::new(ZarrTableFactory {}));
+        #[cfg(feature = "icechunk")]
+        state
+            .table_factories_mut()
+            .insert("ICECHUNK_REPO".into(), Arc::new(ZarrTableFactory {}));
+
+        let ctx = SessionContext::new_with_state(state);
+        ctx.register_udf(ScalarUDF::from(StAreaUdf::default()));
+        ctx.register_udf(ScalarUDF::from(StContainsUdf::default()));
+        ctx.register_udf(ScalarUDF::from(StCoveredByUdf::default()));
+        ctx.register_udf(ScalarUDF::from(StCoversUdf::default()));
+        ctx.register_udf(ScalarUDF::from(StDWithinUdf::default()));
+        ctx.register_udf(ScalarUDF::from(StDistanceUdf::default()));
+        ctx.register_udf(ScalarUDF::from(StGeomFromWkbUdf::default()));
+        ctx.register_udf(ScalarUDF::from(StGeomFromWktUdf::default()));
+        ctx.register_udf(ScalarUDF::from(StIntersectsUdf::default()));
+        ctx.register_udf(ScalarUDF::from(StPointUdf::default()));
+        ctx.register_udf(ScalarUDF::from(StTouchesUdf::default()));
+        ctx.register_udf(ScalarUDF::from(StWithinUdf::default()));
+
+        Ok(ctx)
+    }
+}
 
 #[cfg(test)]
 mod test_utils {
@@ -39,10 +105,12 @@ mod test_utils {
     use walkdir::WalkDir;
     use zarrs::array::data_type::{float64, numpy_datetime64};
     use zarrs::array::{codec, ArrayBuilder, ArraySubset, DataType, Element, FillValue};
+    #[cfg(feature = "icechunk")]
+    use zarrs::group::GroupBuilder;
     use zarrs::metadata_ext::data_type::NumpyTimeUnit;
-    #[cfg(all(feature = "icechunk", feature = "datafusion"))]
+    #[cfg(feature = "icechunk")]
     use zarrs_icechunk::icechunk::{ObjectStorage, Repository};
-    #[cfg(all(feature = "icechunk", feature = "datafusion"))]
+    #[cfg(feature = "icechunk")]
     use zarrs_icechunk::AsyncIcechunkStore;
     use zarrs_object_store::object_store::local::LocalFileSystem;
     use zarrs_object_store::AsyncObjectStore;
@@ -76,7 +144,6 @@ mod test_utils {
             self.store.clone()
         }
 
-        #[cfg(feature = "datafusion")]
         pub(crate) fn get_store_path(&self) -> String {
             self.path.as_os_str().to_str().unwrap().into()
         }
@@ -97,13 +164,13 @@ mod test_utils {
 
     // convenience class to make sure the local icechunk repos get cleanup
     // after we're done running a test.
-    #[cfg(all(feature = "icechunk", feature = "datafusion"))]
+    #[cfg(feature = "icechunk")]
     pub(crate) struct LocalIcechunkRepoWrapper {
         store: Arc<AsyncIcechunkStore>,
         path: PathBuf,
     }
 
-    #[cfg(all(feature = "icechunk", feature = "datafusion"))]
+    #[cfg(feature = "icechunk")]
     impl LocalIcechunkRepoWrapper {
         pub(crate) async fn new(store_name: String) -> Self {
             if store_name.is_empty() {
@@ -121,10 +188,9 @@ mod test_utils {
             .await
             .unwrap();
             let session = repo.writable_session("main").await.unwrap();
-            Self {
-                store: Arc::new(AsyncIcechunkStore::new(session)),
-                path: p,
-            }
+            let store = Arc::new(AsyncIcechunkStore::new(session));
+            write_root_group(store.clone()).await;
+            Self { store, path: p }
         }
 
         pub(crate) fn get_store(&self) -> Arc<AsyncIcechunkStore> {
@@ -136,7 +202,7 @@ mod test_utils {
         }
     }
 
-    #[cfg(all(feature = "icechunk", feature = "datafusion"))]
+    #[cfg(feature = "icechunk")]
     impl Drop for LocalIcechunkRepoWrapper {
         fn drop(&mut self) {
             if !self
@@ -747,7 +813,17 @@ mod test_utils {
         (wrapper, schema)
     }
 
-    #[cfg(all(feature = "icechunk", feature = "datafusion"))]
+    #[cfg(feature = "icechunk")]
+    async fn write_root_group(store: Arc<AsyncIcechunkStore>) {
+        GroupBuilder::new()
+            .build(store, "/")
+            .unwrap()
+            .async_store_metadata()
+            .await
+            .unwrap();
+    }
+
+    #[cfg(feature = "icechunk")]
     pub(crate) async fn get_local_icechunk_repo(
         write_data: bool,
         fillvalue: f64,
@@ -776,7 +852,7 @@ mod test_utils {
 
     // writes only the "/data" array (matching the data written by
     // write_lat_lon_data_to_store), with the given shift added to the values.
-    #[cfg(all(feature = "icechunk", feature = "datafusion"))]
+    #[cfg(feature = "icechunk")]
     async fn write_shifted_data_array(
         store: Arc<dyn AsyncReadableWritableListableStorageTraits>,
         shift: f64,
@@ -797,7 +873,7 @@ mod test_utils {
     // builds a local icechunk repo with three commits: the data is written with a
     // shift of 0, then 1, then 2. we record the snapshot id after the first push,
     // and create a tag.
-    #[cfg(all(feature = "icechunk", feature = "datafusion"))]
+    #[cfg(feature = "icechunk")]
     pub(crate) async fn get_local_icechunk_repo_multiple_commits(
         dir_name: &str,
     ) -> (LocalIcechunkRepoWrapper, SchemaRef, String, String) {
@@ -820,6 +896,7 @@ mod test_utils {
         let store = Arc::new(AsyncIcechunkStore::new(
             repo.writable_session("main").await.unwrap(),
         ));
+        write_root_group(store.clone()).await;
         write_lat_lon_data_to_store(store.clone(), true, 0.0).await;
         let snapshot_id = store
             .session()

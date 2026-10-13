@@ -10,7 +10,7 @@ crate-type = ["cdylib"]
 [dependencies]
 pyo3 = { version = "0.28", features = ["extension-module"] }
 arrow = { workspace = true, features = ["pyarrow"] }
-arrow-zarr = { workspace = true, features = ["datafusion", "icechunk"] }
+arrow-zarr = { workspace = true, features = ["icechunk"] }
 datafusion = { workspace = true }
 datafusion-ffi = "54.1.0"
 tokio = { workspace = true }

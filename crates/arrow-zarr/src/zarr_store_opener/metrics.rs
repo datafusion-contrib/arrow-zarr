@@ -10,7 +10,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::time::Duration;
+use std::future::Future;
+use std::time::{Duration, Instant};
 
 use datafusion::physical_plan::metrics::{Count, ExecutionPlanMetricsSet, MetricBuilder, Time};
 
@@ -44,8 +45,8 @@ impl ZarrMetrics {
         }
     }
 
-    // Build a bundle backed by a throwaway metrics set. Used in tests.
-    #[cfg(test)]
+    // Build a bundle backed by a throwaway metrics set, for streams that
+    // aren't driven by an execution plan that reports metrics.
     pub(crate) fn disconnected() -> Self {
         Self::new(&ExecutionPlanMetricsSet::default(), 0)
     }
@@ -56,6 +57,22 @@ impl ZarrMetrics {
 
     pub(crate) fn add_decode_time(&self, elapsed: Duration) {
         self.decode_time.add_duration(elapsed);
+    }
+
+    // awaits the future, adding the time it took to the i/o time.
+    pub(crate) async fn time_io<F: Future>(&self, fut: F) -> F::Output {
+        let start = Instant::now();
+        let output = fut.await;
+        self.add_io_time(start.elapsed());
+        output
+    }
+
+    // runs the function, adding the time it took to the decode time.
+    pub(crate) fn time_decode<R>(&self, f: impl FnOnce() -> R) -> R {
+        let start = Instant::now();
+        let output = f();
+        self.add_decode_time(start.elapsed());
+        output
     }
 
     pub(crate) fn add_total_time(&self, elapsed: Duration) {

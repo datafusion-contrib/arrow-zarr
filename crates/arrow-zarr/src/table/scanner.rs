@@ -10,7 +10,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use datafusion::common::Statistics;
 use datafusion::config::ConfigOptions;
@@ -27,16 +27,29 @@ use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, PhysicalExpr, PlanProperties,
     SendableRecordBatchStream,
 };
-use futures::{StreamExt, TryFutureExt};
+use futures::{FutureExt, StreamExt, TryFutureExt};
+use zarrs_storage::AsyncReadableListableStorageTraits;
 
 use super::config::ZarrTableConfig;
-use super::datafusion_filters::create_zarr_chunk_filter;
+use crate::zarr_store_opener::filter::ZarrChunkFilter;
 use crate::zarr_store_opener::metrics::ZarrMetrics;
-use crate::ZarrRecordBatchStream;
+use crate::zarr_store_opener::zarr_errors::ZarrQueryError;
+use crate::zarr_store_opener::zarr_store_interface::{
+    SharedZarrStoreInterface, ZarrStoreInterface,
+};
+use crate::zarr_store_opener::zarr_data_stream::ZarrRecordBatchStreamBuilder;
 
 #[derive(Debug, Clone)]
 pub struct ZarrScan {
     zarr_config: ZarrTableConfig,
+    // Lazily initialized on the first `execute()` call, then shared across
+    // all partitions, so that the store is opened, and the coordinates read,
+    // only once.
+    shared_zarr_store: Arc<
+        Mutex<
+            Option<SharedZarrStoreInterface<dyn AsyncReadableListableStorageTraits + Unpin + Send>>,
+        >,
+    >,
     filters: Option<Arc<dyn PhysicalExpr>>,
     // Dynamic filters pushed down from parents (e.g. the spatial join's
     // chunk-pruning filter). Accepted during filter pushdown and threaded into
@@ -64,6 +77,7 @@ impl ZarrScan {
 
         Self {
             zarr_config,
+            shared_zarr_store: Arc::new(Mutex::new(None)),
             filters,
             dynamic_filters: Vec::new(),
             plan_properties: Arc::new(plan_properties),
@@ -80,7 +94,15 @@ impl ZarrScan {
 
 impl DisplayAs for ZarrScan {
     fn fmt_as(&self, _t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "ZarrScan")
+        write!(f, "ZarrScan")?;
+        if let Some(filters) = &self.filters {
+            write!(f, ": filters=[{filters}]")?;
+        }
+        if !self.dynamic_filters.is_empty() {
+            let dynamic: Vec<String> = self.dynamic_filters.iter().map(|d| d.to_string()).collect();
+            write!(f, ", dynamic_filters=[{}]", dynamic.join(", "))?;
+        }
+        Ok(())
     }
 }
 
@@ -140,10 +162,11 @@ impl ExecutionPlan for ZarrScan {
         Ok(Some(Arc::new(new_plan)))
     }
 
-    // the only per-execution state we hold is the metrics set.
+    // the per-execution state is the metrics set and the shared store.
     fn reset_state(self: Arc<Self>) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
         let mut new_plan = self.as_ref().clone();
         new_plan.metrics = ExecutionPlanMetricsSet::default();
+        new_plan.shared_zarr_store = Arc::new(Mutex::new(None));
         Ok(Arc::new(new_plan))
     }
 
@@ -204,11 +227,46 @@ impl ExecutionPlan for ZarrScan {
             }
         };
 
+        let shared_zarr_store = {
+            let mut guard = self
+                .shared_zarr_store
+                .lock()
+                .map_err(|e| DataFusionError::Internal(e.to_string()))?;
+            if guard.is_none() {
+                // the coordinates are read once for all partitions, so their
+                // i/o is reported on partition 0.
+                let config = self.zarr_config.clone();
+                let metrics = ZarrMetrics::new(&self.metrics, 0);
+                let fut = async move {
+                    let (store, prefix) = config
+                        .get_store_pointer_and_prefix()
+                        .await
+                        .map_err(|e| Arc::new(ZarrQueryError::from(e)))?;
+                    ZarrStoreInterface::new(
+                        store,
+                        prefix,
+                        config.get_projected_schema_ref(),
+                        &metrics,
+                    )
+                    .await
+                    .map(Arc::new)
+                    .map_err(Arc::new)
+                };
+                *guard = Some(fut.boxed().shared());
+            }
+            guard
+                .as_ref()
+                .ok_or_else(|| {
+                    DataFusionError::Internal("zarr store future not initialized".into())
+                })?
+                .clone()
+        };
+
         // the zarr reader does all the real work (store access, projection,
         // partitioning, chunk-level filtering), so there's no file layer to
         // manage here. we just build the reader stream and hand it to
-        // datafusion. `execute` has to return synchronously, but opening the
-        // store is async, so we wrap the async construction in a future that
+        // datafusion. `execute` has to return synchronously, but building the
+        // stream is async, so we wrap the async construction in a future that
         // resolves to the stream and flatten it.
         let config = self.zarr_config.clone();
         let filter_expr = self.filters.clone();
@@ -220,23 +278,26 @@ impl ExecutionPlan for ZarrScan {
         let stream_fut = async move {
             let filter = filter_expr
                 .as_ref()
-                .map(|f| create_zarr_chunk_filter(f, config.get_schema_ref()))
+                .map(|f| ZarrChunkFilter::new(f, config.get_schema_ref()))
                 .transpose()?;
-            let (store, prefix) = config.get_store_pointer_and_prefix().await?;
-            let inner = ZarrRecordBatchStream::try_new(
-                store,
-                config.get_schema_ref(),
-                prefix,
-                config.get_projection(),
+            let mut builder = ZarrRecordBatchStreamBuilder::new(
+                shared_zarr_store,
+                config.get_projected_schema_ref(),
                 n_partitions,
                 partition,
-                filter,
-                dynamic_filters,
-                metrics,
-                limit,
             )
-            .await
-            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+            .with_dynamic_filters(dynamic_filters)
+            .with_metrics(metrics);
+            if let Some(filter) = filter {
+                builder = builder.with_filter(filter);
+            }
+            if let Some(limit) = limit {
+                builder = builder.with_limit(limit);
+            }
+            let inner = builder
+                .build()
+                .await
+                .map_err(|e| DataFusionError::External(Box::new(e)))?;
             Ok::<_, DataFusionError>(inner.map(|batch| batch.map_err(DataFusionError::from)))
         };
 
