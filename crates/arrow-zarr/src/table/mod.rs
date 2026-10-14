@@ -11,13 +11,12 @@
 // limitations under the License.
 
 pub(crate) mod config;
-pub(crate) mod datafusion_filters;
 pub mod register;
 pub(crate) mod scanner;
 pub(crate) mod table_provider;
 
-pub use config::{
-    IcechunkUrlBuilder, IcechunkVersion, ZarrTableConfig, ZarrTableUrl, ZarrUrlBuilder,
-};
+#[cfg(feature = "icechunk")]
+pub use config::{IcechunkUrlBuilder, IcechunkVersion};
+pub use config::{ZarrTableConfig, ZarrTableUrl, ZarrUrlBuilder};
 pub use register::RegisterZarr;
 pub use table_provider::{ZarrTable, ZarrTableFactory};

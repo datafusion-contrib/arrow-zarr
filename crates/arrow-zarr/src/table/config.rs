@@ -28,6 +28,7 @@ use zarrs::array::data_type::{
 };
 use zarrs::array::{Array, DataType as zarr_dtype};
 use zarrs::metadata_ext::data_type::NumpyTimeUnit;
+use zarrs::node::{async_get_child_nodes, NodeMetadata, NodePath};
 // the icechunk crate is used via zarrs_icechunk's re-export (rather than
 // a direct dependency) to keep the two in lockstep.
 #[cfg(feature = "icechunk")]
@@ -53,9 +54,10 @@ use zarrs_object_store::object_store::aws::AmazonS3Builder;
 use zarrs_object_store::object_store::gcp::{GoogleCloudStorageBuilder, GoogleConfigKey};
 use zarrs_object_store::object_store::local::LocalFileSystem;
 use zarrs_object_store::AsyncObjectStore;
-use zarrs_storage::{AsyncReadableListableStorageTraits, StorePrefix};
+use zarrs_storage::AsyncReadableListableStorageTraits;
 
-use crate::zarr_store_opener::zarr_data_stream::{resolve_vector, ZarrBroadcastableCoordinates};
+use crate::zarr_store_opener::util::NumElements;
+use crate::zarr_store_opener::zarr_store_interface::is_1d_coordinate_from_meta;
 
 // Cached, projection-independent ingredients for computing scan statistics.
 #[derive(Clone, Debug, Default)]
@@ -92,10 +94,11 @@ impl ZarrStatsBase {
             return Ok(stats);
         }
 
-        // reuse the reader's classification + resolution so the row count is
-        // broadcast-aware in exactly the same way the scan produces rows.
-        let mut array_dims: HashMap<String, (Option<Vec<String>>, usize)> = HashMap::new();
-        let mut shapes: HashMap<String, Vec<u64>> = HashMap::new();
+        // mirrors how the scan produces rows: when data arrays are projected the
+        // rows span the full data shape (which all data arrays share), when only
+        // 1-D coordinates are projected the rows span just their dimensions.
+        let mut data_shape: Option<&Vec<u64>> = None;
+        let mut coord_rows: u64 = 1;
         for c in columns {
             let Some(shape) = self.column_dims.get(c) else {
                 // every array is recorded in `column_dims` at schema inference,
@@ -105,18 +108,26 @@ impl ZarrStatsBase {
                     "zarr stats base is missing shape info for projected column '{c}'"
                 )));
             };
-            array_dims.insert(
-                c.to_string(),
-                (self.column_dim_names.get(c).cloned(), shape.len()),
-            );
-            shapes.insert(c.to_string(), shape.clone());
+            let dim_names = self.column_dim_names.get(c).map(Vec::as_slice);
+
+            if is_1d_coordinate_from_meta(c, dim_names, shape.len()) {
+                coord_rows *= shape[0];
+            } else {
+                match data_shape {
+                    Some(existing) if existing != shape => {
+                        return Err(DataFusionError::Execution(format!(
+                            "Shape of array {c} doesn't match the shape of the other data arrays"
+                        )));
+                    }
+                    _ => data_shape = Some(shape),
+                }
+            }
         }
 
-        let coords = ZarrBroadcastableCoordinates::new(&array_dims, projected_schema.clone())
-            .map_err(|e| DataFusionError::External(Box::new(e)))?;
-        let resolved =
-            resolve_vector(&coords, shapes).map_err(|e| DataFusionError::External(Box::new(e)))?;
-        let num_rows = resolved.iter().product::<u64>();
+        let num_rows = match data_shape {
+            Some(shape) => shape.num_elements(),
+            None => coord_rows,
+        };
 
         Ok(stats.with_num_rows(Precision::Exact(num_rows as usize)))
     }
@@ -168,10 +179,6 @@ impl ZarrTableConfig {
     pub(crate) fn with_projection(mut self, projection: Vec<usize>) -> Self {
         self.projection = Some(projection);
         self
-    }
-
-    pub(crate) fn get_projection(&self) -> Option<Vec<usize>> {
-        self.projection.clone()
     }
 
     pub(crate) fn get_schema_ref(&self) -> SchemaRef {
@@ -233,6 +240,10 @@ impl IcechunkVersion {
 pub struct IcechunkConfig {
     version: IcechunkVersion,
     repo_config: RepositoryConfig,
+    // A group inside the repo. unlike plain zarr stores, where a group is
+    // part of the url, the url of an icechunk repo only locates the repo,
+    // so the group is applied as a key prefix on the opened session.
+    group: Option<String>,
 }
 
 // The S3 connection config for an icechunk repo. This uses icechunk's own
@@ -294,13 +305,11 @@ async fn open_icechunk_session(
     object_storage: ObjectStorage,
     icechunk: &IcechunkConfig,
 ) -> DfResult<Arc<dyn AsyncReadableListableStorageTraits + Unpin + Send>> {
-    let repo = Repository::open(
-        Some(icechunk.repo_config.clone()),
-        Arc::new(object_storage),
-        HashMap::new(),
-    )
-    .await
-    .map_err(|e| DataFusionError::External(Box::new(e)))?;
+    let repo = Repository::open(Arc::new(object_storage))
+        .config(icechunk.repo_config.clone())
+        .execute()
+        .await
+        .map_err(|e| DataFusionError::External(Box::new(e)))?;
     let version_info = icechunk.version.to_version_info()?;
     let session = repo
         .readonly_session(&version_info)
@@ -371,7 +380,10 @@ impl ZarrTableUrl {
                         )))
                     }
                 };
-                Ok((open_icechunk_session(object_storage, icechunk).await?, None))
+                Ok((
+                    open_icechunk_session(object_storage, icechunk).await?,
+                    icechunk.group.clone(),
+                ))
             }
 
             // an icechunk repo on s3, with user-configured icechunk `S3Options` /
@@ -405,7 +417,10 @@ impl ZarrTableUrl {
                 .await
                 .map_err(|e| DataFusionError::External(Box::new(e)))?;
 
-                Ok((open_icechunk_session(object_storage, icechunk).await?, None))
+                Ok((
+                    open_icechunk_session(object_storage, icechunk).await?,
+                    icechunk.group.clone(),
+                ))
             }
 
             // an icechunk repo on gcs, with user-configured icechunk `GcsCredentials`
@@ -432,7 +447,10 @@ impl ZarrTableUrl {
                 )
                 .map_err(|e| DataFusionError::External(Box::new(e)))?;
 
-                Ok((open_icechunk_session(object_storage, icechunk).await?, None))
+                Ok((
+                    open_icechunk_session(object_storage, icechunk).await?,
+                    icechunk.group.clone(),
+                ))
             }
         }
     }
@@ -443,66 +461,60 @@ impl ZarrTableUrl {
             .as_ref()
             .map_or("".into(), |p| p.to_owned() + "/");
 
-        // zarr has no inherent column order, so we need to impose a deterministic
-        // one. `list_prefix` returns the array prefixes in lexicographic order, so
-        // the fields below end up sorted by array name without an explicit sort.
-        // downstream code (and the test helpers) rely on this alphabetical ordering.
-        let prefixes = store
-            .list_prefix(
-                &StorePrefix::new(store_prefix.to_owned())
-                    .map_err(|e| DataFusionError::External(Box::new(e)))?,
-            )
+        // a table is made of the arrays directly inside the group it points at,
+        // child groups are skipped. only the direct children are listed, a
+        // recursive listing would also enumerate every chunk key, which is very
+        // expensive on large stores (for icechunk it requires loading every
+        // manifest).
+        let group_path = NodePath::new(&format!("/{}", store_prefix.trim_end_matches('/')))
+            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+        let children = async_get_child_nodes(&store, &group_path, false)
             .await
             .map_err(|e| DataFusionError::External(Box::new(e)))?;
-        let mut fields = Vec::with_capacity(prefixes.len());
+
+        // zarr has no inherent column order, so we need to impose a deterministic
+        // one. downstream code (and the test helpers) rely on this alphabetical
+        // ordering.
+        let mut arrays: Vec<(String, ArrayMetadata)> = children
+            .iter()
+            .filter_map(|node| match node.metadata() {
+                NodeMetadata::Array(meta) => Some((node.path().as_str().to_string(), meta.clone())),
+                NodeMetadata::Group(_) => None,
+            })
+            .collect();
+        arrays.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let mut fields = Vec::with_capacity(arrays.len());
         let mut stats_base = ZarrStatsBase::default();
 
-        for prefix in prefixes {
-            if prefix.as_str().contains("zarr.json") {
-                let field_name = prefix.parent();
-                if field_name.as_str() == "" {
-                    continue;
-                }
+        for (array_path, array_meta) in arrays {
+            let field_name = array_path
+                .rsplit('/')
+                .next()
+                .unwrap_or(&array_path)
+                .to_string();
 
-                // this is ugly, but I'm not sure there's a better way
-                // to extract the array name...
-                let field_name_prefix = field_name.parent();
-                let mut field_name = field_name
-                    .as_str()
-                    .strip_suffix("/")
-                    .ok_or(DataFusionError::Execution(
-                        "Invalid directory name in zarr store".into(),
-                    ))?
-                    .to_string();
-                let read_prefix = field_name.clone();
-                if let Some(field_name_prefix) = field_name_prefix {
-                    let to_remove = field_name_prefix.as_str();
-                    field_name = field_name.replace(to_remove, "");
-                }
+            let arr = Array::new_with_metadata(store.clone(), &array_path, array_meta)
+                .map_err(|e| DataFusionError::External(Box::new(e)))?;
+            let meta = match arr.metadata() {
+                ArrayMetadata::V3(meta) => Ok(meta),
+                _ => Err(DataFusionError::Execution(
+                    "Only Zarr v3 metadata is supported".into(),
+                )),
+            }?;
 
-                let arr = Array::async_open(store.clone(), &("/".to_owned() + &read_prefix))
-                    .await
-                    .map_err(|e| DataFusionError::External(Box::new(e)))?;
-                let meta = match arr.metadata() {
-                    ArrayMetadata::V3(meta) => Ok(meta),
-                    _ => Err(DataFusionError::Execution(
-                        "Only Zarr v3 metadata is supported".into(),
-                    )),
-                }?;
+            // capture the array's shape and dimension names for statistics.
+            let dim_names: Option<Vec<String>> = arr
+                .dimension_names()
+                .clone()
+                .and_then(|names| names.into_iter().collect::<Option<Vec<String>>>());
+            stats_base.add_array(&field_name, arr.shape(), dim_names);
 
-                // capture the array's shape and dimension names for statistics.
-                let dim_names: Option<Vec<String>> = arr
-                    .dimension_names()
-                    .clone()
-                    .and_then(|names| names.into_iter().collect::<Option<Vec<String>>>());
-                stats_base.add_array(&field_name, arr.shape(), dim_names);
-
-                fields.push(Field::new(
-                    field_name,
-                    get_schema_type(&meta.data_type)?,
-                    true,
-                ));
-            }
+            fields.push(Field::new(
+                field_name,
+                get_schema_type(&meta.data_type)?,
+                true,
+            ));
         }
 
         Ok((Arc::new(Schema::new(Fields::from(fields))), stats_base))
@@ -991,10 +1003,23 @@ impl IcechunkUrlBuilder {
             "snapshot_id" => {
                 self.with_icechunk_version(IcechunkVersion::SnapshotId(value.to_string()))
             }
+            "group" => self.with_icechunk_group(value),
             other => Err(DataFusionError::Execution(format!(
-                "unknown icechunk option '{other}' (expected one of: branch, tag, snapshot_id)"
+                "unknown icechunk option '{other}' (expected one of: branch, tag, snapshot_id, group)"
             ))),
         }
+    }
+
+    pub fn with_icechunk_group(mut self, group: impl Into<String>) -> DfResult<Self> {
+        let group = group.into();
+        let group = group.trim_matches('/');
+        if group.is_empty() {
+            return Err(DataFusionError::Execution(
+                "icechunk.group must be a non-empty path".into(),
+            ));
+        }
+        self.icechunk.group = Some(group.to_string());
+        Ok(self)
     }
 
     pub fn with_icechunk_version(mut self, version: IcechunkVersion) -> DfResult<Self> {
@@ -1097,6 +1122,9 @@ impl IcechunkUrlBuilder {
     pub fn with_s3_anonymous(mut self, anonymous: bool) -> DfResult<Self> {
         let mut b = self.take_s3()?;
         b.anonymous = anonymous;
+        // icechunk applies `S3Options::anonymous` after the credentials, so it
+        // must agree with `S3Credentials::Anonymous` or it overrides it.
+        b.options = b.options.with_anonymous(anonymous);
         self.s3 = Some(b);
         Ok(self)
     }

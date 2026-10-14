@@ -11,9 +11,12 @@
 // limitations under the License.
 
 use std::error::Error;
+use std::sync::Arc;
 
 use arrow::error::ArrowError;
+use datafusion::error::DataFusionError;
 use zarrs::array::codec::api::CodecError;
+use zarrs::array::data_type::api::DataTypeFillValueError;
 use zarrs::array::{ArrayCreateError, ArrayError, ElementError};
 use zarrs_storage::{StorageError, StorePrefixError};
 
@@ -41,6 +44,16 @@ impl std::fmt::Display for ZarrQueryError {
 }
 
 impl Error for ZarrQueryError {}
+
+impl ZarrQueryError {
+    pub(crate) fn array_not_in_store(name: &str) -> Self {
+        Self::InvalidColumnRequest(format!("Array '{name}' not found in store"))
+    }
+
+    pub(crate) fn array_not_in_chunk(name: &str) -> Self {
+        Self::InvalidColumnRequest(format!("Array '{name}' missing from chunk"))
+    }
+}
 
 /// [`ZarrQueryError`]` from various extrenal errors.
 impl From<StorageError> for ZarrQueryError {
@@ -73,6 +86,12 @@ impl From<ArrayError> for ZarrQueryError {
     }
 }
 
+impl From<DataTypeFillValueError> for ZarrQueryError {
+    fn from(e: DataTypeFillValueError) -> ZarrQueryError {
+        ZarrQueryError::Zarrs(Box::new(e))
+    }
+}
+
 impl From<ElementError> for ZarrQueryError {
     fn from(e: ElementError) -> ZarrQueryError {
         ZarrQueryError::Zarrs(Box::new(e))
@@ -87,6 +106,19 @@ impl From<ArrowError> for ZarrQueryError {
 
 impl From<std::io::Error> for ZarrQueryError {
     fn from(e: std::io::Error) -> ZarrQueryError {
+        ZarrQueryError::External(Box::new(e))
+    }
+}
+
+impl From<DataFusionError> for ZarrQueryError {
+    fn from(e: DataFusionError) -> ZarrQueryError {
+        ZarrQueryError::External(Box::new(e))
+    }
+}
+
+// the error from a shared future, which is wrapped in an Arc.
+impl From<Arc<ZarrQueryError>> for ZarrQueryError {
+    fn from(e: Arc<ZarrQueryError>) -> ZarrQueryError {
         ZarrQueryError::External(Box::new(e))
     }
 }

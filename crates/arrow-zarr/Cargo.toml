@@ -12,7 +12,6 @@ rust-version = "1.94"
 [features]
 default = []
 icechunk = ["dep:zarrs_icechunk"]
-datafusion = ["dep:datafusion"]
 s3 = ["zarrs_object_store/aws"]
 gcs = ["zarrs_object_store/gcp"]
 
@@ -24,7 +23,7 @@ async-stream = "0.3"
 async-trait = { version = "0.1.89" }
 bytes = { version = "1.12.1" }
 chrono = { version = "0.4.42" }
-datafusion = { workspace = true, optional = true }
+datafusion = { workspace = true }
 futures = { version = "0.3.31" }
 futures-util = { version = "0.3.31" }
 geo-index = "0.3"
@@ -37,7 +36,7 @@ tokio = { workspace = true }
 tokio-test = { version = "0.4.4" }
 wkb = { version = "0.9.2" }
 wkt = "0.10"
-zarrs = { version = "0.23.13", features = ["async"] }
+zarrs = { version = "0.23.13", features = ["async", "pcodec"] }
 zarrs_filesystem = { version = "0.3.0" }
 zarrs_icechunk = { version = "0.5.1", optional = true }
 zarrs_metadata = { version = "0.7.5" }
@@ -47,15 +46,8 @@ zarrs_storage = { version = "0.4.0", features = ["async"] }
 [dev-dependencies]
 parquet = { version = "55", features = ["arrow"] }
 geos = { version = "8" }
-criterion = { version = "0.7.0", features = ["async_tokio"] }
 walkdir = { version = "2.5.0" }
 
-[[bench]]
-name = "s3_bench"
-harness = false
+[[example]]
+name = "overture_era5_join"
 required-features = ["icechunk", "s3"]
-
-[[bench]]
-name = "gcs_bench"
-harness = false
-required-features = ["icechunk", "gcs"]
