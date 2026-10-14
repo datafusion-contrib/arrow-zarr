@@ -352,13 +352,12 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrRecordBatchSt
     // Convert this into a `ZarrRecordBatchStream`, using the `async-stream` crate to handle the
     // low-level specifics of stream polling.
     fn into_stream(mut self) -> ZarrRecordBatchStream {
-        let schema = self.projected_schema_ref.clone();
         let stream = Box::pin(try_stream! {
             while let Some(batch) = self.next_chunk().await? {
                 yield batch;
             }
         });
-        ZarrRecordBatchStream { stream, schema }
+        ZarrRecordBatchStream { stream }
     }
 
     fn pop_chunk_idx(&mut self) -> Option<Vec<u64>> {
@@ -392,7 +391,6 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrRecordBatchSt
 // [`RecordBatchStream`]: https://docs.rs/datafusion/latest/datafusion/execution/trait.RecordBatchStream.html
 pub(crate) struct ZarrRecordBatchStream {
     stream: BoxStream<'static, Result<RecordBatch, ArrowError>>,
-    schema: SchemaRef,
 }
 
 // A builder for a [`ZarrRecordBatchStream`]. Everything other than the store,
@@ -506,21 +504,8 @@ impl<T: AsyncReadableListableStorageTraits + ?Sized + 'static> ZarrRecordBatchSt
         }
 
         Ok(ZarrRecordBatchStream {
-            schema: inner.projected_schema_ref.clone(),
             stream: inner.into_stream().stream,
         })
-    }
-}
-
-impl ZarrRecordBatchStream {
-    /// A reference to the schema of the record batches produced by this stream.
-    pub fn schema_ref(&self) -> &SchemaRef {
-        &self.schema
-    }
-
-    /// The schema of the record batches produced by this stream.
-    pub fn schema(&self) -> SchemaRef {
-        self.schema.clone()
     }
 }
 

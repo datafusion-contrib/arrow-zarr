@@ -181,10 +181,6 @@ impl ZarrTableConfig {
         self
     }
 
-    pub(crate) fn get_projection(&self) -> Option<Vec<usize>> {
-        self.projection.clone()
-    }
-
     pub(crate) fn get_schema_ref(&self) -> SchemaRef {
         self.schema_ref.clone()
     }
@@ -309,13 +305,11 @@ async fn open_icechunk_session(
     object_storage: ObjectStorage,
     icechunk: &IcechunkConfig,
 ) -> DfResult<Arc<dyn AsyncReadableListableStorageTraits + Unpin + Send>> {
-    let repo = Repository::open(
-        Some(icechunk.repo_config.clone()),
-        Arc::new(object_storage),
-        HashMap::new(),
-    )
-    .await
-    .map_err(|e| DataFusionError::External(Box::new(e)))?;
+    let repo = Repository::open(Arc::new(object_storage))
+        .config(icechunk.repo_config.clone())
+        .execute()
+        .await
+        .map_err(|e| DataFusionError::External(Box::new(e)))?;
     let version_info = icechunk.version.to_version_info()?;
     let session = repo
         .readonly_session(&version_info)

@@ -33,11 +33,11 @@ use zarrs_storage::AsyncReadableListableStorageTraits;
 use super::config::ZarrTableConfig;
 use crate::zarr_store_opener::filter::ZarrChunkFilter;
 use crate::zarr_store_opener::metrics::ZarrMetrics;
+use crate::zarr_store_opener::zarr_data_stream::ZarrRecordBatchStreamBuilder;
 use crate::zarr_store_opener::zarr_errors::ZarrQueryError;
 use crate::zarr_store_opener::zarr_store_interface::{
     SharedZarrStoreInterface, ZarrStoreInterface,
 };
-use crate::zarr_store_opener::zarr_data_stream::ZarrRecordBatchStreamBuilder;
 
 #[derive(Debug, Clone)]
 pub struct ZarrScan {

@@ -178,13 +178,10 @@ mod test_utils {
             }
             let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(store_name);
             fs::create_dir(p.clone()).unwrap();
-            let repo = Repository::create(
-                None,
-                Arc::new(ObjectStorage::new_local_filesystem(&p).await.unwrap()),
-                HashMap::new(),
-                None,
-                true,
-            )
+            let repo = Repository::create(Arc::new(
+                ObjectStorage::new_local_filesystem(&p).await.unwrap(),
+            ))
+            .execute()
             .await
             .unwrap();
             let session = repo.writable_session("main").await.unwrap();
@@ -882,13 +879,10 @@ mod test_utils {
         }
         let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(dir_name);
         fs::create_dir(p.clone()).unwrap();
-        let repo = Repository::create(
-            None,
-            Arc::new(ObjectStorage::new_local_filesystem(&p).await.unwrap()),
-            HashMap::new(),
-            None,
-            true,
-        )
+        let repo = Repository::create(Arc::new(
+            ObjectStorage::new_local_filesystem(&p).await.unwrap(),
+        ))
+        .execute()
         .await
         .unwrap();
 
