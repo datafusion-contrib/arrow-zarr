@@ -286,7 +286,7 @@ pub enum ZarrTableUrl {
     },
     // Only credentials are configurable for gcs icechunk repos: icechunk's
     // `new_gcs` takes its options as a `HashMap` keyed by object_store 0.14's
-    // `GoogleConfigKey`, a type arrow-zarr can't name (it builds against
+    // `GoogleConfigKey`, a type spatialchunk can't name (it builds against
     // object_store 0.13 to stay in sync with zarrs). arbitrary gcs options
     // are unsupported for now.
     #[cfg(all(feature = "icechunk", feature = "gcs"))]

@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/arrow-zarr", "crates/zarr-datafusion-python"]
+members = ["crates/spatialchunk", "crates/spatialchunk-python"]
 resolver = "2"
 
 [workspace.package]
@@ -7,11 +7,11 @@ version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
 authors = ["Maxime Dion <maxdion@gmail.com>"]
-repository = "https://github.com/datafusion-contrib/arrow-zarr"
-homepage = "https://github.com/datafusion-contrib/arrow-zarr"
+repository = "https://github.com/maximedion2/spatialchunk"
+homepage = "https://github.com/maximedion2/spatialchunk"
 
 [workspace.dependencies]
-arrow-zarr = { path = "crates/arrow-zarr" }
+spatialchunk = { path = "crates/spatialchunk" }
 
 # Arrow deps
 arrow = { version = "58.3.0" }

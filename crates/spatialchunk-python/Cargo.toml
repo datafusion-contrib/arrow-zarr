@@ -1,16 +1,16 @@
 [package]
-name = "zarr-datafusion-python"
+name = "spatialchunk-python"
 version = "0.1.0"
 edition = "2021"
 
 [lib]
-name = "zarr_datafusion_python"
+name = "spatialchunk_python"
 crate-type = ["cdylib"]
 
 [dependencies]
 pyo3 = { version = "0.28", features = ["extension-module"] }
 arrow = { workspace = true, features = ["pyarrow"] }
-arrow-zarr = { workspace = true, features = ["icechunk"] }
+spatialchunk = { workspace = true, features = ["icechunk"] }
 datafusion = { workspace = true }
 datafusion-ffi = "54.1.0"
 tokio = { workspace = true }
