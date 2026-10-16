@@ -13,10 +13,10 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use arrow_zarr::zarr_session_context;
 use datafusion::arrow::util::pretty::pretty_format_batches;
 use datafusion::datasource::listing::ListingTableUrl;
 use datafusion::error::Result;
+use spatialchunk::zarr_session_context;
 use zarrs_object_store::object_store::aws::AmazonS3Builder;
 
 #[tokio::main]
@@ -99,6 +99,11 @@ async fn main() -> Result<()> {
 
     // run the query with and without the spatial join's dynamic filter, which
     // prunes the era5 chunks that can't match any county.
+    //
+    // I think most of the time is spent on reading data so it depends on connection
+    // speed rather than cpu performance, but on an okay but not great connection
+    // enabling the dynamic filter pushdown reduces the query time from ~2700 secs
+    // to about ~35 secs.
     let mut results = Vec::new();
     for join_dynamic_filters in [true, false] {
         ctx.sql(&format!(

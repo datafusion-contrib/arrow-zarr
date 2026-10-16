@@ -1,4 +1,4 @@
-name: Rust
+name: lint
 
 on:
   push:
@@ -10,8 +10,6 @@ jobs:
   check-fmt:
     name: Check cargo fmt
     runs-on: ubuntu-latest
-    container:
-      image: amd64/rust
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
@@ -22,7 +20,7 @@ jobs:
         run: cargo +nightly-2025-05-14 fmt -- --check --unstable-features --config imports_granularity=Module,group_imports=StdExternalCrate
 
   check-clippy-all-features:
-    name: Check cargo clippy
+    name: Check cargo clippy (all features)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -36,7 +34,7 @@ jobs:
 
   # Check clippy without features, helps to catch missing feature configurations
   check-clippy-no-features:
-    name: Check cargo clippy
+    name: Check cargo clippy (no features)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -47,13 +45,3 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libgeos-dev
       - name: Run check
         run: cargo clippy --all-targets -- -D warnings
-
-  test:
-    name: Run unit tests
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v4
-    - uses: dtolnay/rust-toolchain@stable
-    - name: Install dependencies
-      run: sudo apt-get update && sudo apt-get install -y libgeos-dev
-    - run: cargo test -p arrow-zarr --features icechunk,s3,gcs

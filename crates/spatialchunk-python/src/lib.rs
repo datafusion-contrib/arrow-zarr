@@ -13,10 +13,7 @@
 use datafusion::prelude::SessionContext;
 use pyo3::prelude::*;
 
-#[pyclass(
-    name = "GeospatialSessionContext",
-    module = "zarr_datafusion._internal"
-)]
+#[pyclass(name = "GeospatialSessionContext", module = "spatialchunk._internal")]
 pub struct PyGeospatialSessionContext {
     #[allow(dead_code)] // retained for upcoming geospatial session methods
     ctx: SessionContext,
