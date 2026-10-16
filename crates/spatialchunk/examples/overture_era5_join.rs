@@ -13,10 +13,10 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use spatialchunk::zarr_session_context;
 use datafusion::arrow::util::pretty::pretty_format_batches;
 use datafusion::datasource::listing::ListingTableUrl;
 use datafusion::error::Result;
+use spatialchunk::zarr_session_context;
 use zarrs_object_store::object_store::aws::AmazonS3Builder;
 
 #[tokio::main]
